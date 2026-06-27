@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -9,7 +9,6 @@ const buildDir = join(llamaDir, "build");
 const libexec = join(root, "libexec");
 const wrapperSource = join(root, "native", "llama", "clap-llama.cpp");
 const wrapperOutput = join(libexec, "clap-llama");
-const llamaCliOutput = join(libexec, "llama-cli");
 
 if (!existsSync(llamaDir)) {
   console.error("llama.cpp is not vendored. Run: bun run runtime:llama:vendor");
@@ -23,7 +22,7 @@ const configure = [
   "-DCMAKE_BUILD_TYPE=Release",
   "-DBUILD_SHARED_LIBS=OFF",
   "-DLLAMA_BUILD_TESTS=OFF",
-  "-DLLAMA_BUILD_EXAMPLES=ON",
+  "-DLLAMA_BUILD_EXAMPLES=OFF",
   "-DLLAMA_CURL=OFF",
   "-DGGML_NATIVE=ON",
 ];
@@ -34,32 +33,45 @@ if (process.platform === "darwin") {
 }
 
 await run(configure);
-await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama-cli", "-j"]);
-
-const llamaCli = findFirst([
-  join(buildDir, "bin", "llama-cli"),
-  join(buildDir, "examples", "main", "llama-cli"),
-  join(buildDir, "bin", "Release", "llama-cli"),
-]);
-if (!llamaCli) {
-  console.error(`llama-cli was not produced under ${buildDir}`);
-  process.exit(1);
-}
+await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j"]);
 
 await mkdir(libexec, { recursive: true });
-await copyFile(llamaCli, llamaCliOutput);
-await chmod(llamaCliOutput, 0o755);
 
 const cxx = process.env.CXX ?? "c++";
-await run([cxx, "-std=c++17", "-O2", wrapperSource, "-o", wrapperOutput]);
+const compile = [
+  cxx,
+  "-std=c++17",
+  "-O2",
+  wrapperSource,
+  "-I", join(llamaDir, "include"),
+  "-I", join(llamaDir, "ggml", "include"),
+  "-I", join(llamaDir, "ggml", "src"),
+  "-L", join(buildDir, "src"),
+  "-L", join(buildDir, "ggml", "src"),
+  "-L", join(buildDir, "ggml", "src", "ggml-cpu"),
+  "-lllama",
+  "-lggml",
+  "-lggml-base",
+  "-lggml-cpu",
+];
+
+if (process.platform === "darwin") {
+  compile.push(
+    "-L", join(buildDir, "ggml", "src", "ggml-metal"),
+    "-L", join(buildDir, "ggml", "src", "ggml-blas"),
+    "-lggml-metal",
+    "-lggml-blas",
+    "-framework", "Foundation",
+    "-framework", "Metal",
+    "-framework", "MetalKit",
+    "-framework", "Accelerate",
+  );
+}
+
+await run([...compile, "-o", wrapperOutput]);
 await chmod(wrapperOutput, 0o755);
 
 console.log(`built ${wrapperOutput}`);
-console.log(`bundled ${llamaCliOutput}`);
-
-function findFirst(paths: string[]): string | undefined {
-  return paths.find((path) => existsSync(path));
-}
 
 async function run(command: string[]) {
   const proc = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });

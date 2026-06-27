@@ -2,6 +2,7 @@ import { isGgufModel, llamaBackendStatus } from "@clap/runtime-llama";
 import { isMlxModelDirectorySync, mlxBackendStatus } from "@clap/runtime-mlx";
 
 export { ModelLifecycleManager, normalizeKeepAlive, parseKeepAliveMs, modelLifecycleKey } from "./lifecycle";
+export { ResidentWorkerProcess, ResidentWorkerRegistry } from "./resident";
 
 export function listBackends() {
   return [llamaBackendStatus(), mlxBackendStatus()];

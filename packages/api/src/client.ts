@@ -12,6 +12,8 @@ import {
   OpenAIModelsResponseSchema,
   PullModelRequestSchema,
   PullModelResponseSchema,
+  ResponseRequestSchema,
+  ResponseSchema,
   RuntimeResponseSchema,
   UnloadModelRequestSchema,
   UnloadModelResponseSchema,
@@ -29,6 +31,8 @@ import {
   type OpenAIModelsResponse,
   type PullModelRequest,
   type PullModelResponse,
+  type ResponseRequest,
+  type ResponseResponse,
   type RuntimeResponse,
   type UnloadModelRequest,
   type UnloadModelResponse,
@@ -113,6 +117,11 @@ export class ClapClient {
   async chatCompletions(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
     const body = ChatCompletionRequestSchema.parse({ ...request, stream: false });
     return ChatCompletionResponseSchema.parse(await this.postJson("/v1/chat/completions", body));
+  }
+
+  async responses(request: ResponseRequest): Promise<ResponseResponse> {
+    const body = ResponseRequestSchema.parse({ ...request, stream: false });
+    return ResponseSchema.parse(await this.postJson("/v1/responses", body));
   }
 
   async *streamChatCompletions(request: ChatCompletionRequest): AsyncGenerator<string> {

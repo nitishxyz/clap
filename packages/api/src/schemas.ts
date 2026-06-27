@@ -194,10 +194,52 @@ export const OpenAIModelsResponseSchema = z.object({
   data: z.array(z.union([OpenAIModelSchema, OpenAIRichModelSchema])),
 });
 
+export const ChatContentPartSchema = z.union([
+  z.object({ type: z.literal("text"), text: z.string() }),
+  z.object({ type: z.literal("image_url"), image_url: z.object({ url: z.string(), detail: z.string().optional() }) }),
+]);
+
+export const ChatToolCallFunctionSchema = z.object({
+  name: z.string(),
+  arguments: z.string(),
+});
+
+export const ChatToolCallSchema = z.object({
+  id: z.string(),
+  type: z.literal("function"),
+  function: ChatToolCallFunctionSchema,
+});
+
 export const ChatMessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]),
-  content: z.union([z.string(), z.null()]).default(""),
+  content: z.union([z.string(), z.array(ChatContentPartSchema), z.null()]).default(""),
+  name: z.string().optional(),
+  tool_call_id: z.string().optional(),
+  tool_calls: z.array(ChatToolCallSchema).optional(),
 });
+
+export const ChatToolSchema = z.object({
+  type: z.literal("function"),
+  function: z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    parameters: z.record(z.unknown()).optional(),
+  }),
+});
+
+export const ResponseFormatSchema = z.union([
+  z.object({ type: z.literal("text") }),
+  z.object({ type: z.literal("json_object") }),
+  z.object({
+    type: z.literal("json_schema"),
+    json_schema: z.object({
+      name: z.string(),
+      description: z.string().optional(),
+      schema: z.record(z.unknown()).optional(),
+      strict: z.boolean().optional(),
+    }),
+  }),
+]);
 
 export const ChatCompletionRequestSchema = z.object({
   model: z.string().min(1),
@@ -206,12 +248,21 @@ export const ChatCompletionRequestSchema = z.object({
   backend: z.enum(["gguf", "mlx"]).optional(),
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().int().positive().optional(),
+  tools: z.array(ChatToolSchema).optional(),
+  tool_choice: z.union([z.literal("none"), z.literal("auto"), z.literal("required"), z.object({ type: z.literal("function"), function: z.object({ name: z.string() }) })]).optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  response_format: ResponseFormatSchema.optional(),
+  stop: z.union([z.string(), z.array(z.string())]).optional(),
+  seed: z.number().int().optional(),
+  top_p: z.number().min(0).max(1).optional(),
+  presence_penalty: z.number().min(-2).max(2).optional(),
+  frequency_penalty: z.number().min(-2).max(2).optional(),
 });
 
 export const ChatCompletionChoiceSchema = z.object({
   index: z.number(),
-  message: ChatMessageSchema,
-  finish_reason: z.string().nullable(),
+  message: ChatMessageSchema.extend({ reasoning: z.string().optional() }),
+  finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]).nullable(),
 });
 
 export const ChatCompletionResponseSchema = z.object({
@@ -220,6 +271,21 @@ export const ChatCompletionResponseSchema = z.object({
   created: z.number(),
   model: z.string(),
   choices: z.array(ChatCompletionChoiceSchema),
+  usage: z.object({
+    prompt_tokens: z.number().int().nonnegative(),
+    completion_tokens: z.number().int().nonnegative(),
+    total_tokens: z.number().int().nonnegative(),
+  }).optional(),
+});
+
+export const ChatToolCallDeltaSchema = z.object({
+  index: z.number(),
+  id: z.string().optional(),
+  type: z.literal("function").optional(),
+  function: z.object({
+    name: z.string().optional(),
+    arguments: z.string().optional(),
+  }).optional(),
 });
 
 export const ChatCompletionChunkSchema = z.object({
@@ -231,10 +297,138 @@ export const ChatCompletionChunkSchema = z.object({
     index: z.number(),
     delta: z.object({
       role: z.literal("assistant").optional(),
-      content: z.string().optional(),
+      content: z.string().nullable().optional(),
+      reasoning: z.string().optional(),
+      tool_calls: z.array(ChatToolCallDeltaSchema).optional(),
     }),
-    finish_reason: z.string().nullable(),
+    finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]).nullable(),
   })),
+  usage: z.object({
+    prompt_tokens: z.number().int().nonnegative(),
+    completion_tokens: z.number().int().nonnegative(),
+    total_tokens: z.number().int().nonnegative(),
+  }).optional(),
+});
+
+export const ResponseInputItemSchema = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]).optional().default("user"),
+  content: z.union([z.string(), z.array(ChatContentPartSchema), z.null()]).default(""),
+  type: z.string().optional(),
+  tool_call_id: z.string().optional(),
+});
+
+export const ResponseTextConfigSchema = z.object({
+  format: ResponseFormatSchema.optional(),
+}).optional();
+
+export const ResponseRequestSchema = z.object({
+  model: z.string().min(1),
+  input: z.union([z.string(), z.array(ResponseInputItemSchema)]),
+  instructions: z.string().optional(),
+  tools: z.array(ChatToolSchema).optional(),
+  tool_choice: z.union([z.literal("none"), z.literal("auto"), z.literal("required"), z.object({ type: z.literal("function"), function: z.object({ name: z.string() }) })]).optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  text: ResponseTextConfigSchema,
+  response_format: ResponseFormatSchema.optional(),
+  stream: z.boolean().optional().default(false),
+  temperature: z.number().min(0).max(2).optional(),
+  top_p: z.number().min(0).max(1).optional(),
+  max_output_tokens: z.number().int().positive().optional(),
+  metadata: z.record(z.unknown()).optional(),
+  previous_response_id: z.string().optional(),
+});
+
+export const ResponseOutputItemSchema = z.union([
+  z.object({
+    id: z.string(),
+    type: z.literal("message"),
+    status: z.literal("completed"),
+    role: z.literal("assistant"),
+    content: z.array(z.object({ type: z.literal("output_text"), text: z.string() })),
+  }),
+  z.object({
+    id: z.string(),
+    type: z.literal("function_call"),
+    status: z.literal("completed"),
+    call_id: z.string(),
+    name: z.string(),
+    arguments: z.string(),
+  }),
+]);
+
+export const ResponseSchema = z.object({
+  id: z.string(),
+  object: z.literal("response"),
+  created_at: z.number(),
+  status: z.enum(["completed", "failed", "incomplete"]),
+  model: z.string(),
+  output: z.array(ResponseOutputItemSchema),
+  output_text: z.string(),
+  usage: z.object({
+    input_tokens: z.number().int().nonnegative(),
+    output_tokens: z.number().int().nonnegative(),
+    total_tokens: z.number().int().nonnegative(),
+  }).optional(),
+  error: z.object({ code: z.string(), message: z.string() }).nullable().optional(),
+  incomplete_details: z.object({ reason: z.string() }).nullable().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+export const OllamaTagsResponseSchema = z.object({
+  models: z.array(z.object({
+    name: z.string(),
+    model: z.string(),
+    modified_at: z.string(),
+    size: z.number().int().nonnegative(),
+    digest: z.string(),
+    details: z.object({
+      parent_model: z.string(),
+      format: z.string(),
+      family: z.string(),
+      families: z.array(z.string()).nullable(),
+      parameter_size: z.string(),
+      quantization_level: z.string(),
+    }),
+  })),
+});
+
+export const OllamaShowRequestSchema = z.object({
+  model: z.string().min(1),
+});
+
+export const OllamaPullRequestSchema = z.object({
+  name: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  stream: z.boolean().optional().default(true),
+});
+
+export const OllamaChatRequestSchema = z.object({
+  model: z.string().min(1),
+  messages: z.array(ChatMessageSchema).min(1),
+  stream: z.boolean().optional().default(true),
+  tools: z.array(ChatToolSchema).optional(),
+  options: z.object({
+    temperature: z.number().optional(),
+    top_p: z.number().optional(),
+    seed: z.number().int().optional(),
+    num_predict: z.number().int().positive().optional(),
+    stop: z.union([z.string(), z.array(z.string())]).optional(),
+  }).optional(),
+});
+
+export const OllamaGenerateRequestSchema = z.object({
+  model: z.string().min(1),
+  prompt: z.string().default(""),
+  system: z.string().optional(),
+  stream: z.boolean().optional().default(true),
+  format: z.union([z.literal("json"), z.record(z.unknown())]).optional(),
+  options: z.object({
+    temperature: z.number().optional(),
+    top_p: z.number().optional(),
+    seed: z.number().int().optional(),
+    num_predict: z.number().int().positive().optional(),
+    stop: z.union([z.string(), z.array(z.string())]).optional(),
+  }).optional(),
 });
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
@@ -255,6 +449,12 @@ export type LoadedModelsResponse = z.infer<typeof LoadedModelsResponseSchema>;
 export type LoadModelResponse = z.infer<typeof LoadModelResponseSchema>;
 export type UnloadModelResponse = z.infer<typeof UnloadModelResponseSchema>;
 export type OpenAIModelsResponse = z.infer<typeof OpenAIModelsResponseSchema>;
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+export type ChatToolCall = z.infer<typeof ChatToolCallSchema>;
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
 export type ChatCompletionResponse = z.infer<typeof ChatCompletionResponseSchema>;
 export type ChatCompletionChunk = z.infer<typeof ChatCompletionChunkSchema>;
+export type ResponseRequest = z.infer<typeof ResponseRequestSchema>;
+export type ResponseResponse = z.infer<typeof ResponseSchema>;
+export type OllamaChatRequest = z.infer<typeof OllamaChatRequestSchema>;
+export type OllamaGenerateRequest = z.infer<typeof OllamaGenerateRequestSchema>;

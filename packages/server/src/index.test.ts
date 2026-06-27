@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { HealthResponseSchema } from "@clap/api";
 import { assertFileCredentialPermissions, deleteStoredHfToken, hfAuthStatus, resolveHfToken, resolveModel, storeHfToken } from "@clap/models";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "./index";
+import { createServer, idleTimeoutFromEnv } from "./index";
 
 describe("clap server", () => {
   test("serves health", async () => {
@@ -13,6 +13,22 @@ describe("clap server", () => {
     expect(response.status).toBe(200);
     const body = HealthResponseSchema.parse(await response.json());
     expect(body.status).toBe("ok");
+  });
+
+  test("parses server idle timeout env with a long local inference default", () => {
+    const previous = process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS;
+    try {
+      delete process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS;
+      expect(idleTimeoutFromEnv()).toBe(240);
+      process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS = "900";
+      expect(idleTimeoutFromEnv()).toBe(255);
+      process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS = "0";
+      expect(idleTimeoutFromEnv()).toBe(0);
+      process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS = "nope";
+      expect(idleTimeoutFromEnv()).toBe(240);
+    } finally {
+      restoreEnv("CLAP_SERVER_IDLE_TIMEOUT_SECONDS", previous);
+    }
   });
 
   test("reports missing bundled native workers as not installed", async () => {
@@ -141,6 +157,393 @@ describe("clap server", () => {
     expect(response.status).toBe(404);
     const body = await response.json();
     expect(body.error.message).toContain("GGUF model not found");
+  });
+
+  test("returns OpenAI-compatible tool calls from generated JSON", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-tool-call-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ tool_calls: [{ name: "get_weather", arguments: { city: "Paris" } }] });
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "weather?" }],
+          tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object" } } }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.choices[0].finish_reason).toBe("tool_calls");
+      expect(body.choices[0].message.content).toBeNull();
+      expect(body.choices[0].message.tool_calls[0]).toMatchObject({
+        type: "function",
+        function: { name: "get_weather", arguments: JSON.stringify({ city: "Paris" }) },
+      });
+      expect(body.usage.total_tokens).toBeGreaterThan(0);
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streams tool call deltas for parsed tool calls", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-tool-stream-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ tool_calls: [{ name: "search", arguments: { q: "clap" } }] });
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: [{ role: "user", content: "search" }],
+          tools: [{ type: "function", function: { name: "search" } }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const events = await sseData(response);
+      const toolDelta = events.find((event) => event.choices?.[0]?.delta?.tool_calls);
+      expect(toolDelta.choices[0].delta.tool_calls[0]).toMatchObject({
+        type: "function",
+        function: { name: "search", arguments: JSON.stringify({ q: "clap" }) },
+      });
+      expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("supports json_object and json_schema response formats best effort", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-json-format-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "```json\n{\"ok\":true}\n```";
+
+      const app = createServer();
+      const jsonObject = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }], response_format: { type: "json_object" } }),
+      });
+      expect((await jsonObject.json()).choices[0].message.content).toBe(JSON.stringify({ ok: true }));
+
+      const jsonSchema = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }], response_format: { type: "json_schema", json_schema: { name: "Result", schema: { type: "object" } } } }),
+      });
+      expect((await jsonSchema.json()).choices[0].message.content).toBe(JSON.stringify({ ok: true }));
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts Vercel AI style content parts and rejects image parts for text runtimes", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-content-parts-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "plain response";
+      const app = createServer();
+
+      const textParts = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }], seed: 1, top_p: 0.8, presence_penalty: 0, frequency_penalty: 0, stop: ["###"] }),
+      });
+      expect(textParts.status).toBe(200);
+
+      const imageParts = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image.png" } }] }] }),
+      });
+      expect(imageParts.status).toBe(400);
+      expect((await imageParts.json()).error.code).toBe("unsupported_content_part");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves Responses API string input and instructions", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-responses-string-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "response text";
+      const response = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, instructions: "Be terse", input: "hello", metadata: { trace: "yes" } }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.object).toBe("response");
+      expect(body.status).toBe("completed");
+      expect(body.output_text).toBe("response text");
+      expect(body.output[0]).toMatchObject({ type: "message", role: "assistant" });
+      expect(body.usage.total_tokens).toBeGreaterThan(0);
+      expect(body.metadata.trace).toBe("yes");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves Responses API message input, structured JSON, and tool calls", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-responses-tools-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ tool_calls: [{ name: "lookup", arguments: { q: "x" } }] });
+      const tool = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          input: [{ role: "user", content: [{ type: "text", text: "lookup" }] }],
+          tools: [{ type: "function", function: { name: "lookup" } }],
+        }),
+      });
+      expect(tool.status).toBe(200);
+      const toolBody = await tool.json();
+      expect(toolBody.output[0]).toMatchObject({ type: "function_call", name: "lookup", arguments: JSON.stringify({ q: "x" }) });
+      expect(toolBody.output_text).toBe("");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "```json\n{\"ok\":true}\n```";
+      const json = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "json", text: { format: { type: "json_object" } } }),
+      });
+      expect((await json.json()).output_text).toBe(JSON.stringify({ ok: true }));
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streams Responses API text and tool-call events", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-responses-stream-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "stream text";
+      const text = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "hello", stream: true }),
+      });
+      const textEvents = await responseSseEvents(text);
+      expect(textEvents.map((event) => event.event)).toContain("response.output_text.delta");
+      expect(textEvents.at(-1)?.event).toBe("response.completed");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ tool_calls: [{ name: "lookup", arguments: { q: "x" } }] });
+      const tool = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "lookup", stream: true, tools: [{ type: "function", function: { name: "lookup" } }] }),
+      });
+      const toolEvents = await responseSseEvents(tool);
+      expect(toolEvents.map((event) => event.event)).toContain("response.function_call_arguments.delta");
+      expect(toolEvents.at(-1)?.event).toBe("response.completed");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects unsupported Responses API images and stateful continuation, and has no legacy completions route", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const dir = await mkdtemp(join(tmpdir(), "clap-responses-errors-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      const app = createServer();
+      const image = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image.png" } }] }] }),
+      });
+      expect(image.status).toBe(400);
+      expect((await image.json()).error.code).toBe("unsupported_content_part");
+
+      const previous = await app.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "continue", previous_response_id: "resp_old" }),
+      });
+      expect(previous.status).toBe(400);
+      expect((await previous.json()).error.code).toBe("unsupported_stateful_continuation");
+
+      const completions = await app.request("/v1/completions", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      expect(completions.status).toBe(404);
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves Ollama tags, show, chat, generate, and unsupported endpoints", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-api-test-"));
+    const repoDir = join(dir, "models", "huggingface", "acme--ollama-gguf");
+    const modelPath = join(repoDir, "model.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "ollama response";
+      await mkdir(repoDir, { recursive: true });
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const tags = await app.request("/api/tags");
+      expect(tags.status).toBe(200);
+      const tagsBody = await tags.json();
+      expect(tagsBody.models.map((entry: { name: string }) => entry.name)).toContain("acme/ollama-gguf");
+
+      const show = await app.request("/api/show", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/ollama-gguf" }),
+      });
+      expect(show.status).toBe(200);
+      expect((await show.json()).details.quantization_level).toBe("Q4_K_M");
+
+      const chat = await app.request("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/ollama-gguf", stream: false, messages: [{ role: "user", content: "hello" }] }),
+      });
+      expect(chat.status).toBe(200);
+      const chatBody = await chat.json();
+      expect(chatBody.message.content).toBe("ollama response");
+      expect(chatBody.done).toBe(true);
+
+      const generate = await app.request("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/ollama-gguf", stream: false, prompt: "hello" }),
+      });
+      expect(generate.status).toBe(200);
+      expect((await generate.json()).response).toBe("ollama response");
+
+      const unsupported = await app.request("/api/embeddings", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      expect(unsupported.status).toBe(501);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("maps Ollama chat tools and rejects Ollama image inputs", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-tools-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ tool_calls: [{ name: "lookup", arguments: { q: "x" } }] });
+      const app = createServer();
+
+      const chat = await app.request("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          messages: [{ role: "user", content: "lookup" }],
+          tools: [{ type: "function", function: { name: "lookup" } }],
+        }),
+      });
+      expect(chat.status).toBe(200);
+      expect((await chat.json()).message.tool_calls[0].function.name).toBe("lookup");
+
+      const image = await app.request("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "describe", images: ["abc"] }] }),
+      });
+      expect(image.status).toBe(400);
+      expect((await image.json()).error).toContain("image input is not supported");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("pulls models through the Ollama pull endpoint", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-pull-test-"));
+    const hf = mockHuggingFaceServer({
+      "acme/ollama-pull": { "model.Q4_K_M.gguf": "gguf bytes" },
+    });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      const response = await createServer().request("/api/pull", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "acme/ollama-pull", stream: false }),
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).status).toBe("success");
+      expect(existsSync(join(dir, "models", "huggingface", "acme--ollama-pull", "model.Q4_K_M.gguf"))).toBe(true);
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("uses stored Hugging Face token when env tokens are absent", async () => {
@@ -772,11 +1175,13 @@ describe("clap server", () => {
 
   test("loads, lists, expires, and unloads runtime model entries", async () => {
     const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const dir = await mkdtemp(join(tmpdir(), "clap-lifecycle-load-test-"));
     const repoDir = join(dir, "models", "huggingface", "acme--lifecycle-gguf");
     const modelPath = join(repoDir, "model.Q4_K_M.gguf");
     try {
       process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
       await mkdir(repoDir, { recursive: true });
       await writeFile(modelPath, "gguf bytes");
       const app = createServer();
@@ -798,12 +1203,13 @@ describe("clap server", () => {
         keepAlive: "30s",
       });
       expect(loadBody.model.expiresAt).toBeString();
-      expect(loadBody.model.worker.state).toBe("one_shot");
-      expect(loadBody.model.worker.limitation).toContain("one request per process");
+      expect(loadBody.model.worker.state).toBe("resident");
+      expect(loadBody.model.worker.pid).toBeNumber();
 
       const active = await app.request("/clap/v1/runtime/models");
       const activeBody = await active.json();
       expect(activeBody.models.map((entry: { id: string }) => entry.id)).toContain("acme/lifecycle-gguf");
+      expect(activeBody.models[0].worker.pid).toBe(loadBody.model.worker.pid);
 
       const unload = await app.request("/clap/v1/models/unload", {
         method: "POST",
@@ -817,18 +1223,21 @@ describe("clap server", () => {
       expect((await empty.json()).models).toEqual([]);
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("chat requests update the runtime model registry even with one-shot workers", async () => {
+  test("chat requests reuse the same resident worker pid and extend keep-alive", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
     const dir = await mkdtemp(join(tmpdir(), "clap-lifecycle-chat-test-"));
     const modelPath = join(dir, "local.Q4_K_M.gguf");
     try {
       process.env.CLAP_HOME = dir;
-      process.env.CLAP_LLAMA_WORKER = join(dir, "missing-clap-llama");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "resident ok";
       await writeFile(modelPath, "gguf bytes");
       const app = createServer();
 
@@ -840,7 +1249,8 @@ describe("clap server", () => {
           messages: [{ role: "user", content: "hello" }],
         }),
       });
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(200);
+      expect((await response.json()).choices[0].message.content).toBe("resident ok");
 
       const active = await app.request("/clap/v1/runtime/models");
       const activeBody = await active.json();
@@ -850,10 +1260,26 @@ describe("clap server", () => {
         localPath: modelPath,
         state: "warm",
         activeRequests: 0,
+        worker: { state: "resident" },
       });
+      const firstPid = activeBody.models[0].worker.pid;
+      const firstExpiry = activeBody.models[0].expiresAt;
+
+      await Bun.sleep(5);
+      const second = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "again" }] }),
+      });
+      expect(second.status).toBe(200);
+      const after = await app.request("/clap/v1/runtime/models");
+      const afterBody = await after.json();
+      expect(afterBody.models[0].worker.pid).toBe(firstPid);
+      expect(Date.parse(afterBody.models[0].expiresAt)).toBeGreaterThanOrEqual(Date.parse(firstExpiry));
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -1008,6 +1434,59 @@ async function waitForDownloadProgress(id: string) {
     await Bun.sleep(10);
   }
   throw new Error(`download ${id} did not report in-progress bytes`);
+}
+
+async function fakeWorker(dir: string): Promise<string> {
+  const path = join(dir, "fake-clap-worker");
+  await writeFile(path, `#!/usr/bin/env bun
+const decoder = new TextDecoder();
+let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true });
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    const request = JSON.parse(line);
+    if (request.type === "shutdown") {
+      console.log(JSON.stringify({ id: request.id, done: true }));
+      process.exit(0);
+    }
+    if (request.type === "load") {
+      console.log(JSON.stringify({ id: request.id, loaded: true, done: true }));
+      continue;
+    }
+    if (request.type === "unload") {
+      console.log(JSON.stringify({ id: request.id, unloaded: true, done: true }));
+      continue;
+    }
+    console.log(JSON.stringify({ id: request.id, content: process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok" }));
+    console.log(JSON.stringify({ id: request.id, done: true }));
+  }
+}
+`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+async function sseData(response: Response): Promise<any[]> {
+  const text = await response.text();
+  return text
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6))
+    .filter((line) => line !== "[DONE]")
+    .map((line) => JSON.parse(line));
+}
+
+async function responseSseEvents(response: Response): Promise<Array<{ event: string; data: unknown }>> {
+  const text = await response.text();
+  return text.trim().split("\n\n").filter(Boolean).map((block) => {
+    const event = block.split("\n").find((line) => line.startsWith("event: "))?.slice(7) ?? "message";
+    const data = JSON.parse(block.split("\n").find((line) => line.startsWith("data: "))?.slice(6) ?? "{}");
+    return { event, data };
+  });
 }
 
 function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, options: { requireAuth?: boolean; seenAuth?: string[]; chunkDelayMs?: number; requestCounts?: Record<string, number> } = {}) {

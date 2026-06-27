@@ -7,6 +7,7 @@ export type ServerMetadata = {
   port: number;
   baseURL: string;
   startedAt: string;
+  managed?: boolean;
 };
 
 export type ServerPaths = {
@@ -91,6 +92,39 @@ export async function waitForHealthy(baseURL: string, timeoutMs = 10_000): Promi
     await Bun.sleep(100);
   }
   return null;
+}
+
+export async function waitForUnhealthy(baseURL: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await healthCheck(baseURL)) return true;
+    await Bun.sleep(100);
+  }
+  return !await healthCheck(baseURL);
+}
+
+export function isLivePid(pid: number | undefined): boolean {
+  if (!pid || pid <= 0 || !Number.isInteger(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    throw error;
+  }
+}
+
+export async function findListeningPids(port: number): Promise<number[]> {
+  if (!Number.isInteger(port) || port <= 0) return [];
+  const lsof = Bun.spawn(["lsof", "-nP", `-tiTCP:${port}`, "-sTCP:LISTEN"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const output = await new Response(lsof.stdout).text();
+  const exitCode = await lsof.exited;
+  if (exitCode !== 0 && output.trim() === "") return [];
+  return [...new Set(output.split(/\s+/).map((value) => Number(value)).filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
 
 export async function tailFile(path: string, lineCount: number): Promise<string> {

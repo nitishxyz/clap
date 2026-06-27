@@ -7,7 +7,6 @@ const root = new URL("..", import.meta.url).pathname;
 const libexec = join(root, "libexec");
 const inputs = [
   { name: "clap-llama", source: process.env.CLAP_LLAMA_WORKER ?? join(libexec, "clap-llama") },
-  { name: "llama-cli", source: process.env.CLAP_LLAMA_CLI ?? join(libexec, "llama-cli") },
   { name: "clap-mlx", source: process.env.CLAP_MLX_WORKER ?? join(libexec, "clap-mlx") },
 ];
 
@@ -17,7 +16,7 @@ const missing = inputs.filter((input) => !input.source || !existsSync(input.sour
 if (missing.length > 0) {
   console.error("Cannot prepare native runtime bundle.");
   for (const input of missing) {
-    const env = input.name === "clap-llama" ? "CLAP_LLAMA_WORKER" : input.name === "llama-cli" ? "CLAP_LLAMA_CLI" : "CLAP_MLX_WORKER";
+    const env = input.name === "clap-llama" ? "CLAP_LLAMA_WORKER" : "CLAP_MLX_WORKER";
     console.error(`build ${input.name} or set ${env} to an existing binary`);
   }
   console.error("Expected build flow: bun run runtime:llama:vendor && bun run runtime:llama:build && bun run runtime:mlx:build");

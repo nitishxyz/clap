@@ -11,6 +11,8 @@ struct ChatMessage: Decodable {
 }
 
 struct ChatRequest: Decodable {
+  let id: String?
+  let type: String?
   let model: String
   let messages: [ChatMessage]
   let stream: Bool?
@@ -19,14 +21,27 @@ struct ChatRequest: Decodable {
 }
 
 struct WorkerMessage: Encodable {
+  let id: String?
   let token: String?
   let content: String?
+  let loaded: Bool?
+  let unloaded: Bool?
   let done: Bool?
   let error: String?
 }
 
-func emit(token: String? = nil, content: String? = nil, done: Bool? = nil, error: String? = nil) {
-  let message = WorkerMessage(token: token, content: content, done: done, error: error)
+struct ControlRequest: Decodable {
+  let id: String?
+  let type: String?
+  let model: String?
+  let messages: [ChatMessage]?
+  let stream: Bool?
+  let max_tokens: Int?
+  let temperature: Double?
+}
+
+func emit(id: String? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil) {
+  let message = WorkerMessage(id: id, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error)
   let data = try! JSONEncoder().encode(message)
   FileHandle.standardOutput.write(data)
   FileHandle.standardOutput.write(Data([0x0a]))
@@ -97,37 +112,81 @@ func main() async {
     exit(2)
     #endif
 
-    guard let line = readLine(), let data = line.data(using: .utf8) else {
-      emit(error: "expected one JSON request line on stdin")
-      exit(2)
-    }
-    let request = try JSONDecoder().decode(ChatRequest.self, from: data)
+    var loadedModel: String?
+    var loadedDirectory: URL?
+    var loadedContainer: ModelContainer?
 
-    let modelDirectory = try validateModelDirectory(request.model)
-    let container = try await loadModelContainer(from: modelDirectory, using: #huggingFaceTokenizerLoader())
-    let session = ChatSession(
-      container,
-      generateParameters: GenerateParameters(
-        maxTokens: request.max_tokens ?? 256,
-        temperature: Float(request.temperature ?? 0.7)
+    while let line = readLine() {
+      guard let data = line.data(using: .utf8) else { continue }
+      let control = try JSONDecoder().decode(ControlRequest.self, from: data)
+      let id = control.id
+      let type = control.type ?? "chat"
+
+      if type == "shutdown" {
+        emit(id: id, done: true)
+        break
+      }
+
+      if type == "unload" {
+        loadedContainer = nil
+        loadedDirectory = nil
+        loadedModel = nil
+        emit(id: id, unloaded: true, done: true)
+        continue
+      }
+
+      if type == "load" {
+        guard let model = control.model else {
+          emit(id: id, error: "load.model is required")
+          continue
+        }
+        let modelDirectory = try validateModelDirectory(model)
+        if loadedModel != model {
+          loadedContainer = try await loadModelContainer(from: modelDirectory, using: #huggingFaceTokenizerLoader())
+          loadedModel = model
+          loadedDirectory = modelDirectory
+        }
+        emit(id: id, loaded: true, done: true)
+        continue
+      }
+
+      guard let model = control.model else {
+        emit(id: id, error: "chat.model is required")
+        continue
+      }
+      let modelDirectory = try validateModelDirectory(model)
+      if loadedModel != model || loadedContainer == nil {
+        loadedContainer = try await loadModelContainer(from: modelDirectory, using: #huggingFaceTokenizerLoader())
+        loadedModel = model
+        loadedDirectory = modelDirectory
+      }
+      guard let container = loadedContainer else {
+        emit(id: id, error: "model is not loaded")
+        continue
+      }
+      let request = ChatRequest(id: control.id, type: control.type, model: model, messages: control.messages ?? [], stream: control.stream, max_tokens: control.max_tokens, temperature: control.temperature)
+      let session = ChatSession(
+        container,
+        generateParameters: GenerateParameters(
+          maxTokens: request.max_tokens ?? 256,
+          temperature: Float(request.temperature ?? 0.7)
+        )
       )
-    )
-
-    let inputPrompt = prompt(from: request, modelDirectory: modelDirectory)
-
-    if request.stream ?? true {
-      for try await chunk in session.streamResponse(to: inputPrompt) {
-        if !chunk.isEmpty {
-          emit(token: chunk)
+      let inputPrompt = prompt(from: request, modelDirectory: loadedDirectory ?? modelDirectory)
+      if request.stream ?? true {
+        for try await chunk in session.streamResponse(to: inputPrompt) {
+          if !chunk.isEmpty {
+            emit(id: id, token: chunk)
+          }
+        }
+      } else {
+        let output = try await session.respond(to: inputPrompt)
+        if !output.isEmpty {
+          emit(id: id, content: output)
         }
       }
-    } else {
-      let output = try await session.respond(to: inputPrompt)
-      if !output.isEmpty {
-        emit(content: output)
-      }
+      emit(id: id, done: true)
     }
-    emit(done: true)
   } catch {
     emit(error: String(describing: error))
     exit(1)

@@ -3,18 +3,21 @@ import type { LoadedModel } from "@clap/api";
 
 export type LoadModelOptions = {
   keepAlive?: string;
+  worker?: LoadedModel["worker"];
 };
 
 export type ModelLifecycleEntry = LoadedModel;
+export type LifecycleRemoveReason = "unload" | "expire" | "cleanup";
 
 const DEFAULT_KEEP_ALIVE = process.env.CLAP_KEEP_ALIVE ?? "5m";
-const ONE_SHOT_LIMITATION = "Current native Clap workers handle one request per process; lifecycle entries track warm/loaded intent and request activity, but no resident worker process is reused yet.";
-
 export class ModelLifecycleManager {
   private readonly entries = new Map<string, LoadedModel>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(private readonly now = () => Date.now()) {}
+  constructor(
+    private readonly now = () => Date.now(),
+    private readonly onRemove?: (entry: LoadedModel, reason: LifecycleRemoveReason) => void,
+  ) {}
 
   load(resolved: ResolvedModel, options: LoadModelOptions = {}): LoadedModel {
     const localPath = resolved.modelPath ?? resolved.input;
@@ -27,6 +30,7 @@ export class ModelLifecycleManager {
       existing.keepAlive = keepAlive;
       existing.pinned = keepAlive === "always";
       existing.always = keepAlive === "always";
+      if (options.worker) existing.worker = options.worker;
       existing.lastUsedAt = timestamp;
       existing.expiresAt = expiresAt ? iso(expiresAt) : null;
       existing.state = existing.activeRequests > 0 ? "active" : "warm";
@@ -48,7 +52,7 @@ export class ModelLifecycleManager {
       expiresAt: expiresAt ? iso(expiresAt) : null,
       pinned: keepAlive === "always",
       always: keepAlive === "always",
-      worker: { state: "one_shot", limitation: ONE_SHOT_LIMITATION },
+      worker: options.worker ?? { state: "not_started" },
     };
     this.entries.set(key, entry);
     this.scheduleExpiry(entry);
@@ -68,7 +72,7 @@ export class ModelLifecycleManager {
       entry.expiresAt = iso(this.now());
       return { unloaded: false, model: entry };
     }
-    this.delete(key);
+    this.delete(key, "unload");
     return { unloaded: true, model: entry };
   }
 
@@ -99,7 +103,7 @@ export class ModelLifecycleManager {
     this.touch(entry);
     if (entry.activeRequests === 0) {
       if (entry.state === "unloading") {
-        this.delete(entry.key);
+        this.delete(entry.key, "unload");
       } else {
         entry.state = "warm";
         this.scheduleExpiry(entry);
@@ -117,6 +121,7 @@ export class ModelLifecycleManager {
   cleanup(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+    for (const entry of this.entries.values()) this.onRemove?.(entry, "cleanup");
     this.entries.clear();
   }
 
@@ -124,7 +129,7 @@ export class ModelLifecycleManager {
     const timestamp = this.now();
     for (const entry of this.entries.values()) {
       if (entry.activeRequests > 0 || entry.always || !entry.expiresAt) continue;
-      if (Date.parse(entry.expiresAt) <= timestamp) this.delete(entry.key);
+      if (Date.parse(entry.expiresAt) <= timestamp) this.delete(entry.key, "expire");
     }
   }
 
@@ -136,15 +141,17 @@ export class ModelLifecycleManager {
     const delay = Math.max(0, Date.parse(entry.expiresAt) - this.now());
     this.timers.set(entry.key, setTimeout(() => {
       if (entry.activeRequests === 0 && entry.expiresAt && Date.parse(entry.expiresAt) <= this.now()) {
-        this.delete(entry.key);
+        this.delete(entry.key, "unload");
       }
     }, delay));
   }
 
-  private delete(key: string): void {
+  private delete(key: string, reason: LifecycleRemoveReason): void {
     const timer = this.timers.get(key);
     if (timer) clearTimeout(timer);
     this.timers.delete(key);
+    const entry = this.entries.get(key);
+    if (entry) this.onRemove?.(entry, reason);
     this.entries.delete(key);
   }
 }

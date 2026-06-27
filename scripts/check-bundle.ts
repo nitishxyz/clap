@@ -5,7 +5,6 @@ import { join } from "node:path";
 const root = new URL("..", import.meta.url).pathname;
 const required = [
   join(root, "libexec", "clap-llama"),
-  join(root, "libexec", "llama-cli"),
   join(root, "libexec", "clap-mlx"),
 ];
 const requiredFiles = [

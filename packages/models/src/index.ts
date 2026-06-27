@@ -470,8 +470,8 @@ function servedCapabilities(): ClapModel["capabilities"] {
     system_prompt: true,
     attachment: false,
     reasoning: false,
-    tool_call: false,
-    structured_output: false,
+    tool_call: true,
+    structured_output: true,
   };
 }
 

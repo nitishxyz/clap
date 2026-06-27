@@ -11,9 +11,16 @@ import {
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
+  OllamaChatRequestSchema,
+  OllamaGenerateRequestSchema,
+  OllamaPullRequestSchema,
+  OllamaShowRequestSchema,
+  OllamaTagsResponseSchema,
   OpenAIModelsResponseSchema,
   PullModelRequestSchema,
   PullModelResponseSchema,
+  ResponseRequestSchema,
+  ResponseSchema,
   RuntimeResponseSchema,
   UnloadModelRequestSchema,
   UnloadModelResponseSchema,
@@ -40,6 +47,13 @@ export function createOpenApiDocument() {
   registry.register("OpenAIModelsResponse", OpenAIModelsResponseSchema);
   registry.register("ChatCompletionRequest", ChatCompletionRequestSchema);
   registry.register("ChatCompletionResponse", ChatCompletionResponseSchema);
+  registry.register("ResponseRequest", ResponseRequestSchema);
+  registry.register("Response", ResponseSchema);
+  registry.register("OllamaTagsResponse", OllamaTagsResponseSchema);
+  registry.register("OllamaShowRequest", OllamaShowRequestSchema);
+  registry.register("OllamaPullRequest", OllamaPullRequestSchema);
+  registry.register("OllamaChatRequest", OllamaChatRequestSchema);
+  registry.register("OllamaGenerateRequest", OllamaGenerateRequestSchema);
 
   registry.registerPath({
     method: "get",
@@ -157,6 +171,59 @@ export function createOpenApiDocument() {
       },
     },
     responses: jsonResponses(ChatCompletionResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/v1/responses",
+    summary: "OpenAI-compatible Responses API",
+    request: {
+      body: {
+        content: {
+          "application/json": { schema: ResponseRequestSchema },
+        },
+      },
+    },
+    responses: jsonResponses(ResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/api/tags",
+    summary: "Ollama-compatible local model tags",
+    responses: jsonResponses(OllamaTagsResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/show",
+    summary: "Ollama-compatible model metadata",
+    request: { body: { content: { "application/json": { schema: OllamaShowRequestSchema } } } },
+    responses: jsonResponses(z.record(z.unknown())),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/pull",
+    summary: "Ollama-compatible model pull",
+    request: { body: { content: { "application/json": { schema: OllamaPullRequestSchema } } } },
+    responses: jsonResponses(z.record(z.unknown())),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/chat",
+    summary: "Ollama-compatible chat",
+    request: { body: { content: { "application/json": { schema: OllamaChatRequestSchema } } } },
+    responses: jsonResponses(z.record(z.unknown())),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/generate",
+    summary: "Ollama-compatible generate",
+    request: { body: { content: { "application/json": { schema: OllamaGenerateRequestSchema } } } },
+    responses: jsonResponses(z.record(z.unknown())),
   });
 
   const generator = new OpenApiGeneratorV3(registry.definitions);

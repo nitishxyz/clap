@@ -10,7 +10,9 @@ import { installPullCancellationHandler } from "./pull-cancellation";
 import {
   baseURLFromEnv,
   currentCliCommand,
+  findListeningPids,
   healthCheck,
+  isLivePid,
   launchdPlist,
   portFromBaseURL,
   readServerMetadata,
@@ -19,6 +21,7 @@ import {
   systemdService,
   tailFile,
   waitForHealthy,
+  waitForUnhealthy,
   withServerStartLock,
   writeServerMetadata,
   type ServerMetadata,
@@ -104,22 +107,24 @@ async function serverStatus() {
 }
 
 async function serverCommand(argv: string[]) {
-  const action = argv[0] ?? "status";
+  const { flags, rest } = parseFlags(argv);
+  const action = rest[0] ?? "status";
+  const force = flags.force === "true";
   if (action === "start") {
     await startBackgroundServer();
   } else if (action === "stop") {
-    await stopBackgroundServer();
+    await stopBackgroundServer({ force });
   } else if (action === "status") {
     await serverStatus();
   } else if (action === "restart") {
-    await stopBackgroundServer({ quiet: true });
+    await stopBackgroundServer({ quiet: true, force });
     await startBackgroundServer();
   } else if (action === "logs") {
-    await serverLogs(Number(argv[1] ?? "80"));
+    await serverLogs(Number(rest[1] ?? "80"));
   } else if (action === "install") {
     await installServiceTemplate();
   } else {
-    throw new Error("usage: clap server <start|stop|status|restart|logs|install>");
+    throw new Error("usage: clap server <start|stop|status|restart|logs|install> [--force]");
   }
 }
 
@@ -193,20 +198,23 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
     const baseURL = baseURLFromEnv();
     const existingHealth = await healthCheck(baseURL);
     const existingMetadata = await readServerMetadata(paths);
-    if (existingHealth?.status === "ok" && existingMetadata) {
+    if (existingHealth?.status === "ok" && existingMetadata && isLivePid(existingMetadata.pid)) {
       if (!quiet) console.log(`clap server already running at ${baseURL} (pid ${existingMetadata.pid})`);
       return existingMetadata;
     }
     if (existingHealth?.status === "ok") {
-      const metadata = {
+      if (existingMetadata) await removeServerMetadata(paths);
+      if (!quiet) {
+        console.log(`clap server already healthy at ${baseURL}, but it is not managed by this CLI`);
+        console.log("use `clap server stop --force` to stop the process listening on the Clap port");
+      }
+      return {
         pid: 0,
         port: portFromBaseURL(baseURL),
         baseURL,
         startedAt: new Date().toISOString(),
+        managed: false,
       };
-      await writeServerMetadata(metadata, paths);
-      if (!quiet) console.log(`clap server already healthy at ${baseURL}`);
-      return metadata;
     }
 
     await mkdir(paths.home, { recursive: true });
@@ -231,6 +239,7 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
       port: portFromBaseURL(baseURL),
       baseURL,
       startedAt: new Date().toISOString(),
+      managed: true,
     };
     await writeServerMetadata(metadata, paths);
     if (!quiet) console.log(`clap server started at ${baseURL} (pid ${metadata.pid})`);
@@ -238,26 +247,62 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
   });
 }
 
-async function stopBackgroundServer({ quiet = false } = {}) {
-  const metadata = await readServerMetadata();
-  if (!metadata?.pid) {
-    await removeServerMetadata();
-    if (!quiet) console.log("clap server is not running");
+async function stopBackgroundServer({ quiet = false, force = false } = {}) {
+  const paths = serverPaths();
+  const metadata = await readServerMetadata(paths);
+  const baseURL = metadata?.baseURL ?? baseURLFromEnv();
+  const health = await healthCheck(baseURL);
+
+  if (metadata?.pid && isLivePid(metadata.pid)) {
+    try {
+      process.kill(metadata.pid, "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+
+    const stopped = await waitForUnhealthy(baseURL);
+    await removeServerMetadata(paths);
+    if (!stopped) throw new Error(`clap server pid ${metadata.pid} did not stop at ${baseURL}`);
+    if (!quiet) console.log("clap server stopped");
     return;
   }
 
-  try {
-    process.kill(metadata.pid, "SIGTERM");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  if (!health) {
+    if (metadata) await removeServerMetadata(paths);
+    if (!quiet) console.log(metadata ? "clap server is not running (removed stale metadata)" : "clap server is not running");
+    return;
   }
 
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline && await healthCheck(metadata.baseURL)) {
-    await Bun.sleep(100);
+  if (!force) {
+    const detail = metadata?.pid ? `metadata pid ${metadata.pid} is not live` : "no managed server metadata exists";
+    throw new Error(`clap server is healthy at ${baseURL}, but ${detail}; use \`clap server stop --force\` or \`clap server restart --force\` to kill the process listening on port ${portFromBaseURL(baseURL)}`);
   }
-  await removeServerMetadata();
-  if (!quiet) console.log("clap server stopped");
+
+  await stopListeningProcesses(baseURL);
+  await removeServerMetadata(paths);
+  if (!quiet) console.log("clap server stopped with --force");
+}
+
+async function stopListeningProcesses(baseURL: string) {
+  const port = portFromBaseURL(baseURL);
+  const pids = await findListeningPids(port);
+  if (pids.length === 0) throw new Error(`no process found listening on Clap port ${port}`);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  if (await waitForUnhealthy(baseURL)) return;
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  if (!await waitForUnhealthy(baseURL)) throw new Error(`process on Clap port ${port} did not stop`);
 }
 
 async function serverLogs(lineCount: number) {
@@ -563,7 +608,7 @@ function help() {
   console.log(`Usage:
   clap serve
   clap auth login|logout|status
-  clap server start|stop|status|restart|logs|install
+  clap server start|stop|status|restart|logs|install [--force]
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
   clap unload <model|alias|path> [--backend mlx|gguf]
