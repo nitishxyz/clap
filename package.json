@@ -1,0 +1,35 @@
+{
+  "name": "clap-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "cli": "bun run apps/cli/src/index.ts",
+    "serve": "bun run apps/cli/src/index.ts serve",
+    "generate:openapi": "bun run packages/api/src/openapi.ts",
+    "bundle:check": "bun run scripts/check-bundle.ts",
+    "bundle:prepare": "bun run scripts/prepare-bundle.ts",
+    "native:build": "bun run runtime:llama:build && bun run runtime:mlx:build",
+    "runtime:llama:vendor": "bun run scripts/vendor-llama.ts",
+    "runtime:llama:build": "bun run scripts/build-llama.ts",
+    "runtime:mlx:build": "bun run scripts/build-mlx.ts",
+    "llama:vendor": "bun run runtime:llama:vendor",
+    "llama:build": "bun run runtime:llama:build",
+    "mlx:build": "bun run runtime:mlx:build",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test apps packages"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
+    "hono": "^4.6.3",
+    "zod": "^3.23.8"
+  }
+}

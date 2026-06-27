@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true
+  },
+  "references": [
+    { "path": "../../packages/api" },
+    { "path": "../../packages/server" }
+  ],
+  "include": ["src/**/*.ts"]
+}

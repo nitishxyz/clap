@@ -1,0 +1,18 @@
+{
+  "name": "@clap/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "clap": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "serve": "bun run src/index.ts serve",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@clap/api": "workspace:*",
+    "@clap/models": "workspace:*",
+    "@clap/server": "workspace:*"
+  }
+}

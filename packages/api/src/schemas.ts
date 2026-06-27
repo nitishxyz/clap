@@ -1,0 +1,260 @@
+import { z } from "zod";
+
+export const clapVersion = "0.1.0";
+export const defaultBaseURL = "http://localhost:11435";
+
+export const ErrorResponseSchema = z.object({
+  error: z.object({
+    message: z.string(),
+    type: z.string().default("invalid_request_error"),
+    code: z.string().optional(),
+  }),
+});
+
+export const HealthResponseSchema = z.object({
+  status: z.literal("ok"),
+  version: z.string(),
+  uptimeMs: z.number(),
+});
+
+export const RuntimeResponseSchema = z.object({
+  platform: z.string(),
+  arch: z.string(),
+  bunVersion: z.string(),
+  runtime: z.literal("bun"),
+});
+
+export const BackendSchema = z.object({
+  id: z.enum(["llama", "mlx"]),
+  name: z.string(),
+  status: z.enum(["available", "unsupported", "not_installed"]),
+  formats: z.array(z.string()),
+  reason: z.string().optional(),
+});
+
+export const BackendsResponseSchema = z.object({
+  backends: z.array(BackendSchema),
+});
+
+export const ClapModelCapabilitiesSchema = z.object({
+  chat: z.boolean(),
+  completion: z.boolean(),
+  streaming: z.boolean(),
+  temperature: z.boolean(),
+  system_prompt: z.boolean(),
+  attachment: z.boolean(),
+  reasoning: z.boolean(),
+  tool_call: z.boolean(),
+  structured_output: z.boolean(),
+});
+
+export const ClapModelLimitSchema = z.object({
+  context: z.number().int().positive().nullable(),
+  output: z.number().int().positive().nullable(),
+});
+
+export const ClapModelModalitiesSchema = z.object({
+  input: z.array(z.enum(["text", "image", "audio"])),
+  output: z.array(z.enum(["text", "image", "audio"])),
+});
+
+export const ClapModelSchema = z.object({
+  id: z.string(),
+  object: z.literal("model").default("model"),
+  name: z.string(),
+  displayName: z.string(),
+  provider: z.string(),
+  source: z.object({
+    type: z.enum(["huggingface", "local", "alias"]),
+    repo: z.string().optional(),
+    baseRepo: z.string().optional(),
+  }),
+  backend: z.enum(["llama", "mlx"]),
+  format: z.string(),
+  status: z.enum(["available", "not_downloaded", "unsupported"]),
+  modalities: ClapModelModalitiesSchema,
+  capabilities: ClapModelCapabilitiesSchema,
+  limit: ClapModelLimitSchema,
+  upstream: z.object({
+    modalities: ClapModelModalitiesSchema.optional(),
+    capabilities: ClapModelCapabilitiesSchema.partial().optional(),
+    limit: ClapModelLimitSchema.optional(),
+  }).optional(),
+  architecture: z.string().optional(),
+  modelType: z.string().optional(),
+  quantization: z.string().optional(),
+  alias: z.string().optional(),
+  repo: z.string().optional(),
+  file: z.string().optional(),
+  localPath: z.string().optional(),
+  pull: z.object({ model: z.string(), file: z.string().optional(), backend: z.enum(["gguf", "mlx"]).optional() }).optional(),
+  reason: z.string().optional(),
+});
+
+export const ClapModelsResponseSchema = z.object({
+  models: z.array(ClapModelSchema),
+});
+
+export const ClapAliasesResponseSchema = z.object({
+  models: z.array(ClapModelSchema),
+});
+
+export const PullModelRequestSchema = z.object({
+  model: z.string().min(1),
+  file: z.string().min(1).optional(),
+  backend: z.enum(["gguf", "mlx"]).optional(),
+  force: z.boolean().optional().default(false),
+});
+
+export const DownloadSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  file: z.string().optional(),
+  backend: z.enum(["gguf", "mlx"]).optional(),
+  targetKey: z.string().optional(),
+  currentFile: z.string().optional(),
+  status: z.enum(["queued", "running", "completed", "failed", "cancelled"]),
+  bytesReceived: z.number().int().nonnegative().default(0),
+  totalBytes: z.number().int().nonnegative().optional(),
+  modelPath: z.string().optional(),
+  error: z.string().optional(),
+  startedAt: z.string(),
+  completedAt: z.string().optional(),
+});
+
+export const PullModelResponseSchema = z.object({
+  download: DownloadSchema,
+});
+
+export const DownloadsResponseSchema = z.object({
+  downloads: z.array(DownloadSchema),
+});
+
+export const KeepAliveSchema = z.union([z.literal("always"), z.string().regex(/^\d+(ms|s|m|h|d)$/)]);
+
+export const LoadModelRequestSchema = z.object({
+  model: z.string().min(1),
+  backend: z.enum(["gguf", "mlx"]).optional(),
+  keepAlive: KeepAliveSchema.optional(),
+});
+
+export const UnloadModelRequestSchema = z.object({
+  model: z.string().min(1),
+  backend: z.enum(["gguf", "mlx"]).optional(),
+});
+
+export const LoadedModelSchema = z.object({
+  key: z.string(),
+  id: z.string(),
+  backend: z.enum(["llama", "mlx"]),
+  format: z.enum(["gguf", "mlx"]),
+  localPath: z.string(),
+  state: z.enum(["warm", "active", "unloading"]),
+  activeRequests: z.number().int().nonnegative(),
+  loadedAt: z.string(),
+  lastUsedAt: z.string(),
+  keepAlive: z.string(),
+  expiresAt: z.string().nullable(),
+  pinned: z.boolean(),
+  always: z.boolean(),
+  worker: z.object({
+    pid: z.number().int().positive().optional(),
+    state: z.enum(["not_started", "one_shot", "resident", "exited"]),
+    limitation: z.string().optional(),
+  }),
+});
+
+export const LoadedModelsResponseSchema = z.object({
+  models: z.array(LoadedModelSchema),
+});
+
+export const LoadModelResponseSchema = z.object({
+  model: LoadedModelSchema,
+});
+
+export const UnloadModelResponseSchema = z.object({
+  unloaded: z.boolean(),
+  model: LoadedModelSchema.optional(),
+});
+
+export const OpenAIModelSchema = z.object({
+  id: z.string(),
+  object: z.literal("model"),
+  created: z.number(),
+  owned_by: z.string(),
+});
+
+export const OpenAIRichModelSchema = ClapModelSchema.extend({
+  created: z.number(),
+  owned_by: z.string(),
+});
+
+export const OpenAIModelsResponseSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(z.union([OpenAIModelSchema, OpenAIRichModelSchema])),
+});
+
+export const ChatMessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]),
+  content: z.union([z.string(), z.null()]).default(""),
+});
+
+export const ChatCompletionRequestSchema = z.object({
+  model: z.string().min(1),
+  messages: z.array(ChatMessageSchema).min(1),
+  stream: z.boolean().optional().default(false),
+  backend: z.enum(["gguf", "mlx"]).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens: z.number().int().positive().optional(),
+});
+
+export const ChatCompletionChoiceSchema = z.object({
+  index: z.number(),
+  message: ChatMessageSchema,
+  finish_reason: z.string().nullable(),
+});
+
+export const ChatCompletionResponseSchema = z.object({
+  id: z.string(),
+  object: z.literal("chat.completion"),
+  created: z.number(),
+  model: z.string(),
+  choices: z.array(ChatCompletionChoiceSchema),
+});
+
+export const ChatCompletionChunkSchema = z.object({
+  id: z.string(),
+  object: z.literal("chat.completion.chunk"),
+  created: z.number(),
+  model: z.string(),
+  choices: z.array(z.object({
+    index: z.number(),
+    delta: z.object({
+      role: z.literal("assistant").optional(),
+      content: z.string().optional(),
+    }),
+    finish_reason: z.string().nullable(),
+  })),
+});
+
+export type HealthResponse = z.infer<typeof HealthResponseSchema>;
+export type RuntimeResponse = z.infer<typeof RuntimeResponseSchema>;
+export type Backend = z.infer<typeof BackendSchema>;
+export type BackendsResponse = z.infer<typeof BackendsResponseSchema>;
+export type ClapModel = z.infer<typeof ClapModelSchema>;
+export type ClapModelsResponse = z.infer<typeof ClapModelsResponseSchema>;
+export type ClapAliasesResponse = z.infer<typeof ClapAliasesResponseSchema>;
+export type PullModelRequest = z.infer<typeof PullModelRequestSchema>;
+export type Download = z.infer<typeof DownloadSchema>;
+export type PullModelResponse = z.infer<typeof PullModelResponseSchema>;
+export type DownloadsResponse = z.infer<typeof DownloadsResponseSchema>;
+export type LoadModelRequest = z.infer<typeof LoadModelRequestSchema>;
+export type UnloadModelRequest = z.infer<typeof UnloadModelRequestSchema>;
+export type LoadedModel = z.infer<typeof LoadedModelSchema>;
+export type LoadedModelsResponse = z.infer<typeof LoadedModelsResponseSchema>;
+export type LoadModelResponse = z.infer<typeof LoadModelResponseSchema>;
+export type UnloadModelResponse = z.infer<typeof UnloadModelResponseSchema>;
+export type OpenAIModelsResponse = z.infer<typeof OpenAIModelsResponseSchema>;
+export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
+export type ChatCompletionResponse = z.infer<typeof ChatCompletionResponseSchema>;
+export type ChatCompletionChunk = z.infer<typeof ChatCompletionChunkSchema>;

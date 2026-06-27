@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@clap/api": ["packages/api/src/index.ts"],
+      "@clap/models": ["packages/models/src/index.ts"],
+      "@clap/runtime-router": ["packages/runtime-router/src/index.ts"],
+      "@clap/runtime-llama": ["packages/runtime-llama/src/index.ts"],
+      "@clap/runtime-mlx": ["packages/runtime-mlx/src/index.ts"],
+      "@clap/server": ["packages/server/src/index.ts"]
+    }
+  }
+}

@@ -1,0 +1,580 @@
+#!/usr/bin/env bun
+import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download } from "@clap/api";
+import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, storeHfToken } from "@clap/models";
+import { startServer } from "@clap/server";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { formatModelList, formatModelStatus } from "./models-output";
+import { formatBytes, formatDownloadProgress } from "./progress";
+import { installPullCancellationHandler } from "./pull-cancellation";
+import {
+  baseURLFromEnv,
+  currentCliCommand,
+  healthCheck,
+  launchdPlist,
+  portFromBaseURL,
+  readServerMetadata,
+  removeServerMetadata,
+  serverPaths,
+  systemdService,
+  tailFile,
+  waitForHealthy,
+  withServerStartLock,
+  writeServerMetadata,
+  type ServerMetadata,
+} from "./server-lifecycle";
+
+const args = process.argv.slice(2);
+const command = args[0] ?? "help";
+
+try {
+  if (command === "serve") {
+    await serve();
+  } else if (command === "auth") {
+    await authCommand(args.slice(1));
+  } else if (command === "server") {
+    await serverCommand(args.slice(1));
+  } else if (command === "models") {
+    await modelsCommand(args.slice(1));
+  } else if (command === "load") {
+    await loadCommand(args.slice(1));
+  } else if (command === "unload") {
+    await unloadCommand(args.slice(1));
+  } else if (command === "chat") {
+    await chat(args.slice(1));
+  } else if (command === "run") {
+    await run(args.slice(1));
+  } else if (command === "pull") {
+    await pull(args.slice(1));
+  } else {
+    help();
+    process.exit(command === "help" || command === "--help" || command === "-h" ? 0 : 1);
+  }
+} catch (error) {
+  printError(error);
+  process.exit(1);
+}
+
+async function serve() {
+  const server = startServer();
+  console.log(`clap server listening on http://${server.hostname}:${server.port}`);
+  await new Promise(() => undefined);
+}
+
+async function serverStatus() {
+  const metadata = await readServerMetadata();
+  const baseURL = metadata?.baseURL ?? baseURLFromEnv();
+  const health = await healthCheck(baseURL);
+
+  if (!health) {
+    console.log("status: stopped");
+    console.log(`baseURL: ${baseURL}`);
+    if (metadata) {
+      console.log(`pid: ${metadata.pid}`);
+      console.log("health: unavailable");
+    }
+    return;
+  }
+
+  const client = createClapClient({ baseURL });
+  const [runtime, backends, models] = await Promise.all([
+    client.runtime(),
+    client.backends(),
+    client.clapModels(),
+  ]);
+
+  console.log("status: running");
+  console.log(`health: ${health.status}`);
+  console.log(`baseURL: ${baseURL}`);
+  if (metadata) {
+    console.log(`pid: ${metadata.pid}`);
+    console.log(`startedAt: ${metadata.startedAt}`);
+  }
+  console.log(`version: ${health.version}`);
+  console.log(`uptimeMs: ${health.uptimeMs}`);
+  console.log(`runtime: ${runtime.runtime} ${runtime.bunVersion} (${runtime.platform}/${runtime.arch})`);
+  console.log("backends:");
+  for (const backend of backends.backends) {
+    console.log(`  - ${backend.id}: ${backend.status}${backend.reason ? ` (${backend.reason})` : ""}`);
+  }
+  console.log("models:");
+  for (const model of models.models) {
+    console.log(`  - ${model.id}: ${model.status} (${model.backend}/${model.format})`);
+  }
+}
+
+async function serverCommand(argv: string[]) {
+  const action = argv[0] ?? "status";
+  if (action === "start") {
+    await startBackgroundServer();
+  } else if (action === "stop") {
+    await stopBackgroundServer();
+  } else if (action === "status") {
+    await serverStatus();
+  } else if (action === "restart") {
+    await stopBackgroundServer({ quiet: true });
+    await startBackgroundServer();
+  } else if (action === "logs") {
+    await serverLogs(Number(argv[1] ?? "80"));
+  } else if (action === "install") {
+    await installServiceTemplate();
+  } else {
+    throw new Error("usage: clap server <start|stop|status|restart|logs|install>");
+  }
+}
+
+async function modelsCommand(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const action = rest[0] ?? "list";
+  if (action !== "list") {
+    throw new Error("usage: clap models [list] [--aliases] [--json] [--active]");
+  }
+
+  await startBackgroundServer({ quiet: true });
+  const client = createClapClient();
+  const [models, aliases, loaded] = await Promise.all([
+    client.clapModels(),
+    flags.aliases === "true" ? client.clapAliases() : Promise.resolve(undefined),
+    flags.active === "true" ? client.loadedModels() : Promise.resolve(undefined),
+  ]);
+  if (flags.json === "true") {
+    console.log(JSON.stringify({ models: models.models, ...(aliases ? { aliases: aliases.models } : {}), ...(loaded ? { loaded: loaded.models } : {}) }, null, 2));
+    return;
+  }
+  if (loaded) {
+    console.log(formatModelStatus(models.models, loaded.models, aliases?.models));
+    return;
+  }
+  console.log(formatModelList(models.models, aliases?.models));
+}
+
+async function loadCommand(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) {
+    throw new Error("usage: clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]");
+  }
+  await startBackgroundServer({ quiet: true });
+  const response = await createClapClient().loadModel({
+    model,
+    backend: parseBackend(flags.backend),
+    keepAlive: flags.keepAlive,
+  });
+  console.log(`loaded ${response.model.id} (${response.model.backend}/${response.model.format})`);
+  console.log(`state: ${response.model.state}`);
+  console.log(`keepAlive: ${response.model.keepAlive}`);
+  console.log(`expiresAt: ${response.model.expiresAt ?? "never"}`);
+  console.log(`worker: ${response.model.worker.state}${response.model.worker.pid ? ` pid ${response.model.worker.pid}` : ""}`);
+  if (response.model.worker.limitation) console.log(`note: ${response.model.worker.limitation}`);
+}
+
+async function unloadCommand(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) {
+    throw new Error("usage: clap unload <model|alias|path> [--backend mlx|gguf]");
+  }
+  await startBackgroundServer({ quiet: true });
+  const response = await createClapClient().unloadModel({ model, backend: parseBackend(flags.backend) });
+  if (response.unloaded) {
+    console.log(`unloaded ${response.model?.id ?? model}`);
+    return;
+  }
+  if (response.model) {
+    console.log(`unload pending for ${response.model.id}; activeRequests: ${response.model.activeRequests}`);
+    return;
+  }
+  console.log(`not loaded: ${model}`);
+}
+
+async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMetadata> {
+  return withServerStartLock(async () => {
+    const paths = serverPaths();
+    const baseURL = baseURLFromEnv();
+    const existingHealth = await healthCheck(baseURL);
+    const existingMetadata = await readServerMetadata(paths);
+    if (existingHealth?.status === "ok" && existingMetadata) {
+      if (!quiet) console.log(`clap server already running at ${baseURL} (pid ${existingMetadata.pid})`);
+      return existingMetadata;
+    }
+    if (existingHealth?.status === "ok") {
+      const metadata = {
+        pid: 0,
+        port: portFromBaseURL(baseURL),
+        baseURL,
+        startedAt: new Date().toISOString(),
+      };
+      await writeServerMetadata(metadata, paths);
+      if (!quiet) console.log(`clap server already healthy at ${baseURL}`);
+      return metadata;
+    }
+
+    await mkdir(paths.home, { recursive: true });
+    const stdout = Bun.file(paths.stdoutLog);
+    const stderr = Bun.file(paths.stderrLog);
+    const command = [...currentCliCommand(), "serve"];
+    const proc = Bun.spawn(command, {
+      env: { ...process.env, CLAP_BASE_URL: baseURL, PORT: String(portFromBaseURL(baseURL)) },
+      stdout,
+      stderr,
+    });
+    proc.unref();
+
+    const health = await waitForHealthy(baseURL);
+    if (!health) {
+      proc.kill();
+      throw new Error(`server did not become healthy at ${baseURL}; see ${paths.stderrLog}`);
+    }
+
+    const metadata = {
+      pid: proc.pid,
+      port: portFromBaseURL(baseURL),
+      baseURL,
+      startedAt: new Date().toISOString(),
+    };
+    await writeServerMetadata(metadata, paths);
+    if (!quiet) console.log(`clap server started at ${baseURL} (pid ${metadata.pid})`);
+    return metadata;
+  });
+}
+
+async function stopBackgroundServer({ quiet = false } = {}) {
+  const metadata = await readServerMetadata();
+  if (!metadata?.pid) {
+    await removeServerMetadata();
+    if (!quiet) console.log("clap server is not running");
+    return;
+  }
+
+  try {
+    process.kill(metadata.pid, "SIGTERM");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && await healthCheck(metadata.baseURL)) {
+    await Bun.sleep(100);
+  }
+  await removeServerMetadata();
+  if (!quiet) console.log("clap server stopped");
+}
+
+async function serverLogs(lineCount: number) {
+  const paths = serverPaths();
+  const stdout = await tailFile(paths.stdoutLog, lineCount);
+  const stderr = await tailFile(paths.stderrLog, lineCount);
+  console.log(`==> ${paths.stdoutLog} <==`);
+  console.log(stdout || "(empty)");
+  console.log(`==> ${paths.stderrLog} <==`);
+  console.log(stderr || "(empty)");
+}
+
+async function authCommand(argv: string[]) {
+  const action = argv[0] ?? "status";
+  if (action === "login") {
+    await authLogin(argv.slice(1));
+  } else if (action === "logout") {
+    const status = await deleteStoredHfToken();
+    console.log(`status: logged_out`);
+    console.log(`detail: ${status.detail}`);
+  } else if (action === "status") {
+    await printAuthStatus();
+  } else {
+    throw new Error("usage: clap auth <login|logout|status>");
+  }
+}
+
+async function authLogin(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const token = flags.token ?? rest[0] ?? await readTokenForLogin();
+  const status = await storeHfToken(token);
+  console.log("status: logged_in");
+  console.log(`source: ${status.source}`);
+  if (status.tokenPreview) console.log(`token: ${status.tokenPreview}`);
+  if (status.detail) console.log(`detail: ${status.detail}`);
+}
+
+async function printAuthStatus() {
+  const status = await hfAuthStatus();
+  console.log(`status: ${status.authenticated ? "logged_in" : "logged_out"}`);
+  console.log(`source: ${status.source}`);
+  if (status.envVar) console.log(`env: ${status.envVar}`);
+  if (status.tokenPreview) console.log(`token: ${status.tokenPreview}`);
+  if (status.detail) console.log(`detail: ${status.detail}`);
+}
+
+async function installServiceTemplate() {
+  const paths = serverPaths();
+  await mkdir(paths.home, { recursive: true });
+  const command = currentCliCommand();
+  if (process.platform === "darwin") {
+    const plistPath = join(process.env.HOME ?? ".", "Library", "LaunchAgents", "dev.clap.server.plist");
+    await mkdir(dirname(plistPath), { recursive: true });
+    await writeFile(plistPath, launchdPlist(command, paths));
+    console.log(`installed ${plistPath}`);
+    console.log(`start: launchctl load ${plistPath}`);
+    console.log(`stop: launchctl unload ${plistPath}`);
+    return;
+  }
+  if (process.platform === "linux") {
+    const servicePath = join(process.env.HOME ?? ".", ".config", "systemd", "user", "clap.service");
+    await mkdir(dirname(servicePath), { recursive: true });
+    await writeFile(servicePath, systemdService(command, paths));
+    console.log(`installed ${servicePath}`);
+    console.log("start: systemctl --user daemon-reload && systemctl --user enable --now clap");
+    console.log("logs: journalctl --user -u clap -f");
+    return;
+  }
+  console.log("service install is supported on macOS launchd and Linux systemd user services");
+}
+
+async function chat(argv: string[]) {
+  await startBackgroundServer({ quiet: true });
+  const { flags, rest } = parseFlags(argv);
+  const model = flags.model ?? process.env.CLAP_DEFAULT_MODEL;
+  if (!model) {
+    throw new Error("usage: clap chat --model <model|alias|path> [--backend mlx|gguf] [--stream] [prompt]");
+  }
+  const prompt = rest.join(" ") || await readStdinOrPrompt();
+  const request: ChatCompletionRequest = {
+    model,
+    messages: [{ role: "user", content: prompt }],
+    stream: flags.stream === "true" || flags.stream === "1",
+    backend: parseBackend(flags.backend),
+  };
+
+  const client = createClapClient();
+  if (request.stream) {
+    for await (const token of client.streamChatCompletions(request)) {
+      process.stdout.write(token);
+    }
+    process.stdout.write("\n");
+    return;
+  }
+
+  const response = await client.chatCompletions(request);
+  console.log(response.choices[0]?.message.content ?? "");
+}
+
+async function run(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) {
+    throw new Error("usage: clap run <model> [--backend mlx|gguf] [prompt]");
+  }
+
+  await startBackgroundServer({ quiet: true });
+  const prompt = rest.slice(1).join(" ") || "Hello from clap run";
+  const client = createClapClient();
+  const response = await client.chatCompletions({
+    model,
+    messages: [{ role: "user", content: prompt }],
+    stream: false,
+    backend: parseBackend(flags.backend),
+  });
+  console.log(response.choices[0]?.message.content ?? "");
+}
+
+async function pull(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) {
+    throw new Error("usage: clap pull <owner/model> [--file model.gguf]");
+  }
+
+  await startBackgroundServer({ quiet: true });
+  const client = createClapClient();
+  console.log(`pulling ${model}${flags.file ? ` (${flags.file})` : ""}${flags.backend ? ` via ${flags.backend}` : ""}...`);
+  const request = { model, file: flags.file, backend: parseBackend(flags.backend), force: flags.force === "true" };
+  let activeDownloadId: string | undefined;
+  const disposeCancellationHandler = installPullCancellationHandler(async () => {
+    if (activeDownloadId) await client.cancelDownload(activeDownloadId);
+  });
+  try {
+    const response = await pullWithAuthRetry(client, request);
+    activeDownloadId = response.download.id;
+    let download = await waitForDownload(client, activeDownloadId);
+    if (download.status === "failed" && isHfAuthError(new Error(download.error ?? ""))) {
+      if (!process.stdin.isTTY) {
+        throw new Error(`${download.error} Non-interactive shell: ${hfAuthGuidance()}`);
+      }
+      console.error("Hugging Face authentication is required for this repo.");
+      const token = await readSecret("Hugging Face token: ");
+      const status = await storeHfToken(token);
+      console.error(`Saved Hugging Face token (${status.source}${status.tokenPreview ? `, ${status.tokenPreview}` : ""}); retrying pull...`);
+      const retry = await client.pullModel(request);
+      activeDownloadId = retry.download.id;
+      download = await waitForDownload(client, activeDownloadId);
+    }
+    console.log(`status: ${download.status}`);
+    if (download.modelPath) console.log(`model: ${download.modelPath}`);
+    if (download.bytesReceived) console.log(`bytes: ${formatBytes(download.bytesReceived)}`);
+    if (download.status === "cancelled") throw new Error("pull cancelled");
+    if (download.error) throw new Error(download.error);
+  } finally {
+    disposeCancellationHandler();
+  }
+}
+
+async function waitForDownload(client: ReturnType<typeof createClapClient>, id: string): Promise<Download> {
+  let tick = 0;
+  let lastLine = "";
+  while (true) {
+    const download = (await client.downloads()).downloads.find((entry) => entry.id === id);
+    if (!download) throw new Error(`download not found: ${id}`);
+    const line = formatDownloadProgress(download, tick++);
+    if (process.stderr.isTTY) {
+      process.stderr.write(`\r${line}${" ".repeat(Math.max(0, lastLine.length - line.length))}`);
+      lastLine = line;
+    } else {
+      process.stderr.write(`${line}\n`);
+    }
+    if (download.status === "completed" || download.status === "failed" || download.status === "cancelled") {
+      if (process.stderr.isTTY) process.stderr.write("\n");
+      return download;
+    }
+    await Bun.sleep(250);
+  }
+}
+
+async function pullWithAuthRetry(client: ReturnType<typeof createClapClient>, request: { model: string; file?: string; backend?: "gguf" | "mlx"; force: boolean }) {
+  try {
+    return await client.pullModel(request);
+  } catch (error) {
+    if (!(error instanceof ClapApiError) || !isHfAuthError(error)) throw error;
+    if (!process.stdin.isTTY) {
+      throw new Error(`${error.message} Non-interactive shell: ${hfAuthGuidance()}`);
+    }
+    console.error("Hugging Face authentication is required for this repo.");
+    const token = await readSecret("Hugging Face token: ");
+    const status = await storeHfToken(token);
+    console.error(`Saved Hugging Face token (${status.source}${status.tokenPreview ? `, ${status.tokenPreview}` : ""}); retrying pull...`);
+    return client.pullModel(request);
+  }
+}
+
+function parseFlags(argv: string[]) {
+  const flags: Record<string, string> = {};
+  const rest: string[] = [];
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--stream") {
+      flags.stream = "true";
+    } else if (arg === "--aliases") {
+      flags.aliases = "true";
+    } else if (arg === "--json") {
+      flags.json = "true";
+    } else if (arg === "--active") {
+      flags.active = "true";
+    } else if (arg === "--force") {
+      flags.force = "true";
+    } else if (arg === "--model" || arg === "-m") {
+      flags.model = argv[++index];
+    } else if (arg === "--file" || arg === "-f") {
+      flags.file = argv[++index];
+    } else if (arg === "--backend") {
+      flags.backend = argv[++index];
+    } else if (arg === "--keep-alive") {
+      flags.keepAlive = argv[++index];
+    } else if (arg === "--token") {
+      flags.token = argv[++index];
+    } else {
+      rest.push(arg);
+    }
+  }
+
+  return { flags, rest };
+}
+
+function parseBackend(value: string | undefined): "gguf" | "mlx" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "gguf" || value === "mlx") return value;
+  throw new Error(`--backend must be mlx or gguf, got: ${value}`);
+}
+
+async function readStdinOrPrompt(): Promise<string> {
+  if (!process.stdin.isTTY) {
+    const text = await new Response(Bun.stdin.stream()).text();
+    if (text.trim()) return text.trim();
+  }
+  return "Hello from Clap";
+}
+
+async function readTokenForLogin(): Promise<string> {
+  if (!process.stdin.isTTY) {
+    const text = await new Response(Bun.stdin.stream()).text();
+    if (text.trim()) return text.trim();
+    throw new Error("usage: clap auth login [--token hf_xxx] (or pipe token on stdin)");
+  }
+  return readSecret("Hugging Face token: ");
+}
+
+async function readSecret(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  if (!process.stdin.isTTY) {
+    const text = await new Response(Bun.stdin.stream()).text();
+    return text.trim();
+  }
+  await runTtyCommand("stty -echo");
+  try {
+    const token = await readLineFromStdin();
+    process.stderr.write("\n");
+    return token.trim();
+  } finally {
+    await runTtyCommand("stty echo");
+  }
+}
+
+async function readLineFromStdin(): Promise<string> {
+  const reader = Bun.stdin.stream().getReader();
+  const decoder = new TextDecoder();
+  let value = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      value += decoder.decode(chunk.value);
+      const newline = value.indexOf("\n");
+      if (newline >= 0) return value.slice(0, newline);
+    }
+    return value;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function runTtyCommand(command: string): Promise<void> {
+  const proc = Bun.spawn(["/bin/sh", "-lc", command], { stdin: "inherit", stdout: "ignore", stderr: "ignore" });
+  await proc.exited;
+}
+
+function printError(error: unknown) {
+  if (error instanceof ClapApiError) {
+    console.error(`clap: server request failed (${error.status}): ${error.message}`);
+    console.error(`clap: is the server running? try: clap server start`);
+    return;
+  }
+  console.error(`clap: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+function help() {
+  console.log(`Usage:
+  clap serve
+  clap auth login|logout|status
+  clap server start|stop|status|restart|logs|install
+  clap models [list] [--aliases] [--json] [--active]
+  clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
+  clap unload <model|alias|path> [--backend mlx|gguf]
+  clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--force]
+  clap chat --model <model|alias|path> [--backend mlx|gguf] [--stream] [prompt]
+  clap run <model|alias> [--backend mlx|gguf] [prompt]
+
+Environment:
+  CLAP_HOME      State/log directory (default: ~/.clap)
+  CLAP_BASE_URL  Server URL (default: ${defaultBaseURL})
+  CLAP_DEFAULT_MODEL  Default model for clap chat
+  CLAP_HF_ENDPOINT  Hugging Face endpoint (default: https://huggingface.co)
+  CLAP_HF_TOKEN, HF_TOKEN, HUGGINGFACE_HUB_TOKEN, HUGGINGFACE_TOKEN  Hugging Face token`);
+}

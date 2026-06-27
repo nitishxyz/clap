@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+.bin/
+
+# Bun / install caches
+.bun/
+bun.lockb
+
+# Build outputs
+dist/
+build/
+out/
+.output/
+coverage/
+*.tgz
+.turbo/
+
+# Swift / native build outputs
+.build/
+.swiftpm/
+DerivedData/
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs
+*.log
+logs/
+
+# Env files (allow .env.example)
+.env
+.env.*
+!.env.example
+
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local Clap server state / logs
+.clap/
+clap.log
+clap-server.log
+
+# Packaged runtime / vendor build artifacts
+/runtime/
+/vendor/
+/libexec/*
+!/libexec/README.md
+
+# Model / download cache data
+.cache/
+/models/
+/downloads/
+
+# Local-only files
+*.local

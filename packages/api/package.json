@@ -1,0 +1,16 @@
+{
+  "name": "@clap/api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate:openapi": "bun run src/openapi.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
+    "zod": "^3.23.8"
+  }
+}

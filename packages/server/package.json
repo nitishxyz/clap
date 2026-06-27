@@ -1,0 +1,21 @@
+{
+  "name": "@clap/server",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@clap/api": "workspace:*",
+    "@clap/models": "workspace:*",
+    "@clap/runtime-llama": "workspace:*",
+    "@clap/runtime-mlx": "workspace:*",
+    "@clap/runtime-router": "workspace:*",
+    "hono": "^4.6.3",
+    "zod": "^3.23.8"
+  }
+}

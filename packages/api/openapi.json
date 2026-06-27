@@ -1,0 +1,3687 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Clap Local Model Server API",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:11435"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "default": "invalid_request_error"
+              },
+              "code": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "uptimeMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "uptimeMs"
+        ]
+      },
+      "RuntimeResponse": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string"
+          },
+          "arch": {
+            "type": "string"
+          },
+          "bunVersion": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "bun"
+            ]
+          }
+        },
+        "required": [
+          "platform",
+          "arch",
+          "bunVersion",
+          "runtime"
+        ]
+      },
+      "BackendsResponse": {
+        "type": "object",
+        "properties": {
+          "backends": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "enum": [
+                    "llama",
+                    "mlx"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "available",
+                    "unsupported",
+                    "not_installed"
+                  ]
+                },
+                "formats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "status",
+                "formats"
+              ]
+            }
+          }
+        },
+        "required": [
+          "backends"
+        ]
+      },
+      "ClapModelsResponse": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "object": {
+                  "type": "string",
+                  "enum": [
+                    "model"
+                  ],
+                  "default": "model"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "huggingface",
+                        "local",
+                        "alias"
+                      ]
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "baseRepo": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                },
+                "backend": {
+                  "type": "string",
+                  "enum": [
+                    "llama",
+                    "mlx"
+                  ]
+                },
+                "format": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "available",
+                    "not_downloaded",
+                    "unsupported"
+                  ]
+                },
+                "modalities": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "text",
+                          "image",
+                          "audio"
+                        ]
+                      }
+                    },
+                    "output": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "text",
+                          "image",
+                          "audio"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "output"
+                  ]
+                },
+                "capabilities": {
+                  "type": "object",
+                  "properties": {
+                    "chat": {
+                      "type": "boolean"
+                    },
+                    "completion": {
+                      "type": "boolean"
+                    },
+                    "streaming": {
+                      "type": "boolean"
+                    },
+                    "temperature": {
+                      "type": "boolean"
+                    },
+                    "system_prompt": {
+                      "type": "boolean"
+                    },
+                    "attachment": {
+                      "type": "boolean"
+                    },
+                    "reasoning": {
+                      "type": "boolean"
+                    },
+                    "tool_call": {
+                      "type": "boolean"
+                    },
+                    "structured_output": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "chat",
+                    "completion",
+                    "streaming",
+                    "temperature",
+                    "system_prompt",
+                    "attachment",
+                    "reasoning",
+                    "tool_call",
+                    "structured_output"
+                  ]
+                },
+                "limit": {
+                  "type": "object",
+                  "properties": {
+                    "context": {
+                      "type": "integer",
+                      "nullable": true,
+                      "minimum": 0,
+                      "exclusiveMinimum": true
+                    },
+                    "output": {
+                      "type": "integer",
+                      "nullable": true,
+                      "minimum": 0,
+                      "exclusiveMinimum": true
+                    }
+                  },
+                  "required": [
+                    "context",
+                    "output"
+                  ]
+                },
+                "upstream": {
+                  "type": "object",
+                  "properties": {
+                    "modalities": {
+                      "type": "object",
+                      "properties": {
+                        "input": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio"
+                            ]
+                          }
+                        },
+                        "output": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "input",
+                        "output"
+                      ]
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "properties": {
+                        "chat": {
+                          "type": "boolean"
+                        },
+                        "completion": {
+                          "type": "boolean"
+                        },
+                        "streaming": {
+                          "type": "boolean"
+                        },
+                        "temperature": {
+                          "type": "boolean"
+                        },
+                        "system_prompt": {
+                          "type": "boolean"
+                        },
+                        "attachment": {
+                          "type": "boolean"
+                        },
+                        "reasoning": {
+                          "type": "boolean"
+                        },
+                        "tool_call": {
+                          "type": "boolean"
+                        },
+                        "structured_output": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "object",
+                      "properties": {
+                        "context": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "output": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        }
+                      },
+                      "required": [
+                        "context",
+                        "output"
+                      ]
+                    }
+                  }
+                },
+                "architecture": {
+                  "type": "string"
+                },
+                "modelType": {
+                  "type": "string"
+                },
+                "quantization": {
+                  "type": "string"
+                },
+                "alias": {
+                  "type": "string"
+                },
+                "repo": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "localPath": {
+                  "type": "string"
+                },
+                "pull": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string"
+                    },
+                    "file": {
+                      "type": "string"
+                    },
+                    "backend": {
+                      "type": "string",
+                      "enum": [
+                        "gguf",
+                        "mlx"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "displayName",
+                "provider",
+                "source",
+                "backend",
+                "format",
+                "status",
+                "modalities",
+                "capabilities",
+                "limit"
+              ]
+            }
+          }
+        },
+        "required": [
+          "models"
+        ]
+      },
+      "DownloadsResponse": {
+        "type": "object",
+        "properties": {
+          "downloads": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string",
+                  "enum": [
+                    "gguf",
+                    "mlx"
+                  ]
+                },
+                "targetKey": {
+                  "type": "string"
+                },
+                "currentFile": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "queued",
+                    "running",
+                    "completed",
+                    "failed",
+                    "cancelled"
+                  ]
+                },
+                "bytesReceived": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "totalBytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "modelPath": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "startedAt": {
+                  "type": "string"
+                },
+                "completedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "model",
+                "status",
+                "startedAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "downloads"
+        ]
+      },
+      "LoadedModelsResponse": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string",
+                  "enum": [
+                    "llama",
+                    "mlx"
+                  ]
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "gguf",
+                    "mlx"
+                  ]
+                },
+                "localPath": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "warm",
+                    "active",
+                    "unloading"
+                  ]
+                },
+                "activeRequests": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "loadedAt": {
+                  "type": "string"
+                },
+                "lastUsedAt": {
+                  "type": "string"
+                },
+                "keepAlive": {
+                  "type": "string"
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "pinned": {
+                  "type": "boolean"
+                },
+                "always": {
+                  "type": "boolean"
+                },
+                "worker": {
+                  "type": "object",
+                  "properties": {
+                    "pid": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "not_started",
+                        "one_shot",
+                        "resident",
+                        "exited"
+                      ]
+                    },
+                    "limitation": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "id",
+                "backend",
+                "format",
+                "localPath",
+                "state",
+                "activeRequests",
+                "loadedAt",
+                "lastUsedAt",
+                "keepAlive",
+                "expiresAt",
+                "pinned",
+                "always",
+                "worker"
+              ]
+            }
+          }
+        },
+        "required": [
+          "models"
+        ]
+      },
+      "LoadModelRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "mlx"
+            ]
+          },
+          "keepAlive": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "always"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^\\d+(ms|s|m|h|d)$"
+              }
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "LoadModelResponse": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "llama",
+                  "mlx"
+                ]
+              },
+              "format": {
+                "type": "string",
+                "enum": [
+                  "gguf",
+                  "mlx"
+                ]
+              },
+              "localPath": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "warm",
+                  "active",
+                  "unloading"
+                ]
+              },
+              "activeRequests": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "loadedAt": {
+                "type": "string"
+              },
+              "lastUsedAt": {
+                "type": "string"
+              },
+              "keepAlive": {
+                "type": "string"
+              },
+              "expiresAt": {
+                "type": "string",
+                "nullable": true
+              },
+              "pinned": {
+                "type": "boolean"
+              },
+              "always": {
+                "type": "boolean"
+              },
+              "worker": {
+                "type": "object",
+                "properties": {
+                  "pid": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "not_started",
+                      "one_shot",
+                      "resident",
+                      "exited"
+                    ]
+                  },
+                  "limitation": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "id",
+              "backend",
+              "format",
+              "localPath",
+              "state",
+              "activeRequests",
+              "loadedAt",
+              "lastUsedAt",
+              "keepAlive",
+              "expiresAt",
+              "pinned",
+              "always",
+              "worker"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "UnloadModelRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "mlx"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "UnloadModelResponse": {
+        "type": "object",
+        "properties": {
+          "unloaded": {
+            "type": "boolean"
+          },
+          "model": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "llama",
+                  "mlx"
+                ]
+              },
+              "format": {
+                "type": "string",
+                "enum": [
+                  "gguf",
+                  "mlx"
+                ]
+              },
+              "localPath": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "warm",
+                  "active",
+                  "unloading"
+                ]
+              },
+              "activeRequests": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "loadedAt": {
+                "type": "string"
+              },
+              "lastUsedAt": {
+                "type": "string"
+              },
+              "keepAlive": {
+                "type": "string"
+              },
+              "expiresAt": {
+                "type": "string",
+                "nullable": true
+              },
+              "pinned": {
+                "type": "boolean"
+              },
+              "always": {
+                "type": "boolean"
+              },
+              "worker": {
+                "type": "object",
+                "properties": {
+                  "pid": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "not_started",
+                      "one_shot",
+                      "resident",
+                      "exited"
+                    ]
+                  },
+                  "limitation": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "id",
+              "backend",
+              "format",
+              "localPath",
+              "state",
+              "activeRequests",
+              "loadedAt",
+              "lastUsedAt",
+              "keepAlive",
+              "expiresAt",
+              "pinned",
+              "always",
+              "worker"
+            ]
+          }
+        },
+        "required": [
+          "unloaded"
+        ]
+      },
+      "PullModelRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "mlx"
+            ]
+          },
+          "force": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "PullModelResponse": {
+        "type": "object",
+        "properties": {
+          "download": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "gguf",
+                  "mlx"
+                ]
+              },
+              "targetKey": {
+                "type": "string"
+              },
+              "currentFile": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "completed",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              "bytesReceived": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0
+              },
+              "totalBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "modelPath": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "startedAt": {
+                "type": "string"
+              },
+              "completedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "model",
+              "status",
+              "startedAt"
+            ]
+          }
+        },
+        "required": [
+          "download"
+        ]
+      },
+      "OpenAIModelsResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "model"
+                      ]
+                    },
+                    "created": {
+                      "type": "number"
+                    },
+                    "owned_by": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "object",
+                    "created",
+                    "owned_by"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "model"
+                      ],
+                      "default": "model"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "displayName": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "huggingface",
+                            "local",
+                            "alias"
+                          ]
+                        },
+                        "repo": {
+                          "type": "string"
+                        },
+                        "baseRepo": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ]
+                    },
+                    "backend": {
+                      "type": "string",
+                      "enum": [
+                        "llama",
+                        "mlx"
+                      ]
+                    },
+                    "format": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "available",
+                        "not_downloaded",
+                        "unsupported"
+                      ]
+                    },
+                    "modalities": {
+                      "type": "object",
+                      "properties": {
+                        "input": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio"
+                            ]
+                          }
+                        },
+                        "output": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "input",
+                        "output"
+                      ]
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "properties": {
+                        "chat": {
+                          "type": "boolean"
+                        },
+                        "completion": {
+                          "type": "boolean"
+                        },
+                        "streaming": {
+                          "type": "boolean"
+                        },
+                        "temperature": {
+                          "type": "boolean"
+                        },
+                        "system_prompt": {
+                          "type": "boolean"
+                        },
+                        "attachment": {
+                          "type": "boolean"
+                        },
+                        "reasoning": {
+                          "type": "boolean"
+                        },
+                        "tool_call": {
+                          "type": "boolean"
+                        },
+                        "structured_output": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "chat",
+                        "completion",
+                        "streaming",
+                        "temperature",
+                        "system_prompt",
+                        "attachment",
+                        "reasoning",
+                        "tool_call",
+                        "structured_output"
+                      ]
+                    },
+                    "limit": {
+                      "type": "object",
+                      "properties": {
+                        "context": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "output": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        }
+                      },
+                      "required": [
+                        "context",
+                        "output"
+                      ]
+                    },
+                    "upstream": {
+                      "type": "object",
+                      "properties": {
+                        "modalities": {
+                          "type": "object",
+                          "properties": {
+                            "input": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "image",
+                                  "audio"
+                                ]
+                              }
+                            },
+                            "output": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "image",
+                                  "audio"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "input",
+                            "output"
+                          ]
+                        },
+                        "capabilities": {
+                          "type": "object",
+                          "properties": {
+                            "chat": {
+                              "type": "boolean"
+                            },
+                            "completion": {
+                              "type": "boolean"
+                            },
+                            "streaming": {
+                              "type": "boolean"
+                            },
+                            "temperature": {
+                              "type": "boolean"
+                            },
+                            "system_prompt": {
+                              "type": "boolean"
+                            },
+                            "attachment": {
+                              "type": "boolean"
+                            },
+                            "reasoning": {
+                              "type": "boolean"
+                            },
+                            "tool_call": {
+                              "type": "boolean"
+                            },
+                            "structured_output": {
+                              "type": "boolean"
+                            }
+                          }
+                        },
+                        "limit": {
+                          "type": "object",
+                          "properties": {
+                            "context": {
+                              "type": "integer",
+                              "nullable": true,
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "output": {
+                              "type": "integer",
+                              "nullable": true,
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            }
+                          },
+                          "required": [
+                            "context",
+                            "output"
+                          ]
+                        }
+                      }
+                    },
+                    "architecture": {
+                      "type": "string"
+                    },
+                    "modelType": {
+                      "type": "string"
+                    },
+                    "quantization": {
+                      "type": "string"
+                    },
+                    "alias": {
+                      "type": "string"
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "file": {
+                      "type": "string"
+                    },
+                    "localPath": {
+                      "type": "string"
+                    },
+                    "pull": {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "type": "string"
+                        },
+                        "file": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "model"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "number"
+                    },
+                    "owned_by": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "displayName",
+                    "provider",
+                    "source",
+                    "backend",
+                    "format",
+                    "status",
+                    "modalities",
+                    "capabilities",
+                    "limit",
+                    "created",
+                    "owned_by"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "object",
+          "data"
+        ]
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "system",
+                    "user",
+                    "assistant",
+                    "tool"
+                  ]
+                },
+                "content": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "nullable": true
+                    },
+                    {
+                      "nullable": true
+                    }
+                  ],
+                  "default": ""
+                }
+              },
+              "required": [
+                "role"
+              ]
+            },
+            "minItems": 1
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "mlx"
+            ]
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        },
+        "required": [
+          "model",
+          "messages"
+        ]
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "chat.completion"
+            ]
+          },
+          "created": {
+            "type": "number"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "number"
+                },
+                "message": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "system",
+                        "user",
+                        "assistant",
+                        "tool"
+                      ]
+                    },
+                    "content": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "nullable": true
+                        },
+                        {
+                          "nullable": true
+                        }
+                      ],
+                      "default": ""
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                },
+                "finish_reason": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "index",
+                "message",
+                "finish_reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "created",
+          "model",
+          "choices"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/clap/v1/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "uptimeMs": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "version",
+                    "uptimeMs"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/runtime": {
+      "get": {
+        "summary": "Runtime metadata",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "platform": {
+                      "type": "string"
+                    },
+                    "arch": {
+                      "type": "string"
+                    },
+                    "bunVersion": {
+                      "type": "string"
+                    },
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "bun"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "platform",
+                    "arch",
+                    "bunVersion",
+                    "runtime"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/backends": {
+      "get": {
+        "summary": "Bundled backend metadata",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "backends": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "enum": [
+                              "llama",
+                              "mlx"
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "available",
+                              "unsupported",
+                              "not_installed"
+                            ]
+                          },
+                          "formats": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "reason": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "status",
+                          "formats"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "backends"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/models": {
+      "get": {
+        "summary": "Clap model inventory",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "object": {
+                            "type": "string",
+                            "enum": [
+                              "model"
+                            ],
+                            "default": "model"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "displayName": {
+                            "type": "string"
+                          },
+                          "provider": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "huggingface",
+                                  "local",
+                                  "alias"
+                                ]
+                              },
+                              "repo": {
+                                "type": "string"
+                              },
+                              "baseRepo": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "type"
+                            ]
+                          },
+                          "backend": {
+                            "type": "string",
+                            "enum": [
+                              "llama",
+                              "mlx"
+                            ]
+                          },
+                          "format": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "available",
+                              "not_downloaded",
+                              "unsupported"
+                            ]
+                          },
+                          "modalities": {
+                            "type": "object",
+                            "properties": {
+                              "input": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "text",
+                                    "image",
+                                    "audio"
+                                  ]
+                                }
+                              },
+                              "output": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "text",
+                                    "image",
+                                    "audio"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "input",
+                              "output"
+                            ]
+                          },
+                          "capabilities": {
+                            "type": "object",
+                            "properties": {
+                              "chat": {
+                                "type": "boolean"
+                              },
+                              "completion": {
+                                "type": "boolean"
+                              },
+                              "streaming": {
+                                "type": "boolean"
+                              },
+                              "temperature": {
+                                "type": "boolean"
+                              },
+                              "system_prompt": {
+                                "type": "boolean"
+                              },
+                              "attachment": {
+                                "type": "boolean"
+                              },
+                              "reasoning": {
+                                "type": "boolean"
+                              },
+                              "tool_call": {
+                                "type": "boolean"
+                              },
+                              "structured_output": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "chat",
+                              "completion",
+                              "streaming",
+                              "temperature",
+                              "system_prompt",
+                              "attachment",
+                              "reasoning",
+                              "tool_call",
+                              "structured_output"
+                            ]
+                          },
+                          "limit": {
+                            "type": "object",
+                            "properties": {
+                              "context": {
+                                "type": "integer",
+                                "nullable": true,
+                                "minimum": 0,
+                                "exclusiveMinimum": true
+                              },
+                              "output": {
+                                "type": "integer",
+                                "nullable": true,
+                                "minimum": 0,
+                                "exclusiveMinimum": true
+                              }
+                            },
+                            "required": [
+                              "context",
+                              "output"
+                            ]
+                          },
+                          "upstream": {
+                            "type": "object",
+                            "properties": {
+                              "modalities": {
+                                "type": "object",
+                                "properties": {
+                                  "input": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "text",
+                                        "image",
+                                        "audio"
+                                      ]
+                                    }
+                                  },
+                                  "output": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "text",
+                                        "image",
+                                        "audio"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "input",
+                                  "output"
+                                ]
+                              },
+                              "capabilities": {
+                                "type": "object",
+                                "properties": {
+                                  "chat": {
+                                    "type": "boolean"
+                                  },
+                                  "completion": {
+                                    "type": "boolean"
+                                  },
+                                  "streaming": {
+                                    "type": "boolean"
+                                  },
+                                  "temperature": {
+                                    "type": "boolean"
+                                  },
+                                  "system_prompt": {
+                                    "type": "boolean"
+                                  },
+                                  "attachment": {
+                                    "type": "boolean"
+                                  },
+                                  "reasoning": {
+                                    "type": "boolean"
+                                  },
+                                  "tool_call": {
+                                    "type": "boolean"
+                                  },
+                                  "structured_output": {
+                                    "type": "boolean"
+                                  }
+                                }
+                              },
+                              "limit": {
+                                "type": "object",
+                                "properties": {
+                                  "context": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "output": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  }
+                                },
+                                "required": [
+                                  "context",
+                                  "output"
+                                ]
+                              }
+                            }
+                          },
+                          "architecture": {
+                            "type": "string"
+                          },
+                          "modelType": {
+                            "type": "string"
+                          },
+                          "quantization": {
+                            "type": "string"
+                          },
+                          "alias": {
+                            "type": "string"
+                          },
+                          "repo": {
+                            "type": "string"
+                          },
+                          "file": {
+                            "type": "string"
+                          },
+                          "localPath": {
+                            "type": "string"
+                          },
+                          "pull": {
+                            "type": "object",
+                            "properties": {
+                              "model": {
+                                "type": "string"
+                              },
+                              "file": {
+                                "type": "string"
+                              },
+                              "backend": {
+                                "type": "string",
+                                "enum": [
+                                  "gguf",
+                                  "mlx"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "model"
+                            ]
+                          },
+                          "reason": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "displayName",
+                          "provider",
+                          "source",
+                          "backend",
+                          "format",
+                          "status",
+                          "modalities",
+                          "capabilities",
+                          "limit"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/downloads": {
+      "get": {
+        "summary": "Model download status",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "downloads": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "file": {
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string",
+                            "enum": [
+                              "gguf",
+                              "mlx"
+                            ]
+                          },
+                          "targetKey": {
+                            "type": "string"
+                          },
+                          "currentFile": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "running",
+                              "completed",
+                              "failed",
+                              "cancelled"
+                            ]
+                          },
+                          "bytesReceived": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0
+                          },
+                          "totalBytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "modelPath": {
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "startedAt": {
+                            "type": "string"
+                          },
+                          "completedAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "model",
+                          "status",
+                          "startedAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "downloads"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/runtime/models": {
+      "get": {
+        "summary": "Loaded runtime model registry",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string",
+                            "enum": [
+                              "llama",
+                              "mlx"
+                            ]
+                          },
+                          "format": {
+                            "type": "string",
+                            "enum": [
+                              "gguf",
+                              "mlx"
+                            ]
+                          },
+                          "localPath": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "warm",
+                              "active",
+                              "unloading"
+                            ]
+                          },
+                          "activeRequests": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "loadedAt": {
+                            "type": "string"
+                          },
+                          "lastUsedAt": {
+                            "type": "string"
+                          },
+                          "keepAlive": {
+                            "type": "string"
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "pinned": {
+                            "type": "boolean"
+                          },
+                          "always": {
+                            "type": "boolean"
+                          },
+                          "worker": {
+                            "type": "object",
+                            "properties": {
+                              "pid": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "exclusiveMinimum": true
+                              },
+                              "state": {
+                                "type": "string",
+                                "enum": [
+                                  "not_started",
+                                  "one_shot",
+                                  "resident",
+                                  "exited"
+                                ]
+                              },
+                              "limitation": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "id",
+                          "backend",
+                          "format",
+                          "localPath",
+                          "state",
+                          "activeRequests",
+                          "loadedAt",
+                          "lastUsedAt",
+                          "keepAlive",
+                          "expiresAt",
+                          "pinned",
+                          "always",
+                          "worker"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/models/load": {
+      "post": {
+        "summary": "Load or warm a local model in the runtime lifecycle registry",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  },
+                  "keepAlive": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "always"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\d+(ms|s|m|h|d)$"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "llama",
+                            "mlx"
+                          ]
+                        },
+                        "format": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        },
+                        "localPath": {
+                          "type": "string"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "warm",
+                            "active",
+                            "unloading"
+                          ]
+                        },
+                        "activeRequests": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "loadedAt": {
+                          "type": "string"
+                        },
+                        "lastUsedAt": {
+                          "type": "string"
+                        },
+                        "keepAlive": {
+                          "type": "string"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "pinned": {
+                          "type": "boolean"
+                        },
+                        "always": {
+                          "type": "boolean"
+                        },
+                        "worker": {
+                          "type": "object",
+                          "properties": {
+                            "pid": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "not_started",
+                                "one_shot",
+                                "resident",
+                                "exited"
+                              ]
+                            },
+                            "limitation": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "state"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "id",
+                        "backend",
+                        "format",
+                        "localPath",
+                        "state",
+                        "activeRequests",
+                        "loadedAt",
+                        "lastUsedAt",
+                        "keepAlive",
+                        "expiresAt",
+                        "pinned",
+                        "always",
+                        "worker"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/models/unload": {
+      "post": {
+        "summary": "Unload a model from the runtime lifecycle registry",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  }
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "unloaded": {
+                      "type": "boolean"
+                    },
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "llama",
+                            "mlx"
+                          ]
+                        },
+                        "format": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        },
+                        "localPath": {
+                          "type": "string"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "warm",
+                            "active",
+                            "unloading"
+                          ]
+                        },
+                        "activeRequests": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "loadedAt": {
+                          "type": "string"
+                        },
+                        "lastUsedAt": {
+                          "type": "string"
+                        },
+                        "keepAlive": {
+                          "type": "string"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "pinned": {
+                          "type": "boolean"
+                        },
+                        "always": {
+                          "type": "boolean"
+                        },
+                        "worker": {
+                          "type": "object",
+                          "properties": {
+                            "pid": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "not_started",
+                                "one_shot",
+                                "resident",
+                                "exited"
+                              ]
+                            },
+                            "limitation": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "state"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "id",
+                        "backend",
+                        "format",
+                        "localPath",
+                        "state",
+                        "activeRequests",
+                        "loadedAt",
+                        "lastUsedAt",
+                        "keepAlive",
+                        "expiresAt",
+                        "pinned",
+                        "always",
+                        "worker"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "unloaded"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/models/pull": {
+      "post": {
+        "summary": "Download a Hugging Face model into the local cache",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "model": {
+                          "type": "string"
+                        },
+                        "file": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        },
+                        "targetKey": {
+                          "type": "string"
+                        },
+                        "currentFile": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "queued",
+                            "running",
+                            "completed",
+                            "failed",
+                            "cancelled"
+                          ]
+                        },
+                        "bytesReceived": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "default": 0
+                        },
+                        "totalBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "modelPath": {
+                          "type": "string"
+                        },
+                        "error": {
+                          "type": "string"
+                        },
+                        "startedAt": {
+                          "type": "string"
+                        },
+                        "completedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "model",
+                        "status",
+                        "startedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "download"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/downloads/{id}/cancel": {
+      "post": {
+        "summary": "Cancel a running model download",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "model": {
+                          "type": "string"
+                        },
+                        "file": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        },
+                        "targetKey": {
+                          "type": "string"
+                        },
+                        "currentFile": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "queued",
+                            "running",
+                            "completed",
+                            "failed",
+                            "cancelled"
+                          ]
+                        },
+                        "bytesReceived": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "default": 0
+                        },
+                        "totalBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "modelPath": {
+                          "type": "string"
+                        },
+                        "error": {
+                          "type": "string"
+                        },
+                        "startedAt": {
+                          "type": "string"
+                        },
+                        "completedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "model",
+                        "status",
+                        "startedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "download"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "OpenAI-compatible models list",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            },
+            "required": false,
+            "name": "metadata",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "list"
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "object": {
+                                "type": "string",
+                                "enum": [
+                                  "model"
+                                ]
+                              },
+                              "created": {
+                                "type": "number"
+                              },
+                              "owned_by": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "object",
+                              "created",
+                              "owned_by"
+                            ]
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "object": {
+                                "type": "string",
+                                "enum": [
+                                  "model"
+                                ],
+                                "default": "model"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "displayName": {
+                                "type": "string"
+                              },
+                              "provider": {
+                                "type": "string"
+                              },
+                              "source": {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "huggingface",
+                                      "local",
+                                      "alias"
+                                    ]
+                                  },
+                                  "repo": {
+                                    "type": "string"
+                                  },
+                                  "baseRepo": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "type"
+                                ]
+                              },
+                              "backend": {
+                                "type": "string",
+                                "enum": [
+                                  "llama",
+                                  "mlx"
+                                ]
+                              },
+                              "format": {
+                                "type": "string"
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "available",
+                                  "not_downloaded",
+                                  "unsupported"
+                                ]
+                              },
+                              "modalities": {
+                                "type": "object",
+                                "properties": {
+                                  "input": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "text",
+                                        "image",
+                                        "audio"
+                                      ]
+                                    }
+                                  },
+                                  "output": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "text",
+                                        "image",
+                                        "audio"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "input",
+                                  "output"
+                                ]
+                              },
+                              "capabilities": {
+                                "type": "object",
+                                "properties": {
+                                  "chat": {
+                                    "type": "boolean"
+                                  },
+                                  "completion": {
+                                    "type": "boolean"
+                                  },
+                                  "streaming": {
+                                    "type": "boolean"
+                                  },
+                                  "temperature": {
+                                    "type": "boolean"
+                                  },
+                                  "system_prompt": {
+                                    "type": "boolean"
+                                  },
+                                  "attachment": {
+                                    "type": "boolean"
+                                  },
+                                  "reasoning": {
+                                    "type": "boolean"
+                                  },
+                                  "tool_call": {
+                                    "type": "boolean"
+                                  },
+                                  "structured_output": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "chat",
+                                  "completion",
+                                  "streaming",
+                                  "temperature",
+                                  "system_prompt",
+                                  "attachment",
+                                  "reasoning",
+                                  "tool_call",
+                                  "structured_output"
+                                ]
+                              },
+                              "limit": {
+                                "type": "object",
+                                "properties": {
+                                  "context": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "output": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  }
+                                },
+                                "required": [
+                                  "context",
+                                  "output"
+                                ]
+                              },
+                              "upstream": {
+                                "type": "object",
+                                "properties": {
+                                  "modalities": {
+                                    "type": "object",
+                                    "properties": {
+                                      "input": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "text",
+                                            "image",
+                                            "audio"
+                                          ]
+                                        }
+                                      },
+                                      "output": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "text",
+                                            "image",
+                                            "audio"
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    "required": [
+                                      "input",
+                                      "output"
+                                    ]
+                                  },
+                                  "capabilities": {
+                                    "type": "object",
+                                    "properties": {
+                                      "chat": {
+                                        "type": "boolean"
+                                      },
+                                      "completion": {
+                                        "type": "boolean"
+                                      },
+                                      "streaming": {
+                                        "type": "boolean"
+                                      },
+                                      "temperature": {
+                                        "type": "boolean"
+                                      },
+                                      "system_prompt": {
+                                        "type": "boolean"
+                                      },
+                                      "attachment": {
+                                        "type": "boolean"
+                                      },
+                                      "reasoning": {
+                                        "type": "boolean"
+                                      },
+                                      "tool_call": {
+                                        "type": "boolean"
+                                      },
+                                      "structured_output": {
+                                        "type": "boolean"
+                                      }
+                                    }
+                                  },
+                                  "limit": {
+                                    "type": "object",
+                                    "properties": {
+                                      "context": {
+                                        "type": "integer",
+                                        "nullable": true,
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "output": {
+                                        "type": "integer",
+                                        "nullable": true,
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      }
+                                    },
+                                    "required": [
+                                      "context",
+                                      "output"
+                                    ]
+                                  }
+                                }
+                              },
+                              "architecture": {
+                                "type": "string"
+                              },
+                              "modelType": {
+                                "type": "string"
+                              },
+                              "quantization": {
+                                "type": "string"
+                              },
+                              "alias": {
+                                "type": "string"
+                              },
+                              "repo": {
+                                "type": "string"
+                              },
+                              "file": {
+                                "type": "string"
+                              },
+                              "localPath": {
+                                "type": "string"
+                              },
+                              "pull": {
+                                "type": "object",
+                                "properties": {
+                                  "model": {
+                                    "type": "string"
+                                  },
+                                  "file": {
+                                    "type": "string"
+                                  },
+                                  "backend": {
+                                    "type": "string",
+                                    "enum": [
+                                      "gguf",
+                                      "mlx"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "model"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string"
+                              },
+                              "created": {
+                                "type": "number"
+                              },
+                              "owned_by": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "name",
+                              "displayName",
+                              "provider",
+                              "source",
+                              "backend",
+                              "format",
+                              "status",
+                              "modalities",
+                              "capabilities",
+                              "limit",
+                              "created",
+                              "owned_by"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "object",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "OpenAI-compatible chat completions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "system",
+                            "user",
+                            "assistant",
+                            "tool"
+                          ]
+                        },
+                        "content": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "nullable": true
+                            },
+                            {
+                              "nullable": true
+                            }
+                          ],
+                          "default": ""
+                        }
+                      },
+                      "required": [
+                        "role"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "stream": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  },
+                  "temperature": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
+                  "max_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  }
+                },
+                "required": [
+                  "model",
+                  "messages"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "chat.completion"
+                      ]
+                    },
+                    "created": {
+                      "type": "number"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "choices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "index": {
+                            "type": "number"
+                          },
+                          "message": {
+                            "type": "object",
+                            "properties": {
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "system",
+                                  "user",
+                                  "assistant",
+                                  "tool"
+                                ]
+                              },
+                              "content": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "nullable": true
+                                  },
+                                  {
+                                    "nullable": true
+                                  }
+                                ],
+                                "default": ""
+                              }
+                            },
+                            "required": [
+                              "role"
+                            ]
+                          },
+                          "finish_reason": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "index",
+                          "message",
+                          "finish_reason"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "object",
+                    "created",
+                    "model",
+                    "choices"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

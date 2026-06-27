@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true
+  },
+  "references": [
+    { "path": "../runtime-llama" },
+    { "path": "../runtime-mlx" }
+  ],
+  "include": ["src/**/*.ts"]
+}
