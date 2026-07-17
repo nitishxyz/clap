@@ -1,6 +1,8 @@
 import type { ChatCompletionRequest, LoadedModel } from "@clap/api";
 import { getLlamaWorkerStatus, LlamaWorkerError } from "@clap/runtime-llama";
 import { getMlxWorkerStatus, MlxWorkerError } from "@clap/runtime-mlx";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 export type ResidentBackend = LoadedModel["backend"];
 
@@ -121,6 +123,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       if (this.backend === "mlx") throw new MlxWorkerError(message, "worker_not_found");
       throw new LlamaWorkerError(message, "worker_not_found");
     }
+    mkdirSync(dirname(status.logPath), { recursive: true });
     const proc = Bun.spawn(status.command, {
       stdin: "pipe",
       stdout: "pipe",

@@ -7,9 +7,11 @@ import { ResidentWorkerRegistry } from "./resident";
 describe("resident worker registry", () => {
   test("loads, reuses one pid for chats, and shuts down", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousHome = process.env.CLAP_HOME;
     const dir = await mkdtemp(join(tmpdir(), "clap-resident-registry-test-"));
     try {
       process.env.CLAP_LLAMA_WORKER = await fakeResidentWorker(dir);
+      process.env.CLAP_HOME = join(dir, "fresh-home");
       const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("key", "llama", join(dir, "model.gguf"));
       await writeFile(join(dir, "model.gguf"), "gguf");
@@ -39,6 +41,7 @@ describe("resident worker registry", () => {
       expect(worker.info().state).toBe("not_started");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_HOME", previousHome);
       await rm(dir, { recursive: true, force: true });
     }
   });
