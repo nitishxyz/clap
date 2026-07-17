@@ -2385,7 +2385,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
-  return `${process.execPath} ${path}`;
+  return `/usr/bin/env bun ${path}`;
 }
 
 async function sseData(response: Response): Promise<any[]> {
