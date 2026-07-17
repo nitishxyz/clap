@@ -12,6 +12,8 @@ import { createServer, idleTimeoutFromEnv, inferParserFamilies } from "./index";
 // memo so every request observes the current directory state.
 process.env.CLAP_MODEL_LIST_TTL_MS = "0";
 
+const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
+
 describe("clap server", () => {
   test("serves health", async () => {
     const response = await createServer().request("/clap/v1/health");
@@ -1527,7 +1529,7 @@ describe("clap server", () => {
     }
   });
 
-  test("pulls an MLX repo directory into the Hugging Face cache", async () => {
+  test.skipIf(!mlxSupported)("pulls an MLX repo directory into the Hugging Face cache", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
     const dir = await mkdtemp(join(tmpdir(), "clap-pull-mlx-test-"));
@@ -2184,7 +2186,7 @@ describe("clap server", () => {
     }
   });
 
-  test("routes cached Hugging Face repo ids to local worker paths", async () => {
+  test.skipIf(!mlxSupported)("routes cached Hugging Face repo ids to local worker paths", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousWorker = process.env.CLAP_MLX_WORKER;
     const dir = await mkdtemp(join(tmpdir(), "clap-cached-mlx-route-test-"));

@@ -6,6 +6,7 @@ import { completeWithMlx, isMlxModelDirectory, MlxWorkerError } from "./index";
 
 const envKeys = ["CLAP_MLX_WORKER", "CLAP_MLX_MODEL_PATHS", "CLAP_HOME"] as const;
 const previousEnv = new Map<string, string | undefined>();
+const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
 
 beforeEach(() => {
   for (const key of envKeys) previousEnv.set(key, process.env[key]);
@@ -29,7 +30,7 @@ describe("MLX runtime", () => {
     expect(await isMlxModelDirectory(dir)).toBe(false);
   });
 
-  test("surfaces worker JSON errors with exit code and stderr log path", async () => {
+  test.skipIf(!mlxSupported)("surfaces worker JSON errors with exit code and stderr log path", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clap-mlx-worker-error-"));
     const model = await writeMlxModel(dir);
     const worker = join(dir, "worker.sh");
@@ -45,7 +46,7 @@ describe("MLX runtime", () => {
     })).rejects.toThrow(/unsupported model_type gemma4.*exitCode=7.*stderrLog=/);
   });
 
-  test("surfaces non-JSON stdout diagnostics from worker crashes", async () => {
+  test.skipIf(!mlxSupported)("surfaces non-JSON stdout diagnostics from worker crashes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clap-mlx-worker-stdout-"));
     const model = await writeMlxModel(dir);
     const worker = join(dir, "worker.sh");
@@ -61,7 +62,7 @@ describe("MLX runtime", () => {
     })).rejects.toThrow(/clap-mlx exited with code 255.*Failed to load the default metallib/);
   });
 
-  test("ignores stdout diagnostics when the worker exits successfully", async () => {
+  test.skipIf(!mlxSupported)("ignores stdout diagnostics when the worker exits successfully", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clap-mlx-worker-success-diagnostic-"));
     const model = await writeMlxModel(dir);
     const worker = join(dir, "worker.sh");
@@ -77,7 +78,7 @@ describe("MLX runtime", () => {
     })).resolves.toBe("hi");
   });
 
-  test("reports missing metallib before launching the worker", async () => {
+  test.skipIf(!mlxSupported)("reports missing metallib before launching the worker", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clap-mlx-no-metal-"));
     const model = await writeMlxModel(dir);
     const worker = join(dir, "worker.sh");
