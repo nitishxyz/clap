@@ -28,14 +28,14 @@ Remove cached models with `bun run cli rm <owner/model|alias>`. Interrupted down
 
 ## Standalone Binary
 
-Build a self-contained `clap` executable (Bun runtime embedded) plus its native workers:
+Build a fully self-contained `clap` executable — Bun runtime and both native inference workers embedded in one file:
 
 ```bash
 bun run native:build   # once: builds libexec/clap-llama and libexec/clap-mlx
-bun run build:binary   # compiles dist/clap and copies dist/libexec/
+bun run build:binary   # compiles dist/clap with the workers embedded
 ```
 
-Ship `dist/clap` together with the sibling `dist/libexec/` directory (the CLI resolves workers relative to the executable). The compiled binary supports every CLI command, including spawning its own background server.
+Ship (or `scp`) the single `dist/clap` file anywhere; on first run it extracts its native workers to `~/.clap/libexec/<build-id>/` and uses them from there. Stale extractions from previous builds are cleaned up automatically. The compiled binary supports every CLI command, including spawning its own background server.
 
 CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push/PR. Tagging `v*` triggers the release workflow (`.github/workflows/release.yml`), which builds the native workers and compiled binary on macOS arm64 and attaches `clap-<tag>-darwin-arm64.tar.gz` (with a `.sha256` checksum) to a GitHub release. Native binaries are never committed to git — `libexec/` build outputs are gitignored and distributed through release artifacts.
 
@@ -96,11 +96,30 @@ Streaming is real token streaming for both MLX and GGUF backends: resident worke
 
 Native workers handle requests robustly: the GGUF worker parses request JSON with a real JSON parser (nlohmann/json), so message content containing JSON — tool results, tool-call histories, code — survives round trips intact. `stop` sequences halt generation inside the worker (not post-hoc), `presence_penalty`/`frequency_penalty`/`top_k` are applied in the sampler chain, and both workers report real `prompt_tokens`/`completion_tokens` plus a real `finish_reason` (`stop` or `length`) that flow into API `usage` fields (the MLX worker reads them from MLX's generation info). The MLX worker sends the full chat history (system prompts, tool instructions, multi-turn context, tool results) through the model's chat template instead of only the last user message. Tool-call parsing repairs the almost-valid JSON that small local models commonly emit — missing or extra closing brackets and truncated argument objects are balanced before parsing, so `{"tool_calls":[{...}}}` still yields a structured `tool_calls` entry instead of leaking raw JSON as content.
 
-Generation is cancellable and cache-aware: when a client disconnects mid-stream (or aborts a non-streaming request), the server sends a `cancel` message to the resident worker and both the GGUF and MLX workers stop decoding within a few tokens, freeing the GPU immediately. The GGUF worker also reuses the longest common KV-cache prefix between consecutive requests, so multi-turn conversations only ingest the new suffix instead of re-processing the whole history (first-token latency on a warmed multi-turn chat drops from seconds to ~100ms).
+Generation is cancellable and cache-aware: when a client disconnects mid-stream (or aborts a non-streaming request), the server sends a `cancel` message to the resident worker and both the GGUF and MLX workers stop decoding within a few tokens, freeing the GPU immediately. Both workers maintain multiple KV cache slots (default 4; `CLAP_LLAMA_SLOTS` / `CLAP_MLX_SLOTS`), so any number of concurrent sessions on the same model stay warm at once: each request picks the slot with the longest common token prefix (multi-turn conversations only ingest the new suffix — warmed first-token latency drops from seconds to ~100ms), unrelated prompts recycle the least-recently-used slot, and side requests such as agent title generation never evict an active conversation. Any number of models can be resident simultaneously (each in its own worker process, subject to RAM), and requests for one model are processed serially per worker while different models run independently.
 
 Clap uses a model/template-aware parser registry, inspired by Ollama, vLLM, SGLang, and Unsloth behavior, to normalize common local-model protocol markers without showing raw template text. It selects parser families from model ids and cached local metadata (`tokenizer_config.json`, `tokenizer.json`, `config.json`, and `generation_config.json`) such as Qwen, DeepSeek, Mistral, Llama, Gemma, Harmony/GPT-OSS, Hermes, xLAM, and Functionary, then extracts reasoning before parsing tools from remaining content. `<|channel|>thought`, `<|channel|>analysis`, commentary, and `<think>...</think>` become structured `reasoning` / `reasoning_content` fields or Responses `reasoning` output items. `<|channel|>final` becomes normal assistant content. Tool markers from Harmony/Codex, Hermes/Nous/Qwen (`<tool_call>`, `<|tool_call_start|>`), DeepSeek special tokens, Llama `<|python_tag|>`, Mistral `[TOOL_CALLS]`, FunctionGemma `call:name{...}`, and fenced JSON tool calls become OpenAI-compatible `tool_calls` / Responses `function_call` items, with raw markers removed from visible content and Ollama response text. In active tool mode, args-only JSON can be inferred as a tool call when it matches exactly one tool schema or the preceding text explicitly names that tool; JSON response-format answers are preserved. Requests without `max_tokens` default to 4096 output tokens before reaching the native runtime.
 
 `POST /v1/responses` supports the newer OpenAI Responses API shape for local compatibility. It accepts `input` as a string or message array, `instructions`, tools, tool choice, structured text formats, streaming, and sampling fields, then maps them through the same local chat/tool/structured-output pipeline. Stateful continuation via `previous_response_id` is accepted by schema but returns an explicit unsupported error. Legacy `/v1/completions` is intentionally not implemented.
+
+### Extensible model profiles
+
+The parser registry is data-driven and user-extensible. A profile describes how to interpret one model family's raw output; built-in profiles (qwen, gemma, llama, deepseek, mistral, harmony, hermes) live in `packages/server/src/model-profiles.ts`, and new families can be supported without rebuilding clap by dropping JSON files into `~/.clap/profiles/` (or `$CLAP_HOME/profiles/`). User profiles take priority over built-ins when both match. Example:
+
+```json
+{
+  "name": "acme",
+  "families": ["acme", "acme-coder"],
+  "customParsers": [
+    { "pattern": "@@invoke\\s+(?<name>[\\w.-]+)\\s+(?<args>\\{[\\s\\S]*?\\})@@" }
+  ],
+  "parsers": ["tagged-json", "json"],
+  "markers": { "suppress": ["<|acme_call|>"], "strip": ["<|acme_end|>"] },
+  "implicitThink": false
+}
+```
+
+`families` are case-insensitive substrings matched against the model id and metadata-derived family hints. `parsers` reference built-in tool-call syntax primitives (`harmony`, `function-message`, `xml-function`, `tagged-json`, `qwen-bracket`, `deepseek`, `mistral`, `python-tag`, `gemma-call`, `json`) tried in order; `customParsers` are regexes (named groups `(?<name>...)` and `(?<args>...)`, or a fixed `name`) tried before them. `markers.suppress` cuts streamed/visible content at a marker (tool-call preambles), `markers.strip` removes end-of-turn tokens, and `implicitThink` marks templates that pre-fill an opening `<think>` tag. Actual tokenization and chat-template rendering already work for any Hugging Face model — the workers use llama.cpp's tokenizer (GGUF) and swift-transformers (MLX), which both read `tokenizer.json`/`chat_template.jinja` directly.
 
 ```ts
 import OpenAI from "openai";

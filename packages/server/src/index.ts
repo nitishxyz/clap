@@ -26,7 +26,7 @@ import {
   type LoadedModel,
   type ResponseRequest,
 } from "@clap/api";
-import { cachedPullResultForTarget, listAliases, listModels, pullModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
+import { cachedPullResultForTarget, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
 import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type ResidentChatResult } from "@clap/runtime-router";
@@ -35,7 +35,10 @@ import { streamSSE } from "hono/streaming";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { parseAssistantOutput, prepareChatRequest, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
+import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
+import { MetricsCollector, type RequestHandle } from "./metrics";
+import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
+import { webAsset } from "./web-assets";
 
 const startedAt = Date.now();
 const downloads = new Map<string, Download>();
@@ -54,6 +57,12 @@ export function createServer(
   lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key)),
 ) {
   const app = new Hono();
+  const metrics = new MetricsCollector();
+  metrics.event("server", `clap server started (v${clapVersion})`);
+  lifecycle.removeListener = (entry, reason) => {
+    if (reason === "cleanup") return;
+    metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
+  };
 
   app.onError((error, c) => {
     if (error instanceof z.ZodError) {
@@ -96,7 +105,7 @@ export function createServer(
 
   app.get("/clap/v1/backends", (c) => c.json({ backends: listBackends() }));
 
-  app.get("/clap/v1/models", (c) => c.json({ models: listModels() }));
+  app.get("/clap/v1/models", async (c) => c.json({ models: await listModelsAsync() }));
 
   app.get("/clap/v1/aliases", (c) => c.json({ models: listAliases() }));
 
@@ -105,6 +114,52 @@ export function createServer(
   })));
 
   app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({ models: lifecycle.list() })));
+
+  app.get("/clap/v1/dashboard", async (c) => {
+    const loaded = lifecycle.list();
+    const workerPids = loaded
+      .map((entry) => entry.worker?.pid)
+      .filter((pid): pid is number => typeof pid === "number");
+    const usage = await sampleProcessUsage([process.pid, ...workerPids]);
+    return c.json({
+      server: {
+        version: clapVersion,
+        uptimeMs: Date.now() - startedAt,
+        platform: process.platform,
+        arch: process.arch,
+        bunVersion: Bun.version,
+        pid: process.pid,
+        rssBytes: usage.get(process.pid)?.rssBytes ?? process.memoryUsage().rss,
+        cpuPercent: usage.get(process.pid)?.cpuPercent,
+        systemMemoryBytes: systemMemoryBytes(),
+      },
+      totals: metrics.totals,
+      active: metrics.activeRequests(),
+      requests: metrics.recent(80),
+      events: metrics.events(50),
+      loaded: loaded.map((entry) => ({
+        ...entry,
+        usage: entry.worker?.pid ? usage.get(entry.worker.pid) : undefined,
+      })),
+      models: await listModelsAsync(),
+      downloads: [...downloads.values()],
+    });
+  });
+
+  app.get("/clap/v1/dashboard/requests/:id", (c) => {
+    const record = metrics.request(c.req.param("id"));
+    if (!record) return c.json({ error: { message: "request not found", type: "invalid_request_error" } }, 404);
+    return c.json(record);
+  });
+
+  const serveWeb = (path: string) => {
+    const asset = webAsset(path);
+    if (!asset) return undefined;
+    return new Response(asset.bytes, { headers: { "content-type": asset.type, "cache-control": path.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-cache" } });
+  };
+  app.get("/", (c) => serveWeb("index.html") ?? c.text("clap dashboard is not built. Run: bun run build:web", 503));
+  app.get("/assets/*", (c) => serveWeb(c.req.path.slice(1)) ?? c.notFound());
+  app.get("/dashboard", (c) => c.redirect("/"));
 
   app.post("/clap/v1/models/load", async (c) => {
     const request = LoadModelRequestSchema.parse(await c.req.json());
@@ -121,6 +176,7 @@ export function createServer(
       }), 503);
     }
     const model = lifecycle.load(resolved.model, { keepAlive: request.keepAlive, worker: info });
+    metrics.event("load", `${model.id} loaded (keep-alive ${model.keepAlive})`, { model: model.id });
     return c.json(LoadModelResponseSchema.parse({ model }));
   });
 
@@ -129,6 +185,28 @@ export function createServer(
     const resolved = resolveAvailableModel(request.model, request.backend);
     if ("response" in resolved) return resolved.response(c);
     return c.json(UnloadModelResponseSchema.parse(lifecycle.unload(resolved.model)));
+  });
+
+  app.post("/clap/v1/models/remove", async (c) => {
+    const request = z.object({ model: z.string() }).parse(await c.req.json());
+    for (const entry of lifecycle.list()) {
+      if (entry.id === request.model) {
+        if (entry.activeRequests > 0) {
+          return c.json(ErrorResponseSchema.parse({
+            error: { message: `${request.model} is serving ${entry.activeRequests} active request(s); try again when idle`, type: "model_error", code: "model_busy" },
+          }), 409);
+        }
+        lifecycle.unload({ id: entry.id, backend: entry.backend, format: entry.format, input: entry.localPath, modelPath: entry.localPath } as ResolvedModel);
+      }
+    }
+    const removed = await removeModel(request.model);
+    if (!removed.length) {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: `No cached files found for ${request.model}`, type: "model_error", code: "not_cached" },
+      }), 404);
+    }
+    metrics.event("unload", `removed ${request.model} from disk (${removed.length} path${removed.length > 1 ? "s" : ""})`, { model: request.model });
+    return c.json({ removed });
   });
 
   app.post("/clap/v1/models/resolve", async (c) => {
@@ -178,6 +256,7 @@ export function createServer(
 
     const controller = new AbortController();
     activeDownloads.set(target.key, { id, controller });
+    metrics.event("download", `pull started: ${download.model}`, { model: download.model });
     void pullModel(selected ? { model: selected.repo, backend: selected.backend, file: selected.file, force: request.force } : request, {
       signal: controller.signal,
       onProgress: (progress) => {
@@ -192,6 +271,7 @@ export function createServer(
       if (download.totalBytes === undefined) download.totalBytes = download.bytesReceived;
       download.currentFile = undefined;
       download.completedAt = new Date().toISOString();
+      metrics.event("download", `pull completed: ${download.model}`, { model: download.model });
     }).catch((error: unknown) => {
       if (controller.signal.aborted || isAbortError(error)) {
         download.status = "cancelled";
@@ -203,6 +283,7 @@ export function createServer(
       download.status = "failed";
       download.error = error instanceof Error ? error.message : String(error);
       download.completedAt = new Date().toISOString();
+      metrics.event("error", `pull failed: ${download.model} — ${download.error}`, { model: download.model });
     }).finally(() => {
       const active = activeDownloads.get(target.key);
       if (active?.id === id) activeDownloads.delete(target.key);
@@ -232,14 +313,14 @@ export function createServer(
 
   app.get("/v1/models", (c) => {
     const includeMetadata = ["1", "true"].includes(c.req.query("metadata")?.toLowerCase() ?? "");
-    return c.json({
+    return listModelsAsync().then((models) => c.json({
       object: "list",
-      data: listModels().map((model) => ({
+      data: models.map((model) => ({
         ...(includeMetadata ? model : { id: model.id, object: model.object }),
         created: 0,
         owned_by: "clap",
       })),
-    });
+    }));
   });
 
   app.post("/v1/chat/completions", async (c) => {
@@ -247,29 +328,32 @@ export function createServer(
     const resolved = resolveAvailableModel(request.model, request.backend);
     if ("response" in resolved) return resolved.response(c);
 
+    const templateInfo = await resolveParserTemplateInfo(resolved.model);
     let routedRequest: ChatCompletionRequest;
     try {
-      routedRequest = prepareChatRequest({ ...request, model: resolved.model.modelPath ?? request.model });
+      routedRequest = prepareChatRequest(
+        { ...request, model: resolved.model.modelPath ?? request.model },
+        { nativeTools: resolved.model.backend === "mlx" && Boolean(templateInfo?.hasToolCalls) },
+      );
     } catch (error) {
       return c.json(ErrorResponseSchema.parse({
         error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
       }), 400);
     }
-    const templateInfo = await resolveParserTemplateInfo(resolved.model);
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded));
+        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded), metrics.start(request.model, "/v1/chat/completions", true));
       }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo));
+      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(request.model, "/v1/chat/completions", false)));
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded));
+        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded), metrics.start(request.model, "/v1/chat/completions", true));
       }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo));
+      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(request.model, "/v1/chat/completions", false)));
     }
 
     return c.json(ErrorResponseSchema.parse({
@@ -304,8 +388,8 @@ export function createServer(
     return c.json(ResponseSchema.parse(body));
   });
 
-  app.get("/api/tags", (c) => c.json({
-    models: listModels().map(ollamaTag),
+  app.get("/api/tags", async (c) => c.json({
+    models: (await listModelsAsync()).map(ollamaTag),
   }));
 
   app.post("/api/show", async (c) => {
@@ -701,25 +785,42 @@ async function resolveParserTemplateInfo(model: ResolvedModel): Promise<ParserTe
   if (!root) return undefined;
   const sourceFiles: string[] = [];
   const chunks: string[] = [];
-  for (const file of ["tokenizer_config.json", "tokenizer.json", "config.json", "generation_config.json"]) {
+  const nameChunks: string[] = [];
+  for (const file of ["tokenizer_config.json", "tokenizer.json", "config.json", "generation_config.json", "chat_template.jinja"]) {
     const path = join(root, file);
     try {
       const text = await readFile(path, "utf8");
       sourceFiles.push(file);
       chunks.push(text.slice(0, 250_000));
+      // tokenizer.json is mostly raw vocabulary; family names like "harmony"
+      // or "hermes" appear as ordinary word tokens in any large vocab, so only
+      // template/config files may vote on family by name.
+      if (file !== "tokenizer.json") nameChunks.push(text.slice(0, 250_000));
     } catch {
       // optional metadata file
     }
   }
   if (!chunks.length) return undefined;
   const haystack = chunks.join("\n").toLowerCase();
-  const familyHints = inferParserFamilies(haystack);
+  const familyHints = inferParserFamilies(haystack, nameChunks.join("\n").toLowerCase());
   return {
     familyHints,
     hasToolCalls: /tool_call|tool_calls|\[tool_calls\]|python_tag|call:/.test(haystack),
     hasReasoning: /enable_thinking|reasoning_effort|reasoning_content|<think>|analysis|commentary|final/.test(haystack),
+    implicitThink: templatePrefillsThink(chunks.join("\n")),
     sourceFiles,
   };
+}
+
+// Detects chat templates (Qwen3.6, DeepSeek-R1, ...) that emit a literal
+// <think> tag as part of the generation prompt, which means the model's raw
+// output begins inside a reasoning block without an opening tag.
+function templatePrefillsThink(templateText: string): boolean {
+  for (const match of templateText.matchAll(/\{\{-?\s*'([^']*)'\s*-?\}\}/g)) {
+    const literal = match[1] ?? "";
+    if (literal.includes("<think>") && !literal.includes("</think>")) return true;
+  }
+  return false;
 }
 
 async function metadataRoot(model: ResolvedModel): Promise<string | undefined> {
@@ -732,30 +833,66 @@ async function metadataRoot(model: ResolvedModel): Promise<string | undefined> {
   }
 }
 
-function inferParserFamilies(text: string): string[] {
+export function inferParserFamilies(markerText: string, nameText: string): string[] {
   const hints: string[] = [];
-  const add = (family: string, pattern: RegExp) => {
-    if (pattern.test(text) && !hints.includes(family)) hints.push(family);
+  const add = (family: string, markers: RegExp, names?: RegExp) => {
+    if ((markers.test(markerText) || (names?.test(nameText) ?? false)) && !hints.includes(family)) hints.push(family);
   };
-  add("harmony", /<\|channel\|>|analysis|commentary|final|gpt-oss|harmony|codex/);
-  add("qwen", /<\|tool_call_start\|>|enable_thinking|qwen/);
-  add("deepseek", /<｜tool▁calls▁begin｜>|deepseek/);
-  add("mistral", /\[tool_calls\]|mistral|mixtral/);
-  add("llama", /python_tag|llama/);
-  add("gemma", /call:|functiongemma|gemma/);
-  add("hermes", /<tool_call>|hermes|xlam|functionary/);
+  // Marker patterns are distinctive protocol tokens safe to match anywhere
+  // (including tokenizer vocabulary); family-name patterns only run against
+  // template/config metadata where a name is an intentional signal.
+  add("harmony", /<\|channel\|>/, /gpt-oss|harmony/);
+  // "enable_thinking" is intentionally not a qwen signal: other families
+  // (gemma included) adopted the same template toggle name.
+  add("qwen", /<\|tool_call_start\|>|<function=/, /qwen/);
+  add("deepseek", /<｜tool▁calls▁begin｜>/, /deepseek/);
+  add("mistral", /\[tool_calls\]/, /mistral|mixtral/);
+  add("llama", /<\|python_tag\|>/, undefined);
+  add("gemma", /functiongemma/, /gemma/);
+  add("hermes", /<tool_call>/, /hermes|xlam|functionary/);
   return hints;
 }
 
-async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
-  entry.worker = await worker.load();
-  const result = await worker.chat(request, undefined, c.req.raw.signal);
-  entry.worker = worker.info();
-  return c.json(chatResponse(request, result, templateInfo));
+async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, handle?: RequestHandle) {
+  try {
+    handle?.capture(request);
+    const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+    handle?.phase("loading");
+    const loadStarted = Date.now();
+    entry.worker = await worker.load();
+    handle?.loaded(Date.now() - loadStarted);
+    // The resident worker processes requests serially: mark this request as
+    // queued until worker prefill progress or the first token proves it is
+    // actually running.
+    handle?.phase("queued");
+    const result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total));
+    entry.worker = worker.info();
+    const body = chatResponse(request, result, templateInfo);
+    const message = body.choices[0]?.message;
+    handle?.finish({
+      status: result.finishReason === "cancel" ? "cancelled" : "ok",
+      promptTokens: result.usage?.promptTokens,
+      completionTokens: result.usage?.completionTokens,
+      cacheHit: result.cache?.hit,
+      reusedTokens: result.cache?.reusedTokens,
+      sideRequest: result.cache?.sideRequest,      slot: result.cache?.slot,
+      finishReason: body.choices[0]?.finish_reason ?? undefined,
+      toolCalls: message?.tool_calls?.length,
+      response: {
+        content: typeof message?.content === "string" ? message.content : undefined,
+        reasoning: message?.reasoning ?? undefined,
+        toolCalls: message?.tool_calls?.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
+      },
+      rawOutput: result.content,
+    });
+    return c.json(body);
+  } catch (error) {
+    handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 }
 
-function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void) {
+function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void, handle?: RequestHandle) {
   return streamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();
@@ -771,14 +908,17 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, { role: "assistant" })) });
     };
     // Send the role chunk immediately so clients get a first byte right away,
-    // then heartbeat comments while the worker ingests a long prompt. Without
-    // this, nothing is written until the first generated token, which can take
-    // minutes for large prompts and trips client time-to-first-byte timeouts.
+    // then heartbeat with empty delta chunks while the worker ingests a long
+    // prompt. Real data chunks (not SSE comments) are required: stream parsers
+    // ignore comments, so comment-only keepalives still trip client
+    // inactivity timeouts during multi-minute prefills.
     await ensureRole();
     let sawOutput = false;
     const heartbeat = setInterval(() => {
       if (sawOutput || aborter.signal.aborted) return;
-      writeQueue = writeQueue.then(async () => { await stream.write(": processing\n\n"); }).catch(() => undefined);
+      writeQueue = writeQueue.then(async () => {
+        await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {})) });
+      }).catch(() => undefined);
     }, 5_000);
     const writeDelta = async (delta: StreamDelta) => {
       await ensureRole();
@@ -788,24 +928,44 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, payload)) });
     };
     try {
+      handle?.capture(request);
       const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+      handle?.phase("loading");
+      const loadStarted = Date.now();
       entry.worker = await worker.load();
+      handle?.loaded(Date.now() - loadStarted);
+      handle?.phase("queued");
+      const streamExtras = profileStreamExtras(request.model, request, templateInfo);
       const filter = new StreamingOutputFilter({
         toolMode: Boolean(request.tools?.length),
         bufferAll: Boolean(request.response_format && request.response_format.type !== "text"),
         stops: typeof request.stop === "string" ? [request.stop] : request.stop ?? [],
+        startInReasoning: streamExtras.implicitThink,
+        extraMarkers: streamExtras.extraMarkers,
       });
       const result = await worker.chat(request, (token) => {
+        if (!sawOutput) handle?.firstToken();
         sawOutput = true;
         const deltas = filter.feed(token);
         if (!deltas.length) return;
         writeQueue = writeQueue.then(async () => {
           for (const delta of deltas) await writeDelta(delta);
         });
-      }, aborter.signal);
+      }, aborter.signal, (done, total) => handle?.prefill(done, total));
       await writeQueue;
       entry.worker = worker.info();
-      if (result.finishReason === "cancel" || aborter.signal.aborted) return;
+      if (result.finishReason === "cancel" || aborter.signal.aborted) {
+        handle?.finish({
+          status: "cancelled",
+          promptTokens: result.usage?.promptTokens,
+          completionTokens: result.usage?.completionTokens,
+          cacheHit: result.cache?.hit,
+          reusedTokens: result.cache?.reusedTokens,
+          sideRequest: result.cache?.sideRequest,          slot: result.cache?.slot,
+          finishReason: "cancel",
+        });
+        return;
+      }
       const parsed = parseAssistantOutput(result.content, request, templateInfo);
       await ensureRole();
       const reasoningTail = remainingDelta(parsed.reasoning, filter.emittedReasoning);
@@ -823,8 +983,25 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       const finishReason = parsed.finishReason === "tool_calls" ? "tool_calls" : workerFinishReason(result) ?? parsed.finishReason;
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {}, finishReason, usageFor(request, result))) });
       await stream.writeSSE({ data: "[DONE]" });
+      handle?.finish({
+        status: "ok",
+        promptTokens: result.usage?.promptTokens,
+        completionTokens: result.usage?.completionTokens,
+        cacheHit: result.cache?.hit,
+        reusedTokens: result.cache?.reusedTokens,
+        sideRequest: result.cache?.sideRequest,        slot: result.cache?.slot,
+        finishReason,
+        toolCalls: parsed.toolCalls?.length,
+        response: {
+          content: parsed.content ?? undefined,
+          reasoning: parsed.reasoning,
+          toolCalls: parsed.toolCalls?.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
+        },
+        rawOutput: result.content,
+      });
     } catch (error) {
       await writeQueue.catch(() => undefined);
+      handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
       await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) });
     } finally {
       clearInterval(heartbeat);
@@ -906,6 +1083,9 @@ function workerFinishReason(result: ResidentChatResult): "stop" | "length" | und
 }
 
 function chatResponse(request: ChatCompletionRequest, result: ResidentChatResult, templateInfo?: ParserTemplateInfo): ChatCompletionResponse {
+  if (process.env.CLAP_DEBUG_RAW) {
+    console.error(`[clap] raw model output (${result.content.length} chars): ${JSON.stringify(result.content)}`);
+  }
   const parsed = parseAssistantOutput(result.content, request, templateInfo);
   const message = {
     role: "assistant" as const,

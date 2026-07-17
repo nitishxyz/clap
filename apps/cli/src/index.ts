@@ -2,6 +2,7 @@
 import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
 import { startServer } from "@clap/server";
+import { ensureEmbeddedWorkers } from "./embedded-workers";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { formatModelList, formatModelStatus } from "./models-output";
@@ -30,6 +31,8 @@ import {
 
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
+
+await ensureEmbeddedWorkers();
 
 try {
   if (command === "serve") {

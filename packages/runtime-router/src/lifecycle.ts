@@ -9,10 +9,12 @@ export type LoadModelOptions = {
 export type ModelLifecycleEntry = LoadedModel;
 export type LifecycleRemoveReason = "unload" | "expire" | "cleanup";
 
-const DEFAULT_KEEP_ALIVE = process.env.CLAP_KEEP_ALIVE ?? "5m";
+const DEFAULT_KEEP_ALIVE = process.env.CLAP_KEEP_ALIVE ?? "15m";
 export class ModelLifecycleManager {
   private readonly entries = new Map<string, LoadedModel>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Optional secondary listener (e.g. metrics/event log) attached after construction.
+  removeListener?: (entry: LoadedModel, reason: LifecycleRemoveReason) => void;
 
   constructor(
     private readonly now = () => Date.now(),
@@ -121,7 +123,10 @@ export class ModelLifecycleManager {
   cleanup(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
-    for (const entry of this.entries.values()) this.onRemove?.(entry, "cleanup");
+    for (const entry of this.entries.values()) {
+      this.onRemove?.(entry, "cleanup");
+      this.removeListener?.(entry, "cleanup");
+    }
     this.entries.clear();
   }
 
@@ -151,7 +156,10 @@ export class ModelLifecycleManager {
     if (timer) clearTimeout(timer);
     this.timers.delete(key);
     const entry = this.entries.get(key);
-    if (entry) this.onRemove?.(entry, reason);
+    if (entry) {
+      this.onRemove?.(entry, reason);
+      this.removeListener?.(entry, reason);
+    }
     this.entries.delete(key);
   }
 }

@@ -15,11 +15,21 @@ export type ResidentUsage = {
   completionTokens?: number;
 };
 
+export type ResidentCacheInfo = {
+  hit?: boolean;
+  reusedTokens?: number;
+  sideRequest?: boolean;
+  slot?: number;
+};
+
 export type ResidentChatResult = {
   content: string;
   usage?: ResidentUsage;
   finishReason?: "stop" | "length" | "cancel";
+  cache?: ResidentCacheInfo;
 };
+
+export type ResidentProgress = (done: number, total: number) => void;
 
 export type ResidentWorkerHandle = {
   key: string;
@@ -27,7 +37,7 @@ export type ResidentWorkerHandle = {
   modelPath: string;
   info(): ResidentWorkerInfo;
   load(): Promise<ResidentWorkerInfo>;
-  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult>;
+  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult>;
   unload(): Promise<void>;
   shutdown(): void;
 };
@@ -37,8 +47,10 @@ type Pending = {
   resolve: (result: ResidentChatResult) => void;
   reject: (error: Error) => void;
   onToken?: (token: string) => void;
+  onProgress?: ResidentProgress;
   usage?: ResidentUsage;
   finishReason?: "stop" | "length" | "cancel";
+  cache?: ResidentCacheInfo;
 };
 
 export class ResidentWorkerProcess implements ResidentWorkerHandle {
@@ -69,9 +81,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     return this.info();
   }
 
-  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult> {
+  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult> {
     await this.load();
-    return this.sendControl("chat", request, onToken, signal);
+    return this.sendControl("chat", request, onToken, signal, onProgress);
   }
 
   async unload(): Promise<void> {
@@ -166,6 +178,12 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       pending.content.push(message.token);
       pending.onToken?.(message.token);
     }
+    if (message.prefill && typeof message.prefill === "object") {
+      const prefill = message.prefill as Record<string, unknown>;
+      if (typeof prefill.done === "number" && typeof prefill.total === "number") {
+        pending.onProgress?.(prefill.done, prefill.total);
+      }
+    }
     if (typeof message.content === "string") {
       pending.content.push(message.content);
       pending.onToken?.(message.content);
@@ -177,21 +195,30 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
       };
     }
+    if (message.cache && typeof message.cache === "object") {
+      const cache = message.cache as Record<string, unknown>;
+      pending.cache = {
+        hit: typeof cache.hit === "boolean" ? cache.hit : undefined,
+        reusedTokens: typeof cache.reused_tokens === "number" ? cache.reused_tokens : undefined,
+        sideRequest: typeof cache.side_request === "boolean" ? cache.side_request : undefined,
+        slot: typeof cache.slot === "number" ? cache.slot : undefined,
+      };
+    }
     if (message.finish_reason === "stop" || message.finish_reason === "length" || message.finish_reason === "cancel") {
       pending.finishReason = message.finish_reason;
     }
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) this.pending.delete(id);
       else this.deleteFirstPending();
-      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason });
+      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache });
     }
   }
 
-  private sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult> {
+  private sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult> {
     this.ensureStarted();
     const id = `req_${crypto.randomUUID()}`;
     const promise = new Promise<ResidentChatResult>((resolve, reject) => {
-      this.pending.set(id, { content: [], resolve, reject, onToken });
+      this.pending.set(id, { content: [], resolve, reject, onToken, onProgress });
     });
     if (signal) {
       const cancel = () => {

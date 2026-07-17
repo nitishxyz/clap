@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseAssistantOutput, remainingDelta, StreamingOutputFilter, type StreamDelta } from "./chat-compat";
+import { parseAssistantOutput, prepareChatRequest, remainingDelta, StreamingOutputFilter, type StreamDelta } from "./chat-compat";
 
 function feedAll(filter: StreamingOutputFilter, chunks: string[]): StreamDelta[] {
   return chunks.flatMap((chunk) => filter.feed(chunk));
@@ -10,11 +10,45 @@ function joined(deltas: StreamDelta[], type: "content" | "reasoning"): string {
 }
 
 describe("streaming output filter", () => {
+  test("merges leading system messages for strict chat templates", () => {
+    const prepared = prepareChatRequest({
+      model: "mlx-community/Qwen3.6-27B-4bit",
+      stream: false,
+      messages: [
+        { role: "system", content: "Main system prompt." },
+        { role: "system", content: "Extra harness context." },
+        { role: "user", content: "hi" },
+      ],
+    });
+    const systems = prepared.messages.filter((message) => message.role === "system");
+    expect(systems).toHaveLength(1);
+    expect(systems[0]?.content).toContain("Main system prompt.");
+    expect(systems[0]?.content).toContain("Extra harness context.");
+    expect(prepared.messages[prepared.messages.length - 1]?.role).toBe("user");
+  });
+
   test("emits plain content incrementally", () => {
     const filter = new StreamingOutputFilter({ toolMode: false });
     const deltas = feedAll(filter, ["Hel", "lo", " wor", "ld!"]);
     expect(deltas.length).toBeGreaterThan(1);
     expect(joined(deltas, "content")).toBe("Hello world!");
+  });
+
+  test("startInReasoning streams implicit think blocks as reasoning", () => {
+    const filter = new StreamingOutputFilter({ toolMode: false, startInReasoning: true });
+    const deltas = feedAll(filter, ["First I", " reason.", "</think>", "Then", " I answer."]);
+    expect(joined(deltas, "reasoning")).toBe("First I reason.");
+    expect(joined(deltas, "content")).toBe("Then I answer.");
+  });
+
+  test("implicitThink final parse treats untagged output as reasoning until close tag", () => {
+    const request = { model: "qwen3.6", stream: false, messages: [{ role: "user" as const, content: "hi" }] };
+    const parsed = parseAssistantOutput("I am thinking.</think>The answer is 4.", request, { implicitThink: true });
+    expect(parsed.reasoning).toBe("I am thinking.");
+    expect(parsed.content).toBe("The answer is 4.");
+    const truncated = parseAssistantOutput("Still thinking when cut off", request, { implicitThink: true });
+    expect(truncated.reasoning).toBe("Still thinking when cut off");
+    expect(truncated.content).toBe("");
   });
 
   test("splits think blocks into reasoning deltas across chunk boundaries", () => {
@@ -124,6 +158,71 @@ describe("malformed tool JSON repair", () => {
     expect(parsed.toolCalls).toHaveLength(1);
     expect(parsed.toolCalls?.[0]?.function.name).toBe("get_weather");
     expect(parsed.toolCalls?.[0]?.function.arguments).toBe(JSON.stringify({ city: "Paris" }));
+  });
+
+  test("parses gemma-4 calls that use the special quote token and loose keys", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit", tools: [{ type: "function" as const, function: { name: "ls", parameters: { type: "object", properties: { path: { type: "string" } } } } }] };
+    const parsed = parseAssistantOutput('<|tool_call>call:ls{path:<|"|>.<|"|>}<tool_call|>', gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("ls");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "." });
+  });
+
+  test("bare closing channel markers return following tool JSON to content", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit", tools: [{ type: "function" as const, function: { name: "ls", parameters: { type: "object", properties: { path: { type: "string" } } } } }] };
+    const raw = '<|channel>thought\nI should list the files.<channel|>{"tool_calls":[{"name":"ls","arguments":{"path":"/tmp"}}]}';
+    const parsed = parseAssistantOutput(raw, gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.reasoning).toContain("I should list the files.");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("ls");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "/tmp" });
+  });
+});
+
+describe("qwen xml function calls", () => {
+  const request = {
+    model: "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
+    stream: false,
+    messages: [{ role: "user" as const, content: "write a file" }],
+    tools: [{ type: "function" as const, function: { name: "write_file", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } } } }],
+  };
+
+  test("parses the coder-style xml function format", () => {
+    const text = "<tool_call>\n<function=write_file>\n<parameter=path>\nhello.txt\n</parameter>\n<parameter=content>\nhi\n</parameter>\n</function>\n</tool_call>";
+    const parsed = parseAssistantOutput(text, request);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("write_file");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "hello.txt", content: "hi" });
+  });
+
+  test("parses the xml format without wrapper and with truncated closing tags", () => {
+    const text = "<function=write_file>\n<parameter=path>\nhello.txt\n</parameter>\n<parameter=content>\nmulti\nline";
+    const parsed = parseAssistantOutput(text, request);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "hello.txt", content: "multi\nline" });
+  });
+
+  test("recovers xml tool calls emitted inside an unterminated think block", () => {
+    const text = "<think>I should write the file now.\n<tool_call>\n<function=write_file>\n<parameter=path>\nhello.txt\n</parameter>\n</function>\n</tool_call>";
+    const parsed = parseAssistantOutput(text, request);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("write_file");
+  });
+
+  test("recovers a call object constructed in reasoning when no output was produced", () => {
+    const text = '<think>Constructing the tool call:\n{\n  "name": "write_file",\n  "arguments": {\n    "path": "hello.txt",\n    "content": "hi"\n  }\n}';
+    const parsed = parseAssistantOutput(text, request);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("write_file");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "hello.txt", content: "hi" });
+  });
+
+  test("does not invent calls from reasoning when visible content exists", () => {
+    const text = '<think>Maybe {"name":"write_file","arguments":{}}</think>Here is my answer.';
+    const parsed = parseAssistantOutput(text, request);
+    expect(parsed.finishReason).toBe("stop");
+    expect(parsed.toolCalls).toBeUndefined();
+    expect(parsed.content).toBe("Here is my answer.");
   });
 });
 

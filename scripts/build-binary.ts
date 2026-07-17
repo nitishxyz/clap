@@ -1,18 +1,25 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const libexec = join(root, "libexec");
 const dist = join(root, "dist");
-const binary = join(dist, "clap");
 const entrypoint = join(root, "apps", "cli", "src", "index.ts");
+
+// Optional cross-compile target, e.g. --target bun-linux-x64. The embedded
+// workers come from libexec/, so cross builds require workers compiled for the
+// target platform to be placed there first (see scripts/build-linux.sh).
+const targetFlagIndex = process.argv.indexOf("--target");
+const target = targetFlagIndex >= 0 ? process.argv[targetFlagIndex + 1] : undefined;
+const targetIsDarwinArm = target ? target.includes("darwin-arm64") || target.includes("darwin-aarch64") : process.platform === "darwin" && process.arch === "arm64";
+const binary = join(dist, target ? `clap-${target.replace(/^bun-/, "")}` : "clap");
 
 const workers = [
   { name: "clap-llama", required: true },
-  { name: "clap-mlx", required: process.platform === "darwin" && process.arch === "arm64" },
-  { name: "mlx.metallib", required: process.platform === "darwin" && process.arch === "arm64" },
+  { name: "clap-mlx", required: targetIsDarwinArm },
+  { name: "mlx.metallib", required: targetIsDarwinArm },
 ];
 
 const missing = workers.filter((worker) => worker.required && !existsSync(join(libexec, worker.name)));
@@ -22,26 +29,38 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-await rm(dist, { recursive: true, force: true });
-await mkdir(join(dist, "libexec"), { recursive: true });
+// The CLI statically imports every worker asset; provide empty placeholders for
+// optional workers so cross-platform builds still compile (extraction skips
+// zero-byte files and the runtime reports the backend as unavailable).
+for (const worker of workers) {
+  const source = join(libexec, worker.name);
+  if (!existsSync(source)) await writeFile(source, "");
+}
 
-const build = Bun.spawn(["bun", "build", "--compile", "--minify", entrypoint, "--outfile", binary], {
-  cwd: root,
-  stdout: "inherit",
-  stderr: "inherit",
-});
+// Content-addressed build id so extracted workers in ~/.clap/libexec/<id>/ are
+// refreshed exactly when the embedded workers change.
+const hasher = new Bun.CryptoHasher("sha256");
+for (const worker of workers) {
+  hasher.update(await Bun.file(join(libexec, worker.name)).arrayBuffer());
+}
+const embedBuild = hasher.digest("hex").slice(0, 12);
+
+if (!target) await rm(dist, { recursive: true, force: true });
+await mkdir(dist, { recursive: true });
+
+const build = Bun.spawn(
+  [
+    "bun", "build", "--compile", "--minify", entrypoint,
+    ...(target ? ["--target", target] : []),
+    "--define", `process.env.CLAP_EMBED_BUILD="${embedBuild}"`,
+    "--outfile", binary,
+  ],
+  { cwd: root, stdout: "inherit", stderr: "inherit" },
+);
 if (await build.exited !== 0) process.exit(1);
 await chmod(binary, 0o755);
 
-for (const worker of workers) {
-  const source = join(libexec, worker.name);
-  if (!existsSync(source)) continue;
-  const target = join(dist, "libexec", worker.name);
-  await copyFile(source, target);
-  if (!worker.name.endsWith(".metallib")) await chmod(target, 0o755);
-  console.log(`bundled libexec/${worker.name}`);
-}
-
 const size = Bun.file(binary).size;
-console.log(`built ${binary} (${(size / 1024 / 1024).toFixed(1)} MiB)`);
-console.log("install: cp -R dist/clap dist/libexec /usr/local/bin (keep clap and libexec/ side by side)");
+console.log(`built ${binary} (${(size / 1024 / 1024).toFixed(1)} MiB, embed ${embedBuild})`);
+console.log("single self-contained binary: native workers are embedded and extracted to ~/.clap/libexec on first run");
+console.log("install: cp dist/clap /usr/local/bin/clap");

@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, ChatMessage, ChatToolCall } from "@clap/api";
+import { builtinProfiles, genericProfile, loadUserProfiles, resetUserProfileCache, type CustomParserSpec, type ModelProfileDefinition } from "./model-profiles";
 
 export type ParsedAssistantOutput = {
   content: string | null;
@@ -24,6 +25,7 @@ type AssistantOutputParser = {
   name: string;
   families: string[];
   toolParsers: ToolParser[];
+  profile?: ModelProfileDefinition;
   parse: (text: string, context: ParserContext) => NormalizedOutput;
 };
 
@@ -31,27 +33,58 @@ export type ParserTemplateInfo = {
   familyHints?: string[];
   hasToolCalls?: boolean;
   hasReasoning?: boolean;
+  implicitThink?: boolean;
   sourceFiles?: string[];
 };
 
-export function prepareChatRequest(request: ChatCompletionRequest): ChatCompletionRequest {
+export type PrepareChatOptions = {
+  // The runtime renders tool declarations natively through the model's chat
+  // template (MLX + template with tool support). Injecting a second JSON
+  // tool-call convention on top confuses small models into narrating calls
+  // as text, so the compat instruction block is skipped.
+  nativeTools?: boolean;
+};
+
+export function prepareChatRequest(request: ChatCompletionRequest, options: PrepareChatOptions = {}): ChatCompletionRequest {
   rejectUnsupportedContentParts(request);
-  const messages = request.messages.map((message) => ({
+  let messages = request.messages.map((message) => ({
     ...message,
     content: stringifyMessageContent(message),
   }));
-  const instructions = compatibilityInstructions(request);
+  const instructions = compatibilityInstructions(request, options);
   if (instructions) {
     messages.unshift({ role: "system", content: instructions });
   }
+  messages = mergeLeadingSystemMessages(messages);
   return { ...request, messages, max_tokens: request.max_tokens ?? 4096 };
+}
+
+// Clients such as agent harnesses send multiple system messages, and we may
+// prepend compatibility instructions as another. Strict chat templates
+// (e.g. Qwen3.6) reject any system message that is not the single first
+// message, so collapse the leading run into one.
+function mergeLeadingSystemMessages<T extends { role: string; content: string | null }>(messages: T[]): T[] {
+  let count = 0;
+  while (count < messages.length && messages[count]?.role === "system") count += 1;
+  if (count <= 1) return messages;
+  const leading = messages.slice(0, count);
+  const merged = {
+    ...leading[0],
+    content: leading.map((message) => message.content ?? "").filter(Boolean).join("\n\n"),
+  } as T;
+  return [merged, ...messages.slice(count)];
 }
 
 export function parseAssistantOutput(text: string, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo): ParsedAssistantOutput {
   const stopped = applyStop(text, request.stop);
-  const context = { request, toolMode: Boolean(request.tools?.length) };
   const parser = selectParser(request.model, request, templateInfo);
-  const normalized = parser.parse(stopped, context);
+  // Templates such as Qwen3.6 pre-fill the opening <think> tag inside the
+  // generation prompt, so the model's raw output starts mid-reasoning without
+  // the tag. Restore it so reasoning extraction sees the full block.
+  const implicitThink = templateInfo?.implicitThink || parser.profile?.implicitThink;
+  const input = implicitThink && !/<think>/i.test(stopped) ? `<think>${stopped}` : stopped;
+  const context = { request, toolMode: Boolean(request.tools?.length) };
+  const normalized = parser.parse(input, context);
   const toolCalls = (normalized.toolCalls ?? []).map((call) => coerceToolCallArguments(call, request));
   if (toolCalls.length) {
     return { content: null, reasoning: normalized.reasoning, toolCalls, finishReason: "tool_calls" };
@@ -65,12 +98,44 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
 // vLLM, SGLang, and Unsloth: choose a model/template-aware parser first, then
 // extract reasoning before interpreting remaining content as tool calls.
 export function selectParser(model: string, _request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo): AssistantOutputParser {
+  const registries = [userRegistry(), builtinRegistry];
   for (const hint of templateInfo?.familyHints ?? []) {
-    const parser = parserRegistry.find((candidate) => candidate.name === hint || candidate.families.includes(hint));
-    if (parser) return parser;
+    for (const registry of registries) {
+      const parser = registry.find((candidate) => candidate.name === hint || candidate.families.includes(hint));
+      if (parser) return parser;
+    }
   }
   const id = model.toLowerCase();
-  return parserRegistry.find((parser) => parser.families.some((family) => id.includes(family))) ?? genericParser;
+  for (const registry of registries) {
+    const parser = registry.find((candidate) => candidate.families.some((family) => id.includes(family.toLowerCase())));
+    if (parser) return parser;
+  }
+  return genericParser;
+}
+
+// Extra streaming behavior derived from the selected profile: additional
+// markers to suppress/strip mid-stream and implicit reasoning mode.
+export function profileStreamExtras(model: string, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo): { extraMarkers: StreamMarker[]; implicitThink: boolean } {
+  const parser = selectParser(model, request, templateInfo);
+  const markers = parser.profile?.markers;
+  const extraMarkers: StreamMarker[] = [
+    ...(markers?.suppress ?? []).map((text) => ({ text, action: "suppress" as const })),
+    ...(markers?.strip ?? []).map((text) => ({ text, action: "strip" as const })),
+  ];
+  return { extraMarkers, implicitThink: Boolean(templateInfo?.implicitThink || parser.profile?.implicitThink) };
+}
+
+function applyProfileMarkers(text: string, profile?: ModelProfileDefinition): string {
+  if (!profile?.markers) return text;
+  let output = text;
+  for (const marker of profile.markers.suppress ?? []) {
+    const index = output.indexOf(marker);
+    if (index >= 0) output = output.slice(0, index);
+  }
+  for (const marker of profile.markers.strip ?? []) {
+    output = output.split(marker).join("");
+  }
+  return output;
 }
 
 function applyStop(text: string, stop: ChatCompletionRequest["stop"]): string {
@@ -97,9 +162,9 @@ function stringifyMessageContent(message: ChatMessage): string {
   return `Tool result${message.tool_call_id ? ` (${message.tool_call_id})` : ""}: ${content}`;
 }
 
-function compatibilityInstructions(request: ChatCompletionRequest): string {
+function compatibilityInstructions(request: ChatCompletionRequest, options: PrepareChatOptions = {}): string {
   const blocks: string[] = [];
-  if (request.tools?.length) {
+  if (request.tools?.length && !options.nativeTools) {
     blocks.push([
       "You may call tools by responding with JSON only.",
       "Use this exact shape when calling tools:",
@@ -110,6 +175,13 @@ function compatibilityInstructions(request: ChatCompletionRequest): string {
       request.parallel_tool_calls === false ? "Call at most one tool." : "",
     ].filter(Boolean).join("\n"));
   }
+  if (request.tools?.length && options.nativeTools) {
+    const extras = [
+      request.tool_choice && request.tool_choice !== "auto" ? `Tool choice: ${JSON.stringify(request.tool_choice)}` : "",
+      request.parallel_tool_calls === false ? "Call at most one tool." : "",
+    ].filter(Boolean);
+    if (extras.length) blocks.push(extras.join("\n"));
+  }
   if (request.response_format?.type === "json_object") {
     blocks.push("Respond with a valid JSON object and no surrounding markdown.");
   }
@@ -119,69 +191,98 @@ function compatibilityInstructions(request: ChatCompletionRequest): string {
   return blocks.join("\n\n");
 }
 
-const harmonyParser = createParser("harmony", ["harmony", "gpt-oss", "codex"], [
-  parseHarmonyToolCalls,
-  parseFunctionMessageCalls,
-  parseTaggedToolCalls,
-  parseJsonToolCalls,
-]);
+// Tool-call syntax primitives addressable by name from model profiles
+// (built-in and user-defined in ~/.clap/profiles/*.json).
+const toolParserPrimitives: Record<string, ToolParser> = {
+  harmony: parseHarmonyToolCalls,
+  "function-message": parseFunctionMessageCalls,
+  "xml-function": parseXmlFunctionCalls,
+  "tagged-json": parseTaggedToolCalls,
+  "qwen-bracket": parseQwenToolCalls,
+  deepseek: parseDeepSeekToolCalls,
+  mistral: parseMistralToolCalls,
+  "python-tag": parsePythonTagToolCalls,
+  "gemma-call": parseFunctionGemmaCalls,
+  json: parseJsonToolCalls,
+};
 
-const hermesParser = createParser("hermes", ["hermes", "nous", "functionary", "xlam"], [
-  parseTaggedToolCalls,
-  parseJsonToolCalls,
-]);
+function compileProfile(profile: ModelProfileDefinition): AssistantOutputParser {
+  const parsers: ToolParser[] = [
+    ...(profile.customParsers ?? []).map(makeRegexToolParser),
+    ...(profile.parsers ?? []).map((name) => {
+      const parser = toolParserPrimitives[name];
+      if (!parser) console.error(`[clap] model profile "${profile.name}": unknown parser primitive "${name}"`);
+      return parser;
+    }).filter((parser): parser is ToolParser => Boolean(parser)),
+  ];
+  return createParser(profile.name, profile.families ?? [], parsers, profile);
+}
 
-const qwenParser = createParser("qwen", ["qwen"], [
-  parseQwenToolCalls,
-  parseTaggedToolCalls,
-  parseJsonToolCalls,
-]);
+// Compile a JSON custom parser spec into a ToolParser. Named groups:
+// (?<name>...) captures the tool name (or use spec.name for a fixed tool),
+// (?<args>...) captures the argument payload.
+function makeRegexToolParser(spec: CustomParserSpec): ToolParser {
+  let regex: RegExp;
+  try {
+    const flags = spec.flags ?? "g";
+    regex = new RegExp(spec.pattern, flags.includes("g") ? flags : `${flags}g`);
+  } catch (error) {
+    console.error(`[clap] invalid custom parser pattern ${JSON.stringify(spec.pattern)}: ${error}`);
+    return () => [];
+  }
+  return (text) => {
+    const calls: ChatToolCall[] = [];
+    for (const match of text.matchAll(regex)) {
+      const name = match.groups?.name ?? spec.name;
+      if (!name) continue;
+      calls.push(toolCall(name, parseLooseArgs(match.groups?.args ?? "{}"), calls.length));
+    }
+    return calls;
+  };
+}
 
-const deepSeekParser = createParser("deepseek", ["deepseek"], [
-  parseDeepSeekToolCalls,
-  parseTaggedToolCalls,
-  parseJsonToolCalls,
-]);
+const genericParser = compileProfile(genericProfile);
+const builtinRegistry = builtinProfiles.map(compileProfile);
 
-const mistralParser = createParser("mistral", ["mistral", "mixtral"], [
-  parseMistralToolCalls,
-  parseJsonToolCalls,
-]);
+let compiledUserRegistry: AssistantOutputParser[] | undefined;
 
-const llamaParser = createParser("llama", ["llama", "granite"], [
-  parsePythonTagToolCalls,
-  parseJsonToolCalls,
-]);
+function userRegistry(): AssistantOutputParser[] {
+  compiledUserRegistry ??= loadUserProfiles().map(compileProfile);
+  return compiledUserRegistry;
+}
 
-const gemmaParser = createParser("gemma", ["gemma", "functiongemma"], [
-  parseFunctionGemmaCalls,
-  parseJsonToolCalls,
-]);
-
-const genericParser = createParser("generic", [], [
-  parseHarmonyToolCalls,
-  parseFunctionMessageCalls,
-  parseTaggedToolCalls,
-  parseQwenToolCalls,
-  parseDeepSeekToolCalls,
-  parseMistralToolCalls,
-  parsePythonTagToolCalls,
-  parseFunctionGemmaCalls,
-  parseJsonToolCalls,
-]);
-
-const parserRegistry = [harmonyParser, hermesParser, qwenParser, deepSeekParser, mistralParser, llamaParser, gemmaParser];
-
-function createParser(name: string, families: string[], toolParsers: ToolParser[]): AssistantOutputParser {
+export function resetCompiledProfiles(): void {
+  compiledUserRegistry = undefined;
+  resetUserProfileCache();
+}
+function createParser(name: string, families: string[], toolParsers: ToolParser[], profile?: ModelProfileDefinition): AssistantOutputParser {
   return {
     name,
     families,
     toolParsers,
-    parse(text, context) {
+    profile,
+    parse(rawText, context) {
+      const text = applyProfileReplacements(rawText, profile);
       const reasoned = extractReasoning(text);
-      const toolCalls = runToolParsers(reasoned.content, context, toolParsers);
-      const visible = suppressProtocolMarkers(reasoned.content);
-      const content = toolCalls.length ? "" : cleanupProtocolText(visible);
+      let toolCalls = runToolParsers(reasoned.content, context, toolParsers);
+      const visible = applyProfileMarkers(suppressProtocolMarkers(reasoned.content), profile);
+      let content = toolCalls.length ? "" : cleanupProtocolText(visible);
+      if (!toolCalls.length && reasoned.reasoning) {
+        toolCalls = recoverToolCallsFromReasoning(text, reasoned.reasoning, context, toolParsers, content);
+        if (toolCalls.length) content = "";
+      }
+
+      // Some model families emit special tokens that decode to literal marker text
+      // (e.g. gemma's quote token <|"|>); normalize them before any parsing.
+      function applyProfileReplacements(text: string, profile?: ModelProfileDefinition): string {
+        const replacements = profile?.markers?.replace;
+        if (!replacements) return text;
+        let output = text;
+        for (const [from, to] of Object.entries(replacements)) {
+          output = output.split(from).join(to);
+        }
+        return output;
+      }
       return {
         content,
         reasoning: reasoned.reasoning,
@@ -191,6 +292,31 @@ function createParser(name: string, families: string[], toolParsers: ToolParser[
   };
 }
 
+// Thinking models (implicit-<think> templates especially) sometimes emit the
+// tool call inside the reasoning block, or construct the call object in their
+// thoughts and stop without ever producing visible output. Recover those calls
+// so agent harnesses receive a structured tool_call instead of nothing.
+function recoverToolCallsFromReasoning(rawText: string, reasoning: string, context: ParserContext, toolParsers: ToolParser[], content: string): ChatToolCall[] {
+  if (hasExplicitParserMarker(rawText)) {
+    const calls = runToolParsers(rawText, context, toolParsers.filter((parser) => parser !== parseJsonToolCalls));
+    if (calls.length) return calls;
+  }
+  if (!context.toolMode || content) return [];
+  const object = trailingBalancedObject(reasoning);
+  if (!object) return [];
+  const call = normalizeToolCall(parseJsonLike(object), 0);
+  return call ? [call] : [];
+}
+
+function trailingBalancedObject(text: string): string | undefined {
+  const trimmed = text.trimEnd();
+  for (let index = trimmed.lastIndexOf("{"), attempts = 0; index >= 0 && attempts < 24; index = trimmed.lastIndexOf("{", index - 1), attempts += 1) {
+    const candidate = extractBalancedObject(trimmed.slice(index));
+    if (candidate && index + candidate.length === trimmed.length) return candidate;
+  }
+  return undefined;
+}
+
 function extractReasoning(text: string): { content: string; reasoning?: string } {
   const pieces = extractChannelReasoning(text);
   const withThink = extractThinkReasoning(pieces.content, pieces.reasoning);
@@ -198,16 +324,19 @@ function extractReasoning(text: string): { content: string; reasoning?: string }
 }
 
 function extractChannelReasoning(text: string): { content: string; reasoning?: string } {
-  const channelPattern = /<\|?channel\|?>\s*(thought|analysis|commentary|final)\b\s*/gi;
+  // The channel word is optional: a bare closing marker such as <channel|>
+  // (gemma-style) switches back to content without naming a channel.
+  const channelPattern = /<\|?channel\|?>\s*(thought|analysis|commentary|final)?\s*/gi;
   const matches = [...text.matchAll(channelPattern)];
-  if (!matches.length) return { content: text };
+  if (!matches.some((match) => match[1])) return { content: text };
 
   const reasoning: string[] = [];
   const content: string[] = [];
   for (let i = 0; i < matches.length; i += 1) {
     const match = matches[i]!;
-    const channel = match[1]?.toLowerCase();
+    const channel = match[1]?.toLowerCase() ?? "final";
     const start = (match.index ?? 0) + match[0].length;
+    if (i === 0 && (match.index ?? 0) > 0) content.push(text.slice(0, match.index));
     const nextStart = matches[i + 1]?.index ?? text.length;
     const segment = text.slice(start, nextStart);
     const toolStart = findProtocolStart(segment);
@@ -229,6 +358,7 @@ function findProtocolStart(text: string): number {
     text.search(/<\|?tool_call\|?>/),
     text.search(/to=functions\.[\w.-]+/),
     text.search(/<tool_call>/),
+    text.search(/<function=[\w.-]+>/),
     text.search(/<\|tool_call_start\|>/),
     text.search(/<｜tool▁calls▁begin｜>/),
     text.search(/<\|python_tag\|>/),
@@ -267,7 +397,7 @@ function runToolParsers(text: string, context: ParserContext, parsers: ToolParse
 }
 
 function hasExplicitParserMarker(text: string): boolean {
-  return /<\|python_tag\|>|call:[\w.-]+\s*\{|<\|?tool_call\|?>|<tool_call>|\[TOOL_CALLS\]/.test(text);
+  return /<\|python_tag\|>|call:[\w.-]+\s*\{|<\|?tool_call\|?>|<tool_call>|<function=[\w.-]+>|\[TOOL_CALLS\]/.test(text);
 }
 
 function suppressProtocolMarkers(text: string): string {
@@ -276,6 +406,8 @@ function suppressProtocolMarkers(text: string): string {
     .replace(/<\|?tool_call\|?>[\s\S]*$/g, "")
     .replace(/to=functions\.[\w.-]+[\s\S]*?<\|message\|>[\s\S]*?<\|call\|>/g, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+    .replace(/<function=[\w.-]+>[\s\S]*?<\/function>/g, "")
+    .replace(/<function=[\w.-]+>[\s\S]*$/g, "")
     .replace(/<\|tool_call_start\|>[\s\S]*?<\|tool_call_end\|>/g, "")
     .replace(/<｜tool▁calls▁begin｜>[\s\S]*?<｜tool▁calls▁end｜>/g, "")
     .replace(/<\|python_tag\|>[\s\S]*$/g, "")
@@ -293,6 +425,8 @@ function cleanupProtocolText(text: string): string {
     .replace(/<\|turn>/g, "")
     .replace(/<\|tool_call_(?:start|end)\|>/g, "")
     .replace(/<\/?tool_call>/g, "")
+    .replace(/<\/?function(?:=[\w.-]+)?>/g, "")
+    .replace(/<\/?parameter(?:=[\w.-]+)?>/g, "")
     .replace(/<\|?tool_call\|?>[\s\S]*$/g, "")
     .replace(/call::?[\w.-]+[\s\S]*$/g, "")
     .replace(/<｜tool▁(?:calls▁begin|calls▁end|call▁begin|call▁end)｜>/g, "")
@@ -318,6 +452,24 @@ function parseTaggedToolCalls(text: string): ChatToolCall[] {
   return [...text.matchAll(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g)]
     .map((match, index) => normalizeToolCall(parseJsonLike(match[1] ?? ""), index))
     .filter((call): call is ChatToolCall => Boolean(call));
+}
+
+// Qwen3 coder-style XML tool calls:
+// <tool_call>\n<function=name>\n<parameter=key>\nvalue\n</parameter>\n</function>\n</tool_call>
+// The <tool_call> wrapper and closing tags are frequently omitted or truncated.
+function parseXmlFunctionCalls(text: string): ChatToolCall[] {
+  const calls: ChatToolCall[] = [];
+  for (const match of text.matchAll(/<function=([\w.-]+)>\s*([\s\S]*?)(?:<\/function>|$)/g)) {
+    const name = match[1];
+    if (!name) continue;
+    const args: Record<string, unknown> = {};
+    for (const param of (match[2] ?? "").matchAll(/<parameter=([\w.-]+)>\n?([\s\S]*?)(?:\n?<\/parameter>|$(?![\s\S]))/g)) {
+      const key = param[1];
+      if (key) args[key] = param[2] ?? "";
+    }
+    calls.push(toolCall(name, args, calls.length));
+  }
+  return calls;
 }
 
 function parseQwenToolCalls(text: string): ChatToolCall[] {
@@ -703,11 +855,13 @@ export type StreamFilterOptions = {
   toolMode: boolean;
   bufferAll?: boolean;
   stops?: string[];
+  startInReasoning?: boolean;
+  extraMarkers?: StreamMarker[];
 };
 
 type StreamMarkerAction = "think-open" | "think-close" | "channel" | "suppress" | "strip" | "stop";
 
-type StreamMarker = { text: string; action: StreamMarkerAction; toolModeOnly?: boolean };
+export type StreamMarker = { text: string; action: StreamMarkerAction; toolModeOnly?: boolean };
 
 const streamMarkers: StreamMarker[] = [
   { text: "<think>", action: "think-open" },
@@ -718,6 +872,7 @@ const streamMarkers: StreamMarker[] = [
   { text: "<channel|>", action: "channel" },
   { text: "<tool_call>", action: "suppress" },
   { text: "<|tool_call", action: "suppress" },
+  { text: "<function=", action: "suppress" },
   { text: "<｜tool▁calls▁begin｜>", action: "suppress" },
   { text: "<|python_tag|>", action: "suppress" },
   { text: "[TOOL_CALLS]", action: "suppress" },
@@ -756,11 +911,12 @@ export class StreamingOutputFilter {
   private readonly markerTexts: string[];
 
   constructor(private readonly options: StreamFilterOptions) {
-    this.markers = streamMarkers.filter((marker) => !marker.toolModeOnly || options.toolMode);
+    this.markers = [...streamMarkers, ...(options.extraMarkers ?? [])].filter((marker) => !marker.toolModeOnly || options.toolMode);
     this.markerTexts = [
       ...this.markers.map((marker) => marker.text),
       ...(options.stops ?? []),
     ];
+    if (options.startInReasoning) this.mode = "reasoning";
   }
 
   feed(chunk: string): StreamDelta[] {

@@ -2,7 +2,7 @@ import type { ClapModel } from "@clap/api";
 import { ggufModelDisplayName, isGgufModel } from "@clap/runtime-llama";
 import { isMlxModelDirectorySync, mlxModelDisplayName, mlxModelPaths } from "@clap/runtime-mlx";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { hfAuthGuidance, resolveHfToken } from "./hf-auth";
 
@@ -126,7 +126,7 @@ export const modelAliases: ModelAlias[] = [
   },
 ];
 
-export function listModels(): ClapModel[] {
+function envConfiguredModels(): ClapModel[] {
   const ggufModels = (process.env.CLAP_GGUF_MODEL_PATHS ?? "")
     .split(",")
     .map((model) => model.trim())
@@ -151,7 +151,59 @@ export function listModels(): ClapModel[] {
       status: "available" as const,
     } satisfies Partial<ClapModel> & Pick<ClapModel, "id" | "object" | "displayName" | "backend" | "format" | "status">))
     .map((model) => withModelMetadata(model, { path: model.id }));
-  return [...ggufModels, ...mlxModels, ...listCachedModels()];
+  return [...ggufModels, ...mlxModels];
+}
+
+export function listModels(): ClapModel[] {
+  return [...envConfiguredModels(), ...listCachedModels()];
+}
+
+// Non-blocking variant for polling endpoints (dashboard, model lists). The
+// synchronous walk can stall the whole event loop for seconds when the disk
+// is saturated by model weight reads or downloads, freezing every request.
+// Directory listings are awaited here and results are memoized briefly with
+// stale-while-revalidate so pollers never wait on a refresh already running.
+let listModelsMemo: { at: number; value: ClapModel[] } | undefined;
+let listModelsRefresh: Promise<ClapModel[]> | undefined;
+
+function listModelsTtlMs(): number {
+  const raw = Number(process.env.CLAP_MODEL_LIST_TTL_MS);
+  return Number.isFinite(raw) ? raw : 2000;
+}
+
+export function invalidateModelListCache(): void {
+  listModelsMemo = undefined;
+  readJsonCache.clear();
+}
+
+export async function listModelsAsync(): Promise<ClapModel[]> {
+  const ttl = listModelsTtlMs();
+  if (listModelsMemo && Date.now() - listModelsMemo.at < ttl) return listModelsMemo.value;
+  if (!listModelsRefresh) {
+    listModelsRefresh = (async () => {
+      try {
+        const root = hfCacheRoot();
+        const repoEntries = existsSync(root)
+          ? (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory())
+          : [];
+        const cached: ClapModel[] = [];
+        for (const entry of repoEntries) {
+          const repoPath = join(root, entry.name);
+          const files = await readdir(repoPath, { withFileTypes: true });
+          cached.push(...cachedModelsForRepo(repoPath, repoFromCacheDirName(entry.name), files));
+        }
+        const value = [...envConfiguredModels(), ...cached];
+        listModelsMemo = { at: Date.now(), value };
+        return value;
+      } finally {
+        listModelsRefresh = undefined;
+      }
+    })();
+  }
+  // Serve moderately stale data instantly while a refresh is in flight so a
+  // slow disk never delays pollers; hard-cap staleness at 10x the TTL.
+  if (listModelsMemo && Date.now() - listModelsMemo.at < ttl * 10) return listModelsMemo.value;
+  return listModelsRefresh;
 }
 
 export function listAliases(): ClapModel[] {
@@ -179,17 +231,27 @@ export async function pullModel(request: PullModelRequest, options: PullModelOpt
   const repo = target.repo;
   const info = await fetchModelInfo(repo, options);
   const siblings = info.siblings ?? [];
-  if (target.file) return { ...await pullGgufFile(repo, target.file, siblings, options), selected };
+  if (target.file) {
+    try {
+      return { ...await pullGgufFile(repo, target.file, siblings, options), selected };
+    } finally {
+      invalidateModelListCache();
+    }
+  }
   if (target.backend === "gguf") {
     throw new Error(`GGUF pull for ${request.model} requires --file`);
   }
 
   const ggufFiles = siblings.map((sibling) => sibling.rfilename).filter((file): file is string => Boolean(file?.toLowerCase().endsWith(".gguf")));
-  if (ggufFiles.length === 1) return { ...await pullGgufFile(repo, ggufFiles[0]!, siblings, options), selected };
-  if (ggufFiles.length > 1) {
-    throw new Error(`multiple GGUF files found for ${repo}; pass --file with one of: ${ggufFiles.join(", ")}`);
+  try {
+    if (ggufFiles.length === 1) return { ...await pullGgufFile(repo, ggufFiles[0]!, siblings, options), selected };
+    if (ggufFiles.length > 1) {
+      throw new Error(`multiple GGUF files found for ${repo}; pass --file with one of: ${ggufFiles.join(", ")}`);
+    }
+    return { ...await pullMlxRepo(repo, siblings, options), selected };
+  } finally {
+    invalidateModelListCache();
   }
-  return { ...await pullMlxRepo(repo, siblings, options), selected };
 }
 
 export async function removeModel(model: string): Promise<string[]> {
@@ -216,6 +278,7 @@ export async function removeModel(model: string): Promise<string[]> {
       await rm(dir, { recursive: true, force: true });
     }
   }
+  if (removed.length) invalidateModelListCache();
   return removed;
 }
 
@@ -537,8 +600,8 @@ function optionScore(option: ModelResolveOption): number {
   return 40;
 }
 
-function cachedModelsForRepo(repoPath: string, repo = repoPath): ClapModel[] {
-  const files = readdirSync(repoPath, { withFileTypes: true });
+function cachedModelsForRepo(repoPath: string, repo = repoPath, listed?: Array<{ name: string; isFile(): boolean }>): ClapModel[] {
+  const files = listed ?? readdirSync(repoPath, { withFileTypes: true });
   const ggufFiles = files.filter((entry) => entry.isFile() && isGgufModel(entry.name));
   const ggufModels = files
     .filter((entry) => entry.isFile() && isGgufModel(entry.name))
@@ -679,7 +742,27 @@ function inferQuantization(format: string, file?: string, config?: JsonRecord): 
   return undefined;
 }
 
+// Metadata JSON files (config.json etc.) change only when a model is
+// re-pulled; cache them briefly so polling endpoints do not re-read files
+// from a disk that may be saturated by weight loads or downloads.
+const readJsonCache = new Map<string, { at: number; value: JsonRecord | undefined }>();
+const READ_JSON_TTL_MS = 10_000;
+
+function readJsonTtlMs(): number {
+  const raw = Number(process.env.CLAP_MODEL_LIST_TTL_MS);
+  return Number.isFinite(raw) ? raw : READ_JSON_TTL_MS;
+}
+
 function readJson(path: string): JsonRecord | undefined {
+  const cached = readJsonCache.get(path);
+  if (cached && Date.now() - cached.at < readJsonTtlMs()) return cached.value;
+  const value = readJsonUncached(path);
+  if (readJsonCache.size > 512) readJsonCache.clear();
+  readJsonCache.set(path, { at: Date.now(), value });
+  return value;
+}
+
+function readJsonUncached(path: string): JsonRecord | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
     return isRecord(parsed) ? parsed : undefined;

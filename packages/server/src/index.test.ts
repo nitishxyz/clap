@@ -6,7 +6,11 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
-import { createServer, idleTimeoutFromEnv } from "./index";
+import { createServer, idleTimeoutFromEnv, inferParserFamilies } from "./index";
+
+// Tests mutate fake model cache directories directly; disable the model list
+// memo so every request observes the current directory state.
+process.env.CLAP_MODEL_LIST_TTL_MS = "0";
 
 describe("clap server", () => {
   test("serves health", async () => {
@@ -14,6 +18,41 @@ describe("clap server", () => {
     expect(response.status).toBe(200);
     const body = HealthResponseSchema.parse(await response.json());
     expect(body.status).toBe("ok");
+  });
+
+  test("serves dashboard metrics json", async () => {
+    const response = await createServer().request("/clap/v1/dashboard");
+    expect(response.status).toBe(200);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body.server).toMatchObject({ platform: process.platform });
+    expect(body.totals).toMatchObject({ requests: 0, ok: 0, errors: 0, cacheHits: 0 });
+    expect(Array.isArray(body.active)).toBe(true);
+    expect(Array.isArray(body.requests)).toBe(true);
+    expect(Array.isArray(body.loaded)).toBe(true);
+    expect(Array.isArray(body.models)).toBe(true);
+  });
+
+  test("serves the embedded dashboard ui", async () => {
+    const app = createServer();
+    const response = await app.request("/");
+    expect([200, 503]).toContain(response.status);
+    if (response.status === 200) {
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toContain("<div id=\"root\">");
+    }
+    const redirect = await app.request("/dashboard");
+    expect([301, 302]).toContain(redirect.status);
+  });
+
+  test("model remove endpoint 404s for unknown models", async () => {
+    const response = await createServer().request("/clap/v1/models/remove", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "no-such/model-xyz" }),
+    });
+    expect(response.status).toBe(404);
+    const body = await response.json() as { error: { code: string } };
+    expect(body.error.code).toBe("not_cached");
   });
 
   test("selects parser families from model ids", () => {
@@ -38,6 +77,18 @@ describe("clap server", () => {
     const mistral = parseAssistantOutput('[TOOL_CALLS]search{"query":"mistral"}', request, { familyHints: ["mistral"] });
     expect(mistral.finishReason).toBe("tool_calls");
     expect(mistral.toolCalls?.[0]?.function.arguments).toBe(JSON.stringify({ query: "mistral" }));
+  });
+
+  test("family names inside tokenizer vocabulary do not select the wrong parser", () => {
+    // gemma's tokenizer.json vocabulary contains the plain words "harmony"
+    // and "Hermes" as tokens; only template/config metadata may vote by name.
+    const vocab = '{"vocab":{"harmony":1234,"Hermes":5678,"mistral":9012}}';
+    const nameMeta = '{"model_type":"gemma3_text","chat_template":"..."}';
+    expect(inferParserFamilies(vocab.toLowerCase(), nameMeta.toLowerCase())).toEqual(["gemma"]);
+    // Distinctive protocol markers still count no matter where they appear.
+    expect(inferParserFamilies("<|channel|>", "")).toEqual(["harmony"]);
+    expect(inferParserFamilies("<tool_call>", "")).toEqual(["hermes"]);
+    expect(inferParserFamilies("", '{"model_type":"qwen3_moe","enable_thinking":true}')).toEqual(["qwen"]);
   });
 
   test("uses cached tokenizer template metadata for ambiguous local models", async () => {

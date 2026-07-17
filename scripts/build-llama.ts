@@ -32,6 +32,19 @@ if (process.platform === "darwin") {
   if (process.arch === "arm64") configure.push("-DCMAKE_OSX_ARCHITECTURES=arm64");
 }
 
+// Linux: enable CUDA automatically when the toolkit is present (RunPod and
+// similar GPU boxes) unless explicitly disabled with CLAP_CUDA=0.
+const cudaHome = process.env.CUDA_HOME ?? process.env.CUDA_PATH ?? "/usr/local/cuda";
+const wantCuda = process.platform === "linux"
+  && process.env.CLAP_CUDA !== "0"
+  && (existsSync(join(cudaHome, "bin", "nvcc")) || Bun.which("nvcc") !== null);
+if (wantCuda) {
+  configure.push("-DGGML_CUDA=ON");
+  console.log(`CUDA toolkit detected (${cudaHome}); building GPU-enabled worker`);
+} else if (process.platform === "linux") {
+  console.log("no CUDA toolkit detected; building CPU-only worker (set CUDA_HOME if nvcc is elsewhere)");
+}
+
 await run(configure);
 await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j"]);
 
@@ -67,6 +80,20 @@ if (process.platform === "darwin") {
     "-framework", "MetalKit",
     "-framework", "Accelerate",
   );
+}
+
+if (process.platform === "linux") {
+  if (wantCuda) {
+    compile.push(
+      "-L", join(buildDir, "ggml", "src", "ggml-cuda"),
+      "-lggml-cuda",
+      "-L", join(cudaHome, "lib64"),
+      "-L", join(cudaHome, "lib64", "stubs"),
+      "-lcudart", "-lcublas", "-lcublasLt", "-lcuda",
+      `-Wl,-rpath,${join(cudaHome, "lib64")}`,
+    );
+  }
+  compile.push("-lpthread", "-ldl", "-lm", "-fopenmp");
 }
 
 await run([...compile, "-o", wrapperOutput]);

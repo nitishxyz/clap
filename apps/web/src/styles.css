@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --background: hsl(240 10% 8%);
+  --foreground: hsl(0 0% 98%);
+  --muted: hsl(240 5% 64.9%);
+  --panel: hsl(240 10% 10%);
+  --panel-strong: hsl(240 8% 14%);
+  --border: hsl(240 3.7% 15.9%);
+  --soft-border: hsl(240 3.7% 20%);
+  --ok: hsl(145 70% 54%);
+  --warn: hsl(38 92% 60%);
+  --err: hsl(12 92% 66%);
+  --accent: hsl(210 95% 66%);
+  --thinking: hsl(265 85% 72%);
+  --cache: hsl(188 82% 56%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@theme {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-panel: var(--panel);
+  --color-panel-strong: var(--panel-strong);
+  --color-border: var(--border);
+  --color-soft-border: var(--soft-border);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-accent: var(--accent);
+  --color-thinking: var(--thinking);
+  --color-cache: var(--cache);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+}

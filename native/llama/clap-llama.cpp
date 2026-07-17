@@ -74,7 +74,14 @@ struct LoadedLlama {
   std::string model_path;
   llama_model* model = nullptr;
   llama_context* ctx = nullptr;
-  std::vector<llama_token> cache_tokens;
+  // KV cache slots: one llama sequence per slot so multiple concurrent
+  // sessions (agent loops, chats, side requests) each keep a warm prefix.
+  struct CacheSlot {
+    std::vector<llama_token> tokens;
+    uint64_t last_used = 0;
+  };
+  std::vector<CacheSlot> slots;
+  uint64_t use_counter = 0;
 };
 
 struct ChatEntry {
@@ -209,7 +216,7 @@ void unload(LoadedLlama& loaded) {
     loaded.model = nullptr;
   }
   loaded.model_path.clear();
-  loaded.cache_tokens.clear();
+  loaded.slots.clear();
 }
 
 void load_model(LoadedLlama& loaded, const std::string& model_path) {
@@ -240,9 +247,10 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   // several times slower on Metal.
   ctx_params.n_batch = env_int("CLAP_LLAMA_BATCH", 2048);
   ctx_params.n_ubatch = env_int("CLAP_LLAMA_UBATCH", 512);
-  // Sequence 1 is a scratch slot for small side requests (title generation
-  // etc.) so they do not evict the main conversation's KV cache.
-  ctx_params.n_seq_max = 2;
+  // Multiple KV cache slots (one llama sequence each) so any number of
+  // concurrent sessions keep warm prefixes; slots are LRU-recycled.
+  const int32_t n_slots = std::max(1, env_int("CLAP_LLAMA_SLOTS", 4));
+  ctx_params.n_seq_max = n_slots;
   ctx_params.no_perf = true;
   loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
   if (!loaded.ctx) {
@@ -251,6 +259,8 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
     throw std::runtime_error("failed to create llama context for: " + model_path);
   }
   loaded.model_path = model_path;
+  loaded.slots.assign(static_cast<std::size_t>(n_slots), {});
+  loaded.use_counter = 0;
 }
 
 void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits, llama_seq_id seq) {
@@ -263,7 +273,8 @@ void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits
   batch.n_tokens += 1;
 }
 
-void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, int32_t& n_pos, llama_seq_id seq) {
+void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, int32_t& n_pos, llama_seq_id seq,
+                   const std::function<void(std::size_t)>& progress = nullptr) {
   const int32_t n_batch = static_cast<int32_t>(llama_n_batch(loaded.ctx));
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
   llama_batch batch = llama_batch_init(n_batch, 0, 1);
@@ -287,6 +298,7 @@ void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, 
       }
       n_pos += chunk;
       offset += static_cast<std::size_t>(chunk);
+      if (progress && offset < tokens.size()) progress(offset);
     }
   } catch (...) {
     llama_batch_free(batch);
@@ -370,8 +382,10 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
 
   int32_t n_pos = 0;
   llama_seq_id seq = 0;
+  int cached_prompt_tokens = 0;
+  LoadedLlama::CacheSlot* slot = nullptr;
   if (llama_model_has_encoder(loaded.model)) {
-    loaded.cache_tokens.clear();
+    for (auto& s : loaded.slots) s.tokens.clear();
     llama_memory_clear(llama_get_memory(loaded.ctx), true);
     llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
     if (llama_encode(loaded.ctx, batch)) throw std::runtime_error("llama_encode failed");
@@ -379,34 +393,55 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     if (decoder_start_token_id == LLAMA_TOKEN_NULL) decoder_start_token_id = llama_vocab_bos(vocab);
     prompt_tokens = { decoder_start_token_id };
   } else {
-    // Reuse the longest common KV-cache prefix from the previous request so
-    // multi-turn conversations only re-ingest the new suffix.
-    std::size_t prefix = 0;
-    const std::size_t max_prefix = std::min(loaded.cache_tokens.size(), prompt_tokens.size());
-    while (prefix < max_prefix && loaded.cache_tokens[prefix] == prompt_tokens[prefix]) prefix += 1;
+    // Multi-session KV slots: pick the slot with the longest common prefix
+    // against this prompt so any number of interleaved sessions keep warm
+    // caches. Ties/misses recycle the least-recently-used slot.
+    std::size_t best_slot = 0;
+    std::size_t best_prefix = 0;
+    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+      const auto& candidate = loaded.slots[index].tokens;
+      std::size_t prefix = 0;
+      const std::size_t max_prefix = std::min(candidate.size(), prompt_tokens.size());
+      while (prefix < max_prefix && candidate[prefix] == prompt_tokens[prefix]) prefix += 1;
+      if (prefix > best_prefix) {
+        best_prefix = prefix;
+        best_slot = index;
+      }
+    }
+    // A tiny shared prefix (e.g. just <bos>) is not a session match; prefer
+    // the LRU empty-or-oldest slot instead so we do not evict a warm session.
+    if (best_prefix < 16) {
+      best_prefix = 0;
+      best_slot = 0;
+      uint64_t oldest = UINT64_MAX;
+      for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+        const auto& candidate = loaded.slots[index];
+        const uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
+        if (age < oldest) {
+          oldest = age;
+          best_slot = index;
+        }
+      }
+    }
+    slot = &loaded.slots[best_slot];
+    slot->last_used = ++loaded.use_counter;
+    seq = static_cast<llama_seq_id>(best_slot);
+    std::size_t prefix = best_prefix;
     if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token to get logits
-    // Small unrelated prompts (agent side requests such as title generation)
-    // run in a scratch sequence so they do not evict the warm KV cache of the
-    // main conversation.
-    const bool side_request = loaded.cache_tokens.size() > 1024
-      && prefix < loaded.cache_tokens.size() / 4
-      && prompt_tokens.size() < loaded.cache_tokens.size() / 2;
-    if (side_request) {
-      seq = 1;
-      llama_memory_seq_rm(llama_get_memory(loaded.ctx), 1, -1, -1);
-      n_pos = 0;
-    } else if (prefix > 0) {
-      llama_memory_seq_rm(llama_get_memory(loaded.ctx), 0, static_cast<llama_pos>(prefix), -1);
-      loaded.cache_tokens.resize(prefix);
+    if (prefix > 0) {
+      llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, static_cast<llama_pos>(prefix), -1);
+      slot->tokens.resize(prefix);
       n_pos = static_cast<int32_t>(prefix);
       prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
+      cached_prompt_tokens = static_cast<int>(prefix);
     } else {
-      llama_memory_clear(llama_get_memory(loaded.ctx), true);
-      loaded.cache_tokens.clear();
+      llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, -1, -1);
+      slot->tokens.clear();
+      n_pos = 0;
     }
   }
 
-  const bool track_cache = !llama_model_has_encoder(loaded.model) && seq == 0;
+  const bool track_cache = slot != nullptr;
 
   auto sparams = llama_sampler_chain_default_params();
   sparams.no_perf = true;
@@ -428,13 +463,25 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
   }
 
   try {
-    decode_tokens(loaded, prompt_tokens, n_pos, seq);
+    // Report prefill progress for long prompts so the server dashboard can
+    // show real ingestion state instead of an opaque wait.
+    const std::size_t progress_threshold = 1024;
+    if (prompt_tokens.size() > progress_threshold) {
+      decode_tokens(loaded, prompt_tokens, n_pos, seq, [&](std::size_t ingested) {
+        emit(id, json{{"prefill", {
+          {"done", cached_prompt_tokens + static_cast<int>(ingested)},
+          {"total", prompt_token_count},
+        }}});
+      });
+    } else {
+      decode_tokens(loaded, prompt_tokens, n_pos, seq);
+    }
   } catch (...) {
-    loaded.cache_tokens.clear();
+    if (slot) slot->tokens.clear();
     llama_sampler_free(sampler);
     throw;
   }
-  if (track_cache) loaded.cache_tokens.insert(loaded.cache_tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
+  if (track_cache) slot->tokens.insert(slot->tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
 
   std::string finish_reason = "stop";
   std::string held;  // tail that may be a partial stop sequence
@@ -480,11 +527,11 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     try {
       decode_tokens(loaded, next, n_pos, seq);
     } catch (...) {
-      loaded.cache_tokens.clear();
+      if (slot) slot->tokens.clear();
       llama_sampler_free(sampler);
       throw std::runtime_error("llama_decode failed; this often indicates llama.cpp/Metal GPU memory pressure. Check the llama worker log for kIOGPUCommandBufferCallbackErrorOutOfMemory. Try a smaller GGUF quant such as Q4_K_M, reduce CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, set CLAP_LLAMA_GPU_LAYERS to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.");
     }
-    if (track_cache) loaded.cache_tokens.push_back(token);
+    if (track_cache) slot->tokens.push_back(token);
     n_decode += 1;
     if (n_decode >= params.max_tokens) finish_reason = "length";
     if (n_pos + 1 >= n_ctx) {
@@ -495,9 +542,6 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
 
   if (!stopped && !cancelled && !held.empty()) emit(id, json{{"token", held}});
 
-  // Free the scratch sequence so side requests leave no KV footprint.
-  if (seq != 0) llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, -1, -1);
-
   llama_sampler_free(sampler);
   emit(id, json{
     {"done", true},
@@ -506,6 +550,11 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     {"usage", json{
       {"prompt_tokens", prompt_token_count},
       {"completion_tokens", completion_tokens},
+    }},
+    {"cache", json{
+      {"hit", cached_prompt_tokens > 0},
+      {"reused_tokens", cached_prompt_tokens},
+      {"slot", static_cast<int>(seq)},
     }},
   });
 }
