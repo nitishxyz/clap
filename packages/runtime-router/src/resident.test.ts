@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ResidentWorkerRegistry } from "./resident";
@@ -102,8 +102,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
-  await chmod(path, 0o755);
-  return path;
+  return `${process.execPath} ${path}`;
 }
 
 async function fakeCancellableWorker(dir: string): Promise<string> {
@@ -148,8 +147,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
-  await chmod(path, 0o755);
-  return path;
+  return `${process.execPath} ${path}`;
 }
 
 function restoreEnv(name: string, value: string | undefined) {

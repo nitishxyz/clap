@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { HealthResponseSchema } from "@clap/api";
 import { assertFileCredentialPermissions, deleteStoredHfToken, hfAuthStatus, pullModel, removeModel, resolveHfToken, resolveModel, storeHfToken } from "@clap/models";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
@@ -2385,8 +2385,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
-  await chmod(path, 0o755);
-  return path;
+  return `${process.execPath} ${path}`;
 }
 
 async function sseData(response: Response): Promise<any[]> {
