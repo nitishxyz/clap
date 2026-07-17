@@ -7,26 +7,49 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Cache vendored llama.cpp build
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
+          swift --version
+
+      - name: Cache Bun dependencies
         uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache vendored llama.cpp build
+        id: llama-cache-macos
+        uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
           key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
 
       - name: Cache Swift build
-        uses: actions/cache@v4
+        id: swift-cache-macos
+        uses: actions/cache/restore@v4
         with:
-          path: native/mlx/.build
+          path: |
+            native/mlx/.build
+            ~/Library/Caches/org.swift.swiftpm
           key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/mlx/Package.resolved', 'native/mlx/Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
@@ -37,6 +60,22 @@ jobs:
           bun run runtime:llama:vendor
           bun run runtime:llama:build
           bun run runtime:mlx:build
+
+      - name: Save llama.cpp cache
+        if: always() && steps.llama-cache-macos.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/llama.cpp
+          key: ${{ steps.llama-cache-macos.outputs.cache-primary-key }}
+
+      - name: Save Swift build cache
+        if: always() && steps.swift-cache-macos.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            native/mlx/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ steps.swift-cache-macos.outputs.cache-primary-key }}
 
       - name: Build clap binary
         run: bun run build:binary
@@ -63,8 +102,17 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Cache vendored llama.cpp build
+      - name: Cache Bun dependencies
         uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache vendored llama.cpp build
+        id: llama-cache-linux
+        uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
           key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
@@ -77,6 +125,13 @@ jobs:
         run: |
           bun run runtime:llama:vendor
           bun run runtime:llama:build
+
+      - name: Save llama.cpp cache
+        if: always() && steps.llama-cache-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/llama.cpp
+          key: ${{ steps.llama-cache-linux.outputs.cache-primary-key }}
 
       - name: Build clap binary
         run: bun run build:binary
