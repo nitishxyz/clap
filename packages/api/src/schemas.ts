@@ -106,6 +106,28 @@ export const PullModelRequestSchema = z.object({
   force: z.boolean().optional().default(false),
 });
 
+export const ModelResolveOptionSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  backend: z.enum(["gguf", "mlx"]),
+  format: z.enum(["gguf", "mlx", "safetensors"]),
+  repo: z.string(),
+  file: z.string().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  quantization: z.string().optional(),
+  supported: z.boolean(),
+  unsupportedReason: z.string().optional(),
+  recommended: z.boolean(),
+  reason: z.string(),
+});
+
+export const ModelResolveResponseSchema = z.object({
+  model: z.string(),
+  repo: z.string(),
+  options: z.array(ModelResolveOptionSchema),
+  selected: ModelResolveOptionSchema.optional(),
+});
+
 export const DownloadSchema = z.object({
   id: z.string(),
   model: z.string(),
@@ -120,6 +142,7 @@ export const DownloadSchema = z.object({
   error: z.string().optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
+  selected: ModelResolveOptionSchema.optional(),
 });
 
 export const PullModelResponseSchema = z.object({
@@ -261,7 +284,7 @@ export const ChatCompletionRequestSchema = z.object({
 
 export const ChatCompletionChoiceSchema = z.object({
   index: z.number(),
-  message: ChatMessageSchema.extend({ reasoning: z.string().optional() }),
+  message: ChatMessageSchema.extend({ reasoning: z.string().optional(), reasoning_content: z.string().optional() }),
   finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]).nullable(),
 });
 
@@ -299,6 +322,7 @@ export const ChatCompletionChunkSchema = z.object({
       role: z.literal("assistant").optional(),
       content: z.string().nullable().optional(),
       reasoning: z.string().optional(),
+      reasoning_content: z.string().optional(),
       tool_calls: z.array(ChatToolCallDeltaSchema).optional(),
     }),
     finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]).nullable(),
@@ -339,6 +363,13 @@ export const ResponseRequestSchema = z.object({
 });
 
 export const ResponseOutputItemSchema = z.union([
+  z.object({
+    id: z.string(),
+    type: z.literal("reasoning"),
+    status: z.literal("completed"),
+    summary: z.array(z.object({ type: z.literal("summary_text"), text: z.string() })).optional(),
+    content: z.array(z.object({ type: z.literal("reasoning_text"), text: z.string() })).optional(),
+  }),
   z.object({
     id: z.string(),
     type: z.literal("message"),
@@ -439,6 +470,8 @@ export type ClapModel = z.infer<typeof ClapModelSchema>;
 export type ClapModelsResponse = z.infer<typeof ClapModelsResponseSchema>;
 export type ClapAliasesResponse = z.infer<typeof ClapAliasesResponseSchema>;
 export type PullModelRequest = z.infer<typeof PullModelRequestSchema>;
+export type ModelResolveOption = z.infer<typeof ModelResolveOptionSchema>;
+export type ModelResolveResponse = z.infer<typeof ModelResolveResponseSchema>;
 export type Download = z.infer<typeof DownloadSchema>;
 export type PullModelResponse = z.infer<typeof PullModelResponseSchema>;
 export type DownloadsResponse = z.infer<typeof DownloadsResponseSchema>;

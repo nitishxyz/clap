@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
-import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download } from "@clap/api";
-import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, storeHfToken } from "@clap/models";
+import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
+import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
 import { startServer } from "@clap/server";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { formatModelList, formatModelStatus } from "./models-output";
 import { formatBytes, formatDownloadProgress } from "./progress";
 import { installPullCancellationHandler } from "./pull-cancellation";
+import { chooseOptionByInput, findOptionByQuant, formatResolveOptions, supportedOptions } from "./resolver-output";
 import {
   baseURLFromEnv,
   currentCliCommand,
@@ -49,6 +50,10 @@ try {
     await run(args.slice(1));
   } else if (command === "pull") {
     await pull(args.slice(1));
+  } else if (command === "rm") {
+    await rmCommand(args.slice(1));
+  } else if (command === "resolve") {
+    await resolveCommand(args.slice(1));
   } else {
     help();
     process.exit(command === "help" || command === "--help" || command === "-h" ? 0 : 1);
@@ -379,46 +384,149 @@ async function chat(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const model = flags.model ?? process.env.CLAP_DEFAULT_MODEL;
   if (!model) {
-    throw new Error("usage: clap chat --model <model|alias|path> [--backend mlx|gguf] [--stream] [prompt]");
+    throw new Error("usage: clap chat --model <model|alias|path> [--backend mlx|gguf] [--no-stream] [prompt]");
   }
-  const prompt = rest.join(" ") || await readStdinOrPrompt();
-  const request: ChatCompletionRequest = {
-    model,
-    messages: [{ role: "user", content: prompt }],
-    stream: flags.stream === "true" || flags.stream === "1",
-    backend: parseBackend(flags.backend),
-  };
-
-  const client = createClapClient();
-  if (request.stream) {
-    for await (const token of client.streamChatCompletions(request)) {
-      process.stdout.write(token);
-    }
-    process.stdout.write("\n");
-    return;
-  }
-
-  const response = await client.chatCompletions(request);
-  console.log(response.choices[0]?.message.content ?? "");
+  await chatSession(model, rest.join(" "), flags);
 }
 
 async function run(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const model = rest[0];
   if (!model) {
-    throw new Error("usage: clap run <model> [--backend mlx|gguf] [prompt]");
+    throw new Error("usage: clap run <model> [--backend mlx|gguf] [--no-stream] [prompt]");
   }
 
   await startBackgroundServer({ quiet: true });
-  const prompt = rest.slice(1).join(" ") || "Hello from clap run";
+  await chatSession(model, rest.slice(1).join(" "), flags);
+}
+
+async function chatSession(model: string, promptArg: string, flags: Record<string, string>) {
   const client = createClapClient();
-  const response = await client.chatCompletions({
-    model,
-    messages: [{ role: "user", content: prompt }],
-    stream: false,
-    backend: parseBackend(flags.backend),
-  });
-  console.log(response.choices[0]?.message.content ?? "");
+  const backend = parseBackend(flags.backend);
+  const stream = flags.stream !== "false";
+  let prompt = promptArg;
+  if (!prompt && !process.stdin.isTTY) {
+    const piped = (await new Response(Bun.stdin.stream()).text()).trim();
+    if (!piped) throw new Error("no prompt given; pass a prompt argument or pipe one on stdin");
+    prompt = piped;
+  }
+
+  if (prompt) {
+    await completeTurn(client, model, [{ role: "user", content: prompt }], backend, stream, flags);
+    return;
+  }
+
+  console.log(`chatting with ${model} (type /bye to exit)`);
+  const lines = createStdinLineReader();
+  const messages: ChatCompletionRequest["messages"] = [];
+  while (true) {
+    process.stdout.write(">>> ");
+    const line = await lines.readLine();
+    if (line === null) {
+      process.stdout.write("\n");
+      break;
+    }
+    const input = line.trim();
+    if (!input) continue;
+    if (input === "/bye" || input === "/exit" || input === "/quit") break;
+    if (input === "/clear") {
+      messages.length = 0;
+      console.log("(history cleared)");
+      continue;
+    }
+    messages.push({ role: "user", content: input });
+    try {
+      const content = await completeTurn(client, model, messages, backend, stream, flags);
+      messages.push({ role: "assistant", content });
+    } catch (error) {
+      messages.pop();
+      printError(error);
+    }
+  }
+  process.exit(0);
+}
+
+async function completeTurn(
+  client: ReturnType<typeof createClapClient>,
+  model: string,
+  messages: ChatCompletionRequest["messages"],
+  backend: "gguf" | "mlx" | undefined,
+  stream: boolean,
+  flags: Record<string, string>,
+): Promise<string> {
+  const request: ChatCompletionRequest = { model, messages, stream, backend };
+  try {
+    return await streamOrComplete(client, request);
+  } catch (error) {
+    if (!isModelNotCachedError(error)) throw error;
+    console.error(`clap: model ${model} is not cached locally; pulling it now...`);
+    await executePull(client, model, { backend, file: flags.file, quant: flags.quant, yes: true, force: false });
+    return streamOrComplete(client, request);
+  }
+}
+
+async function streamOrComplete(client: ReturnType<typeof createClapClient>, request: ChatCompletionRequest): Promise<string> {
+  if (request.stream) {
+    const tokens: string[] = [];
+    for await (const token of client.streamChatCompletions(request)) {
+      process.stdout.write(token);
+      tokens.push(token);
+    }
+    process.stdout.write("\n");
+    return tokens.join("");
+  }
+  const response = await client.chatCompletions(request);
+  const content = typeof response.choices[0]?.message.content === "string" ? response.choices[0].message.content : "";
+  console.log(content);
+  return content;
+}
+
+function isModelNotCachedError(error: unknown): boolean {
+  if (!(error instanceof ClapApiError)) return false;
+  const code = typeof error.body === "object" && error.body && "error" in error.body
+    ? (error.body as { error?: { code?: unknown } }).error?.code
+    : undefined;
+  return code === "not_downloaded" || code === "not_found" || code === "not_cached";
+}
+
+function createStdinLineReader(): { readLine(): Promise<string | null> } {
+  const reader = Bun.stdin.stream().getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let ended = false;
+  return {
+    async readLine() {
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          return line;
+        }
+        if (ended) {
+          if (!buffer) return null;
+          const line = buffer;
+          buffer = "";
+          return line;
+        }
+        const chunk = await reader.read();
+        if (chunk.done) {
+          ended = true;
+          continue;
+        }
+        buffer += decoder.decode(chunk.value, { stream: true });
+      }
+    },
+  };
+}
+
+async function resolveCommand(argv: string[]) {
+  const { flags, rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) throw new Error("usage: clap resolve <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]");
+  await startBackgroundServer({ quiet: true });
+  const response = await createClapClient().resolveModel({ model, file: flags.file, backend: parseBackend(flags.backend), force: false });
+  console.log(formatResolveOptions(response));
 }
 
 async function pull(argv: string[]) {
@@ -430,8 +538,47 @@ async function pull(argv: string[]) {
 
   await startBackgroundServer({ quiet: true });
   const client = createClapClient();
-  console.log(`pulling ${model}${flags.file ? ` (${flags.file})` : ""}${flags.backend ? ` via ${flags.backend}` : ""}...`);
-  const request = { model, file: flags.file, backend: parseBackend(flags.backend), force: flags.force === "true" };
+  await executePull(client, model, {
+    backend: parseBackend(flags.backend),
+    file: flags.file,
+    quant: flags.quant,
+    yes: flags.yes === "true",
+    force: flags.force === "true",
+  });
+}
+
+async function rmCommand(argv: string[]) {
+  const { rest } = parseFlags(argv);
+  const model = rest[0];
+  if (!model) {
+    throw new Error("usage: clap rm <owner/model|alias|owner/model:file.gguf>");
+  }
+  const health = await healthCheck(baseURLFromEnv());
+  if (health?.status === "ok") {
+    try {
+      await createClapClient().unloadModel({ model });
+    } catch {
+      // model was not loaded; nothing to unload
+    }
+  }
+  const removed = await removeModel(model);
+  if (!removed.length) {
+    throw new Error(`no cached files found for ${model}; see clap models`);
+  }
+  for (const path of removed) console.log(`removed ${path}`);
+}
+
+async function executePull(
+  client: ReturnType<typeof createClapClient>,
+  model: string,
+  flags: { backend?: "gguf" | "mlx"; file?: string; quant?: string; yes: boolean; force: boolean },
+) {
+  const backend = flags.backend;
+  const resolve = await client.resolveModel({ model, file: flags.file, backend, force: false });
+  const selected = await selectPullOption(resolve, { backend, file: flags.file, quant: flags.quant, yes: flags.yes });
+  const request = { model, file: selected?.file ?? flags.file, backend: selected?.backend ?? backend, force: flags.force };
+  if (selected) console.log(`selected: ${selected.backend}/${selected.format}${selected.quantization ? ` ${selected.quantization}` : ""}${selected.file ? ` ${selected.file}` : ""}`);
+  console.log(`pulling ${model}${request.file ? ` (${request.file})` : ""}${request.backend ? ` via ${request.backend}` : ""}...`);
   let activeDownloadId: string | undefined;
   const disposeCancellationHandler = installPullCancellationHandler(async () => {
     if (activeDownloadId) await client.cancelDownload(activeDownloadId);
@@ -460,6 +607,21 @@ async function pull(argv: string[]) {
   } finally {
     disposeCancellationHandler();
   }
+}
+
+async function selectPullOption(response: ModelResolveResponse, flags: { backend?: "gguf" | "mlx"; file?: string; quant?: string; yes?: boolean }): Promise<ModelResolveOption | undefined> {
+  const options = supportedOptions(response);
+  if (flags.quant) {
+    const match = findOptionByQuant(options, flags.quant);
+    if (!match) throw new Error(`no supported GGUF option found for --quant ${flags.quant}`);
+    return match;
+  }
+  if (flags.backend || flags.file || options.length <= 1 || !process.stdin.isTTY || !process.stdout.isTTY || flags.yes) {
+    return response.selected ?? options[0];
+  }
+  console.log(formatResolveOptions(response));
+  process.stdout.write(`Select option [${options.findIndex((option) => option.recommended) + 1 || 1}]: `);
+  return chooseOptionByInput(options, await readLineFromStdin());
 }
 
 async function waitForDownload(client: ReturnType<typeof createClapClient>, id: string): Promise<Download> {
@@ -507,6 +669,8 @@ function parseFlags(argv: string[]) {
     const arg = argv[index];
     if (arg === "--stream") {
       flags.stream = "true";
+    } else if (arg === "--no-stream") {
+      flags.stream = "false";
     } else if (arg === "--aliases") {
       flags.aliases = "true";
     } else if (arg === "--json") {
@@ -515,12 +679,16 @@ function parseFlags(argv: string[]) {
       flags.active = "true";
     } else if (arg === "--force") {
       flags.force = "true";
+    } else if (arg === "--yes" || arg === "-y") {
+      flags.yes = "true";
     } else if (arg === "--model" || arg === "-m") {
       flags.model = argv[++index];
     } else if (arg === "--file" || arg === "-f") {
       flags.file = argv[++index];
     } else if (arg === "--backend") {
       flags.backend = argv[++index];
+    } else if (arg === "--quant") {
+      flags.quant = argv[++index];
     } else if (arg === "--keep-alive") {
       flags.keepAlive = argv[++index];
     } else if (arg === "--token") {
@@ -537,14 +705,6 @@ function parseBackend(value: string | undefined): "gguf" | "mlx" | undefined {
   if (value === undefined) return undefined;
   if (value === "gguf" || value === "mlx") return value;
   throw new Error(`--backend must be mlx or gguf, got: ${value}`);
-}
-
-async function readStdinOrPrompt(): Promise<string> {
-  if (!process.stdin.isTTY) {
-    const text = await new Response(Bun.stdin.stream()).text();
-    if (text.trim()) return text.trim();
-  }
-  return "Hello from Clap";
 }
 
 async function readTokenForLogin(): Promise<string> {
@@ -612,9 +772,14 @@ function help() {
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
   clap unload <model|alias|path> [--backend mlx|gguf]
-  clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--force]
-  clap chat --model <model|alias|path> [--backend mlx|gguf] [--stream] [prompt]
-  clap run <model|alias> [--backend mlx|gguf] [prompt]
+  clap resolve <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]
+  clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes] [--force]
+  clap rm <owner/model|alias|owner/model:file.gguf>
+  clap chat --model <model|alias|path> [--backend mlx|gguf] [--no-stream] [prompt]
+  clap run <model|alias> [--backend mlx|gguf] [--no-stream] [prompt]
+
+Without a prompt, run/chat open an interactive session (/bye to exit, /clear to reset history).
+Models that are not cached locally are pulled automatically before the first reply.
 
 Environment:
   CLAP_HOME      State/log directory (default: ~/.clap)

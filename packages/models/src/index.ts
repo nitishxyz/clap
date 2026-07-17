@@ -50,6 +50,29 @@ export type PullResult = {
   format: "gguf" | "mlx";
   modelPath: string;
   files: string[];
+  selected?: ModelResolveOption;
+};
+
+export type ModelResolveOption = {
+  id: string;
+  model: string;
+  backend: BackendOverride;
+  format: "gguf" | "mlx" | "safetensors";
+  repo: string;
+  file?: string;
+  sizeBytes?: number;
+  quantization?: string;
+  supported: boolean;
+  unsupportedReason?: string;
+  recommended: boolean;
+  reason: string;
+};
+
+export type ModelResolveResult = {
+  model: string;
+  repo: string;
+  options: ModelResolveOption[];
+  selected?: ModelResolveOption;
 };
 
 export type PullProgress = {
@@ -76,6 +99,10 @@ export type PullTarget = {
 type HfSibling = {
   rfilename?: string;
   size?: number;
+  lfs?: {
+    sha256?: string;
+    size?: number;
+  };
 };
 
 type HfModelInfo = {
@@ -140,25 +167,71 @@ export function listCachedModels(): ClapModel[] {
 }
 
 export async function pullModel(request: PullModelRequest, options: PullModelOptions = {}): Promise<PullResult> {
-  const target = resolvePullTarget(request);
+  const useResolver = !request.file && request.backend !== "mlx";
+  const selected = useResolver ? (await resolveModelOptions(request, options)).selected : undefined;
+  const target = selected
+    ? buildPullTarget(selected.repo, selected.file, selected.backend)
+    : resolvePullTarget(request);
   if (!request.force) {
     const cached = cachedPullResultForTarget(target);
-    if (cached) return cached;
+    if (cached) return { ...cached, selected };
   }
   const repo = target.repo;
   const info = await fetchModelInfo(repo, options);
   const siblings = info.siblings ?? [];
-  if (target.file) return pullGgufFile(repo, target.file, siblings, options);
+  if (target.file) return { ...await pullGgufFile(repo, target.file, siblings, options), selected };
   if (target.backend === "gguf") {
     throw new Error(`GGUF pull for ${request.model} requires --file`);
   }
 
   const ggufFiles = siblings.map((sibling) => sibling.rfilename).filter((file): file is string => Boolean(file?.toLowerCase().endsWith(".gguf")));
-  if (ggufFiles.length === 1) return pullGgufFile(repo, ggufFiles[0]!, siblings, options);
+  if (ggufFiles.length === 1) return { ...await pullGgufFile(repo, ggufFiles[0]!, siblings, options), selected };
   if (ggufFiles.length > 1) {
     throw new Error(`multiple GGUF files found for ${repo}; pass --file with one of: ${ggufFiles.join(", ")}`);
   }
-  return pullMlxRepo(repo, siblings, options);
+  return { ...await pullMlxRepo(repo, siblings, options), selected };
+}
+
+export async function removeModel(model: string): Promise<string[]> {
+  const alias = findAlias(model);
+  const targetRepos = new Set<string>();
+  if (alias) {
+    targetRepos.add(alias.mlx.repo);
+    targetRepos.add(alias.gguf.repo);
+  }
+  const removed: string[] = [];
+  for (const cached of listCachedModels()) {
+    const repo = cached.repo ?? "";
+    const matches = cached.id === model || repo === model || targetRepos.has(repo);
+    if (!matches) continue;
+    const path = cached.localPath ?? cached.id;
+    if (!existsSync(path)) continue;
+    await rm(path, { recursive: true, force: true });
+    removed.push(path);
+  }
+  const root = hfCacheRoot();
+  for (const path of removed) {
+    const dir = dirname(path);
+    if (dir !== root && dir.startsWith(root) && existsSync(dir) && readdirSync(dir).every((name) => name.endsWith(".part"))) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  return removed;
+}
+
+export async function resolveModelOptions(request: PullModelRequest, options: PullModelOptions = {}): Promise<ModelResolveResult> {
+  const explicit = resolvePullTarget(request);
+  const alias = findAlias(request.model);
+  const targets = alias && !request.backend && !request.file ? [alias.mlx, alias.gguf] : [{ backend: explicit.backend, repo: explicit.repo, file: explicit.file }];
+  const resolvedOptions: ModelResolveOption[] = [];
+  for (const target of targets) {
+    const info = await fetchModelInfo(target.repo, options);
+    resolvedOptions.push(...optionsForRepo(request.model, target.repo, info.siblings ?? [], target.backend, target.file));
+  }
+  const filtered = applyOverrides(resolvedOptions, request);
+  const ranked = rankOptions(filtered);
+  const selected = ranked.find((option) => option.recommended && option.supported);
+  return { model: request.model, repo: explicit.repo, options: ranked, selected };
 }
 
 export function clapHome(): string {
@@ -388,6 +461,82 @@ function supportsMlxTarget(): boolean {
   return process.platform === "darwin" && process.arch === "arm64";
 }
 
+function optionsForRepo(model: string, repo: string, siblings: HfSibling[], backend?: BackendOverride, file?: string): ModelResolveOption[] {
+  const files = siblings.map((sibling) => sibling.rfilename).filter((name): name is string => Boolean(name));
+  const gguf = siblings.filter((sibling) => sibling.rfilename?.toLowerCase().endsWith(".gguf"));
+  const hasMlx = files.includes("config.json") && files.some((name) => name === "tokenizer.json" || name === "tokenizer_config.json") && files.some((name) => name.endsWith(".safetensors"));
+  const hasSafetensors = files.some((name) => name.endsWith(".safetensors"));
+  const result: ModelResolveOption[] = [];
+  if (hasMlx) {
+    result.push({
+      id: `${repo}:mlx`,
+      model,
+      backend: "mlx",
+      format: "mlx",
+      repo,
+      sizeBytes: selectedFilesSize(siblings, files.filter((name) => name === "config.json" || name === "tokenizer.json" || name === "tokenizer_config.json" || name.endsWith(".safetensors"))),
+      supported: supportsMlxTarget(),
+      unsupportedReason: supportsMlxTarget() ? undefined : "MLX runner is supported only on macOS arm64; choose a GGUF option instead.",
+      recommended: false,
+      reason: supportsMlxTarget() ? "MLX is preferred on macOS arm64 for Apple Silicon." : "MLX artifact found but this platform cannot run MLX.",
+    });
+  }
+  for (const sibling of gguf) {
+    const rfilename = sibling.rfilename!;
+    const quantization = inferQuantization("gguf", rfilename);
+    result.push({
+      id: `${repo}:${rfilename}`,
+      model,
+      backend: "gguf",
+      format: "gguf",
+      repo,
+      file: rfilename,
+      sizeBytes: sibling.size,
+      quantization,
+      supported: true,
+      recommended: false,
+      reason: quantization ? `GGUF ${quantization} artifact is runnable with llama.cpp.` : "GGUF artifact is runnable with llama.cpp.",
+    });
+  }
+  if (!hasMlx && !gguf.length && hasSafetensors) {
+    result.push({
+      id: `${repo}:safetensors`,
+      model,
+      backend: "mlx",
+      format: "safetensors",
+      repo,
+      sizeBytes: selectedFilesSize(siblings, files.filter((name) => name.endsWith(".safetensors"))),
+      supported: false,
+      unsupportedReason: "Raw safetensors repos are not directly runnable yet. Use an MLX-converted repo or a GGUF quantization, or convert the model first.",
+      recommended: false,
+      reason: "Source weights were found, but Clap does not yet serve raw safetensors directly.",
+    });
+  }
+  return result.filter((option) => (!backend || option.backend === backend) && (!file || option.file === file));
+}
+
+function applyOverrides(options: ModelResolveOption[], request: PullModelRequest): ModelResolveOption[] {
+  return options.filter((option) => (!request.backend || option.backend === request.backend) && (!request.file || option.file === request.file));
+}
+
+function rankOptions(options: ModelResolveOption[]): ModelResolveOption[] {
+  const scored = options.map((option) => ({ option, score: optionScore(option) })).sort((a, b) => b.score - a.score || (a.option.sizeBytes ?? 0) - (b.option.sizeBytes ?? 0));
+  const best = scored.find((entry) => entry.option.supported)?.option;
+  return scored.map(({ option }) => ({ ...option, recommended: option === best }));
+}
+
+function optionScore(option: ModelResolveOption): number {
+  if (!option.supported) return -100;
+  if (option.backend === "mlx") return supportsMlxTarget() ? 100 : -10;
+  const quant = option.quantization?.toUpperCase() ?? "";
+  if (quant === "Q4_K_M") return 80;
+  if (quant === "Q4_K_S") return 75;
+  if (quant === "Q3_K_M") return 70;
+  if (quant.startsWith("Q5")) return 50;
+  if (quant.startsWith("Q8") || /BF16|F16/.test(quant)) return 10;
+  return 40;
+}
+
 function cachedModelsForRepo(repoPath: string, repo = repoPath): ClapModel[] {
   const files = readdirSync(repoPath, { withFileTypes: true });
   const ggufFiles = files.filter((entry) => entry.isFile() && isGgufModel(entry.name));
@@ -609,6 +758,7 @@ async function pullGgufFile(repo: string, file: string, siblings: HfSibling[], o
     currentFile: file,
     onProgress: options.onProgress,
     signal: options.signal,
+    expectedSha256: siblingSha256(siblings, file),
   });
   return {
     id: `${repo}:${file}`,
@@ -622,10 +772,14 @@ async function pullGgufFile(repo: string, file: string, siblings: HfSibling[], o
 }
 
 async function pullMlxRepo(repo: string, siblings: HfSibling[], options: PullModelOptions): Promise<PullResult> {
+  // Include every small JSON/jinja sidecar: chat_template.jinja (HF moved chat
+  // templates out of tokenizer_config.json), model.safetensors.index.json for
+  // sharded weights, generation_config.json, special_tokens_map.json, etc.
   const files = siblings
     .map((sibling) => sibling.rfilename)
     .filter((file): file is string => Boolean(file))
-    .filter((file) => file === "config.json" || file === "tokenizer.json" || file === "tokenizer_config.json" || file.endsWith(".safetensors"));
+    .filter((file) => !file.includes("/"))
+    .filter((file) => file.endsWith(".json") || file.endsWith(".jinja") || file.endsWith(".safetensors") || file === "merges.txt" || file === "vocab.txt");
   if (!files.includes("config.json")) throw new Error(`MLX repo ${repo} is missing config.json`);
   if (!files.some((file) => file === "tokenizer.json" || file === "tokenizer_config.json" || file.endsWith(".safetensors"))) {
     throw new Error(`MLX repo ${repo} is missing tokenizer or safetensors files`);
@@ -645,6 +799,7 @@ async function pullMlxRepo(repo: string, siblings: HfSibling[], options: PullMod
       currentFile: file,
       onProgress: options.onProgress,
       signal: options.signal,
+      expectedSha256: siblingSha256(siblings, file),
     });
     bytesReceived += fileBytes;
     downloaded.push(target);
@@ -660,33 +815,56 @@ async function pullMlxRepo(repo: string, siblings: HfSibling[], options: PullMod
 }
 
 async function fetchModelInfo(repo: string, options: PullModelOptions): Promise<HfModelInfo> {
-  const response = await fetch(`${hfEndpoint()}/api/models/${repo}`, await hfFetchInit(options));
+  const response = await fetch(`${hfEndpoint()}/api/models/${repo}?blobs=true`, await hfFetchInit(options));
   if (response.status === 404) throw new Error(`Hugging Face repo not found: ${repo}`);
   if (response.status === 401 || response.status === 403) throw hfAuthError(response.status, `inspect Hugging Face repo ${repo}`);
   if (!response.ok) throw new Error(`failed to inspect Hugging Face repo ${repo}: ${response.status} ${response.statusText}`);
   return response.json() as Promise<HfModelInfo>;
 }
 
-async function downloadFile(repo: string, file: string, target: string, progress: Required<Pick<PullProgress, "bytesReceived" | "currentFile">> & Pick<PullProgress, "totalBytes"> & Pick<PullModelOptions, "onProgress" | "signal">): Promise<number> {
+async function downloadFile(repo: string, file: string, target: string, progress: Required<Pick<PullProgress, "bytesReceived" | "currentFile">> & Pick<PullProgress, "totalBytes"> & Pick<PullModelOptions, "onProgress" | "signal"> & { expectedSha256?: string }): Promise<number> {
   throwIfAborted(progress.signal);
-  const response = await fetch(`${hfEndpoint()}/${repo}/resolve/main/${file}`, await hfFetchInit(progress));
+  await mkdir(dirname(target), { recursive: true });
+  const partial = `${target}.part`;
+  let resumeFrom = existsSync(partial) ? Bun.file(partial).size : 0;
+  const init = await hfFetchInit(progress);
+  if (resumeFrom > 0) {
+    init.headers = { ...(init.headers as Record<string, string> | undefined), Range: `bytes=${resumeFrom}-` };
+  }
+  const response = await fetch(`${hfEndpoint()}/${repo}/resolve/main/${file}`, init);
+  if (response.status === 416 && resumeFrom > 0) {
+    // Range not satisfiable: the partial file already contains the full payload.
+    await response.body?.cancel().catch(() => undefined);
+    await verifyChecksum(partial, repo, file, progress.expectedSha256);
+    await rename(partial, target);
+    progress.onProgress?.({ bytesReceived: progress.bytesReceived + resumeFrom, totalBytes: progress.totalBytes, currentFile: file });
+    return resumeFrom;
+  }
   if (response.status === 404) throw new Error(`file not found in ${repo}: ${file}`);
   if (response.status === 401 || response.status === 403) throw hfAuthError(response.status, `download ${repo}/${file}`);
   if (!response.ok) throw new Error(`failed to download ${repo}/${file}: ${response.status} ${response.statusText}`);
+  const resumed = response.status === 206 && resumeFrom > 0;
+  if (!resumed) resumeFrom = 0;  // server ignored the range; restart from scratch
   const contentLength = parseContentLength(response.headers.get("content-length"));
-  const totalBytes = progress.totalBytes ?? (contentLength === undefined ? undefined : progress.bytesReceived + contentLength);
-  await mkdir(dirname(target), { recursive: true });
+  const totalBytes = progress.totalBytes ?? (contentLength === undefined ? undefined : progress.bytesReceived + resumeFrom + contentLength);
   const reader = response.body?.getReader();
   if (!reader) throw new Error(`failed to download ${repo}/${file}: response body is empty`);
-  const partial = `${target}.part-${crypto.randomUUID()}`;
-  const handle = await open(partial, "w");
-  let fileBytes = 0;
+  const hasher = progress.expectedSha256 ? new Bun.CryptoHasher("sha256") : undefined;
+  if (hasher && resumed) {
+    for await (const chunk of Bun.file(partial).stream()) hasher.update(chunk);
+  }
+  const handle = await open(partial, resumed ? "a" : "w");
+  let fileBytes = resumeFrom;
+  if (resumed) {
+    progress.onProgress?.({ bytesReceived: progress.bytesReceived + fileBytes, totalBytes, currentFile: file });
+  }
   try {
     while (true) {
       throwIfAborted(progress.signal);
       const { done, value } = await reader.read();
       if (done) break;
       await handle.write(value);
+      hasher?.update(value);
       fileBytes += value.byteLength;
       progress.onProgress?.({
         bytesReceived: progress.bytesReceived + fileBytes,
@@ -695,10 +873,17 @@ async function downloadFile(repo: string, file: string, target: string, progress
       });
     }
     throwIfAborted(progress.signal);
+    if (hasher && progress.expectedSha256) {
+      const actual = hasher.digest("hex");
+      if (actual !== progress.expectedSha256) {
+        await rm(partial, { force: true }).catch(() => undefined);
+        throw new Error(`checksum mismatch for ${repo}/${file}: expected sha256 ${progress.expectedSha256}, got ${actual}. The corrupt partial download was removed; retry the pull.`);
+      }
+    }
     await rename(partial, target);
   } catch (error) {
     await reader.cancel().catch(() => undefined);
-    await rm(partial, { force: true }).catch(() => undefined);
+    // Keep the .part file so an interrupted download can resume later.
     throw error;
   } finally {
     await handle.close();
@@ -706,8 +891,23 @@ async function downloadFile(repo: string, file: string, target: string, progress
   return fileBytes;
 }
 
+async function verifyChecksum(path: string, repo: string, file: string, expectedSha256?: string): Promise<void> {
+  if (!expectedSha256) return;
+  const hasher = new Bun.CryptoHasher("sha256");
+  for await (const chunk of Bun.file(path).stream()) hasher.update(chunk);
+  const actual = hasher.digest("hex");
+  if (actual !== expectedSha256) {
+    await rm(path, { force: true }).catch(() => undefined);
+    throw new Error(`checksum mismatch for ${repo}/${file}: expected sha256 ${expectedSha256}, got ${actual}. The corrupt partial download was removed; retry the pull.`);
+  }
+}
+
 function siblingSize(siblings: HfSibling[], file: string): number | undefined {
   return siblings.find((sibling) => sibling.rfilename === file)?.size;
+}
+
+function siblingSha256(siblings: HfSibling[], file: string): string | undefined {
+  return siblings.find((sibling) => sibling.rfilename === file)?.lfs?.sha256;
 }
 
 function selectedFilesSize(siblings: HfSibling[], files: string[]): number | undefined {

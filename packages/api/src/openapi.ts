@@ -11,6 +11,7 @@ import {
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
+  ModelResolveResponseSchema,
   OllamaChatRequestSchema,
   OllamaGenerateRequestSchema,
   OllamaPullRequestSchema,
@@ -44,6 +45,7 @@ export function createOpenApiDocument() {
   registry.register("UnloadModelResponse", UnloadModelResponseSchema);
   registry.register("PullModelRequest", PullModelRequestSchema);
   registry.register("PullModelResponse", PullModelResponseSchema);
+  registry.register("ModelResolveResponse", ModelResolveResponseSchema);
   registry.register("OpenAIModelsResponse", OpenAIModelsResponseSchema);
   registry.register("ChatCompletionRequest", ChatCompletionRequestSchema);
   registry.register("ChatCompletionResponse", ChatCompletionResponseSchema);
@@ -123,6 +125,20 @@ export function createOpenApiDocument() {
       },
     },
     responses: jsonResponses(UnloadModelResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/clap/v1/models/resolve",
+    summary: "Resolve runnable model artifacts before pulling",
+    request: {
+      body: {
+        content: {
+          "application/json": { schema: PullModelRequestSchema },
+        },
+      },
+    },
+    responses: jsonResponses(ModelResolveResponseSchema),
   });
 
   registry.registerPath({

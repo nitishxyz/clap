@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { HealthResponseSchema } from "@clap/api";
-import { assertFileCredentialPermissions, deleteStoredHfToken, hfAuthStatus, resolveHfToken, resolveModel, storeHfToken } from "@clap/models";
+import { assertFileCredentialPermissions, deleteStoredHfToken, hfAuthStatus, pullModel, removeModel, resolveHfToken, resolveModel, storeHfToken } from "@clap/models";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { parseAssistantOutput, selectParser } from "./chat-compat";
 import { createServer, idleTimeoutFromEnv } from "./index";
 
 describe("clap server", () => {
@@ -13,6 +14,59 @@ describe("clap server", () => {
     expect(response.status).toBe(200);
     const body = HealthResponseSchema.parse(await response.json());
     expect(body.status).toBe("ok");
+  });
+
+  test("selects parser families from model ids", () => {
+    const request = { model: "qwen", messages: [{ role: "user" as const, content: "hi" }], stream: false };
+    expect(selectParser("/tmp/ambiguous.gguf", request, { familyHints: ["qwen"] }).name).toBe("qwen");
+    expect(selectParser("qwen-ish", request, { familyHints: ["mistral"] }).name).toBe("mistral");
+    expect(selectParser("Qwen/Qwen2.5-7B-Instruct", request).name).toBe("qwen");
+    expect(selectParser("deepseek-ai/deepseek-r1", request).name).toBe("deepseek");
+    expect(selectParser("NousResearch/Hermes-3", request).name).toBe("hermes");
+    expect(selectParser("mistralai/Mistral-7B", request).name).toBe("mistral");
+    expect(selectParser("meta-llama/Llama-3.1", request).name).toBe("llama");
+    expect(selectParser("google/functiongemma", request).name).toBe("gemma");
+    expect(selectParser("/tmp/model.Q4_K_M.gguf", request).name).toBe("generic");
+  });
+
+  test("template-selected parsers parse ambiguous model ids", () => {
+    const request = { model: "/tmp/ambiguous.gguf", messages: [{ role: "user" as const, content: "hi" }], stream: false, tools: [{ type: "function" as const, function: { name: "search" } }] };
+    const qwen = parseAssistantOutput('<|tool_call_start|>{"name":"search","arguments":{"query":"qwen"}}<|tool_call_end|>', request, { familyHints: ["qwen"] });
+    expect(qwen.finishReason).toBe("tool_calls");
+    expect(qwen.toolCalls?.[0]?.function.arguments).toBe(JSON.stringify({ query: "qwen" }));
+
+    const mistral = parseAssistantOutput('[TOOL_CALLS]search{"query":"mistral"}', request, { familyHints: ["mistral"] });
+    expect(mistral.finishReason).toBe("tool_calls");
+    expect(mistral.toolCalls?.[0]?.function.arguments).toBe(JSON.stringify({ query: "mistral" }));
+  });
+
+  test("uses cached tokenizer template metadata for ambiguous local models", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-template-info-test-"));
+    const model = join(dir, "ambiguous-local-model.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '<|tool_call_start|>{"name":"search","arguments":"{\\"query\\":\\"qwen\\"}"}<|tool_call_end|>';
+      await writeFile(model, "gguf bytes");
+      await writeFile(join(dir, "config.json"), JSON.stringify({ model_type: "unknown_arch" }));
+      await writeFile(join(dir, "tokenizer_config.json"), JSON.stringify({ chat_template: "{% if tools %}<|tool_call_start|>{{ tool_calls }}<|tool_call_end|>{% endif %}" }));
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "search" }], tools: [{ type: "function", function: { name: "search" } }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.choices[0].finish_reason).toBe("tool_calls");
+      expect(body.choices[0].message.tool_calls[0]).toMatchObject({ function: { name: "search", arguments: JSON.stringify({ query: "qwen" }) } });
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("parses server idle timeout env with a long local inference default", () => {
@@ -195,6 +249,320 @@ describe("clap server", () => {
     }
   });
 
+  test("defaults omitted max_tokens to 4096 while preserving explicit values", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const previousEcho = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS;
+    const dir = await mkdtemp(join(tmpdir(), "clap-max-tokens-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "ok";
+      process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS = "1";
+
+      const app = createServer();
+      const defaulted = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "default" }] }),
+      });
+      const explicit = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, max_tokens: 77, messages: [{ role: "user", content: "explicit" }] }),
+      });
+
+      expect(defaulted.status).toBe(200);
+      expect(explicit.status).toBe(200);
+      expect((await defaulted.json()).choices[0].message.content).toBe("4096");
+      expect((await explicit.json()).choices[0].message.content).toBe("77");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      restoreEnv("CLAP_FAKE_WORKER_ECHO_MAX_TOKENS", previousEcho);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("infers args-only JSON as an update_todos tool call", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-args-only-tool-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    const tools = [{
+      type: "function",
+      function: {
+        name: "update_todos",
+        parameters: { type: "object", properties: { todos: { type: "array" } }, required: ["todos"] },
+      },
+    }];
+    const args = { todos: [{ step: "Draft README.md content based on provided details", status: "in_progress" }] };
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = `I need to update the todo list. I will call update_todos with the current next step.\n${JSON.stringify(args)}`;
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "continue" }], tools }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.choices[0].finish_reason).toBe("tool_calls");
+      expect(body.choices[0].message.content).toBeNull();
+      expect(JSON.stringify(body.choices[0].message)).not.toContain('{"todos"');
+      expect(body.choices[0].message.tool_calls[0]).toMatchObject({
+        id: "call_0_update_todos",
+        type: "function",
+        function: { name: "update_todos", arguments: JSON.stringify(args) },
+      });
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = `<think>Need to update todos.</think>\n${JSON.stringify(args)}`;
+      const stream = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "continue" }], tools }),
+      });
+      expect(stream.status).toBe(200);
+      const events = await sseData(stream);
+      const reasoningDelta = events.find((event) => event.choices?.[0]?.delta?.reasoning_content);
+      const toolDelta = events.find((event) => event.choices?.[0]?.delta?.tool_calls);
+      expect(reasoningDelta.choices[0].delta.reasoning).toBe("Need to update todos.");
+      expect(reasoningDelta.choices[0].delta.reasoning_content).toBe("Need to update todos.");
+      expect(toolDelta.choices[0].delta.tool_calls[0]).toMatchObject({ function: { name: "update_todos", arguments: JSON.stringify(args) } });
+      expect(JSON.stringify(events)).not.toContain('{"todos"');
+      expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = JSON.stringify({ todos: [] });
+      const json = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }], tools, response_format: { type: "json_object" } }),
+      });
+      const jsonBody = await json.json();
+      expect(jsonBody.choices[0].finish_reason).toBe("stop");
+      expect(jsonBody.choices[0].message.content).toBe(JSON.stringify({ todos: [] }));
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes Harmony reasoning and tool call markers", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-harmony-tool-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|channel|>thought I should inspect the README.\n<|tool_call|>call::read{path: <|'|>README.md<|'|>}<|/tool_call|>";
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "read" }],
+          tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const message = body.choices[0].message;
+      expect(body.choices[0].finish_reason).toBe("tool_calls");
+      expect(message.content).toBeNull();
+      expect(message.reasoning).toContain("inspect the README");
+      expect(message.reasoning_content).toBe(message.reasoning);
+      expect(JSON.stringify(message)).not.toContain("<|channel|>");
+      expect(JSON.stringify(message)).not.toContain("<|tool_call|>");
+      expect(message.tool_calls[0]).toMatchObject({
+        id: "call_0_read",
+        type: "function",
+        function: { name: "read", arguments: JSON.stringify({ path: "README.md" }) },
+      });
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes Harmony function message calls and final content", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-harmony-function-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|channel|>analysis Need a search.\nto=functions.search <|message|>{\"q\":\"clap\"}<|call|>";
+      const tool = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "search" }], tools: [{ type: "function", function: { name: "search" } }] }),
+      });
+      const toolBody = await tool.json();
+      expect(toolBody.choices[0].message.content).toBeNull();
+      expect(toolBody.choices[0].message.reasoning).toContain("Need a search");
+      expect(toolBody.choices[0].message.tool_calls[0]).toMatchObject({
+        id: "call_0_search",
+        function: { name: "search", arguments: JSON.stringify({ q: "clap" }) },
+      });
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|channel|>analysis private notes\n<|channel|>final Visible answer.";
+      const final = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "answer" }] }),
+      });
+      const finalBody = await final.json();
+      expect(finalBody.choices[0].message.content).toBe("Visible answer.");
+      expect(finalBody.choices[0].message.reasoning).toBe("private notes");
+      expect(finalBody.choices[0].message.content).not.toContain("<|channel|>");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("suppresses malformed Harmony marker variants without leaking raw protocol", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-harmony-malformed-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<channel>thought\nI need to use a tool.";
+      const thought = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "think" }] }),
+      });
+      const thoughtBody = await thought.json();
+      expect(thoughtBody.choices[0].message.content).toBe("");
+      expect(thoughtBody.choices[0].message.reasoning).toContain("use a tool");
+      expect(JSON.stringify(thoughtBody)).not.toContain("<channel");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '<channel> <tool_call>call::update_todos{"todos":[{"step":"x"}';
+      const incomplete = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "todos" }], tools: [{ type: "function", function: { name: "update_todos" } }] }),
+      });
+      const incompleteBody = await incomplete.json();
+      expect(incompleteBody.choices[0].message.content).toBeNull();
+      expect(incompleteBody.choices[0].finish_reason).toBe("tool_calls");
+      expect(incompleteBody.choices[0].message.tool_calls[0]).toMatchObject({
+        function: { name: "update_todos", arguments: JSON.stringify({ todos: [{ step: "x" }] }) },
+      });
+      expect(JSON.stringify(incompleteBody)).not.toContain("<channel");
+      expect(JSON.stringify(incompleteBody)).not.toContain("<tool_call");
+      expect(JSON.stringify(incompleteBody)).not.toContain("call::");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '<|channel>thought\nNeed to update todos.<channel|><|tool_call>call:update_todos{"todos":[{"step":"unfinished"';
+      const leadingPipe = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "todos" }], tools: [{ type: "function", function: { name: "update_todos" } }] }),
+      });
+      const leadingPipeBody = await leadingPipe.json();
+      expect(leadingPipeBody.choices[0].message.content).toBeNull();
+      expect(leadingPipeBody.choices[0].message.reasoning).toContain("Need to update todos");
+      expect(leadingPipeBody.choices[0].finish_reason).toBe("tool_calls");
+      expect(leadingPipeBody.choices[0].message.tool_calls[0]).toMatchObject({
+        function: { name: "update_todos" },
+      });
+      expect(JSON.stringify(leadingPipeBody)).not.toContain("<|channel");
+      expect(JSON.stringify(leadingPipeBody)).not.toContain("<channel|");
+      expect(JSON.stringify(leadingPipeBody)).not.toContain("<|tool_call");
+      expect(JSON.stringify(leadingPipeBody)).not.toContain("call:update_todos");
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '<tool_call>call::update_todos{"todos":[{"step":"x"}]}';
+      const unclosed = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "todos" }], tools: [{ type: "function", function: { name: "update_todos" } }] }),
+      });
+      const unclosedBody = await unclosed.json();
+      expect(unclosedBody.choices[0].finish_reason).toBe("tool_calls");
+      expect(unclosedBody.choices[0].message.content).toBeNull();
+      expect(unclosedBody.choices[0].message.tool_calls[0]).toMatchObject({
+        id: "call_0_update_todos",
+        function: { name: "update_todos", arguments: JSON.stringify({ todos: [{ step: "x" }] }) },
+      });
+      expect(JSON.stringify(unclosedBody)).not.toContain("<tool_call");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes local model tool-call formats without leaking delimiters", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-local-tool-formats-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    const fixtures = [
+      { label: "Hermes", output: '<tool_call>{"name":"get_weather","arguments":{"location":"SF"}}</tool_call><|im_end|>', name: "get_weather", args: { location: "SF" }, delimiter: "<tool_call>" },
+      { label: "Hermes multiple", output: '<tool_call>{"name":"get_weather","arguments":{"location":"SF"}}</tool_call><tool_call>{"name":"search","arguments":"{\\"query\\":\\"qwen\\"}"}</tool_call>', name: "search", args: { query: "qwen" }, index: 1, delimiter: "<tool_call>" },
+      { label: "Qwen2", output: '<|tool_call_start|>{"name":"search","arguments":"{\\"query\\":\\"qwen\\"}"}<|tool_call_end|><|im_end|>', name: "search", args: { query: "qwen" }, delimiter: "<|tool_call_start|>" },
+      { label: "Qwen3 think", output: '<think>Need weather.</think><tool_call>{"name":"get_weather","arguments":{"location":"SF"}}</tool_call>', name: "get_weather", args: { location: "SF" }, reasoning: "Need weather.", delimiter: "<think>" },
+      { label: "DeepSeek", output: '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function get_weather\n```json\n{"location":"SF"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>', name: "get_weather", args: { location: "SF" }, delimiter: "<｜tool▁calls▁begin｜>" },
+      { label: "Llama JSON", output: '<|python_tag|>{"name":"get_weather","parameters":{"location":"SF"}}', name: "get_weather", args: { location: "SF" }, delimiter: "<|python_tag|>" },
+      { label: "Llama pythonic", output: '<|python_tag|>get_weather(location="SF", unit="celsius")', name: "get_weather", args: { location: "SF", unit: "celsius" }, delimiter: "<|python_tag|>" },
+      { label: "Mistral compact", output: '[TOOL_CALLS]get_weather{"location":"Paris"}</s>', name: "get_weather", args: { location: "Paris" }, delimiter: "[TOOL_CALLS]" },
+      { label: "Mistral array", output: '[TOOL_CALLS][{"name":"get_weather","arguments":{"location":"Paris"}}]', name: "get_weather", args: { location: "Paris" }, delimiter: "[TOOL_CALLS]" },
+      { label: "FunctionGemma", output: 'call:get_weather{location: "Paris" unit: "celsius" }', name: "get_weather", args: { location: "Paris", unit: "celsius" }, delimiter: "call:get_weather" },
+      { label: "Fenced JSON", output: '```json\n[{"name":"get_weather","arguments":{"location":"SF"}}]\n```', name: "get_weather", args: { location: "SF" }, delimiter: "```" },
+    ];
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      for (const fixture of fixtures) {
+        process.env.CLAP_FAKE_WORKER_OUTPUT = fixture.output;
+        const response = await createServer().request("/v1/chat/completions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model, messages: [{ role: "user", content: fixture.label }], tools: [{ type: "function", function: { name: fixture.name } }] }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        const message = body.choices[0].message;
+        const call = message.tool_calls[fixture.index ?? 0];
+        expect(body.choices[0].finish_reason).toBe("tool_calls");
+        expect(message.content).toBeNull();
+        if (fixture.reasoning) expect(message.reasoning).toBe(fixture.reasoning);
+        expect(call.function.name).toBe(fixture.name);
+        expect(call.function.arguments).toBe(JSON.stringify(fixture.args));
+        expect(JSON.stringify(message)).not.toContain(fixture.delimiter);
+      }
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '{"answer":true}<|eot_id|>';
+      const json = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }], response_format: { type: "json_object" } }),
+      });
+      const jsonBody = await json.json();
+      expect(jsonBody.choices[0].message.content).toBe(JSON.stringify({ answer: true }));
+      expect(jsonBody.choices[0].finish_reason).toBe("stop");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("streams tool call deltas for parsed tool calls", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
@@ -224,6 +592,170 @@ describe("clap server", () => {
         function: { name: "search", arguments: JSON.stringify({ q: "clap" }) },
       });
       expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streams reasoning deltas without leaking Harmony markers", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-reasoning-stream-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|channel|>analysis hidden chain\n<|channel|>final visible text";
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "answer" }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const events = await sseData(response);
+      const reasoningDelta = events.find((event) => event.choices?.[0]?.delta?.reasoning);
+      const contentDelta = events.find((event) => event.choices?.[0]?.delta?.content);
+      expect(reasoningDelta.choices[0].delta.reasoning).toBe("hidden chain");
+      expect(reasoningDelta.choices[0].delta.reasoning_content).toBe("hidden chain");
+      expect(contentDelta.choices[0].delta.content).toBe("visible text");
+      expect(JSON.stringify(events)).not.toContain("<|channel|>");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streams incremental content deltas token by token", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const dir = await mkdtemp(join(tmpdir(), "clap-token-stream-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(["Hel", "lo", " wor", "ld!"]);
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hi" }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const events = await sseData(response);
+      expect(events[0].choices[0].delta.role).toBe("assistant");
+      const contentDeltas = events
+        .map((event) => event.choices?.[0]?.delta?.content)
+        .filter((content): content is string => typeof content === "string");
+      expect(contentDeltas.length).toBeGreaterThan(1);
+      expect(contentDeltas.join("")).toBe("Hello world!");
+      expect(events.at(-1).choices[0].finish_reason).toBe("stop");
+      expect(events.at(-1).usage.total_tokens).toBeGreaterThan(0);
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports real worker usage and finish_reason when provided", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const previousDone = process.env.CLAP_FAKE_WORKER_DONE;
+    const dir = await mkdtemp(join(tmpdir(), "clap-usage-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "truncated answer";
+      process.env.CLAP_FAKE_WORKER_DONE = JSON.stringify({ finish_reason: "length", usage: { prompt_tokens: 42, completion_tokens: 7 } });
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.usage).toEqual({ prompt_tokens: 42, completion_tokens: 7, total_tokens: 49 });
+      expect(body.choices[0].finish_reason).toBe("length");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      restoreEnv("CLAP_FAKE_WORKER_DONE", previousDone);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streams Ollama chat and generate ndjson deltas", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-stream-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(["Hel", "lo", " wor", "ld!"]);
+
+      const chat = await createServer().request("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] }),
+      });
+      expect(chat.status).toBe(200);
+      expect(chat.headers.get("content-type")).toContain("ndjson");
+      const chatLines = (await chat.text()).trim().split("\n").map((line) => JSON.parse(line));
+      const chatDeltas = chatLines.filter((line) => line.done === false && line.message?.content).map((line) => line.message.content);
+      expect(chatDeltas.length).toBeGreaterThan(1);
+      expect(chatDeltas.join("")).toBe("Hello world!");
+      expect(chatLines.at(-1)).toMatchObject({ done: true, done_reason: "stop" });
+
+      const generate = await createServer().request("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, prompt: "hi" }),
+      });
+      expect(generate.status).toBe(200);
+      const generateLines = (await generate.text()).trim().split("\n").map((line) => JSON.parse(line));
+      const generateDeltas = generateLines.filter((line) => line.done === false && line.response).map((line) => line.response);
+      expect(generateDeltas.length).toBeGreaterThan(1);
+      expect(generateDeltas.join("")).toBe("Hello world!");
+      expect(generateLines.at(-1)).toMatchObject({ done: true, done_reason: "stop" });
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not parse tool JSON from reasoning blocks", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-reasoning-order-test-"));
+    const model = join(dir, "qwen-model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '<think>{"tool_calls":[{"name":"search","arguments":{"q":"hidden"}}]}</think>Final answer.';
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "answer" }], tools: [{ type: "function", function: { name: "search" } }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.choices[0].finish_reason).toBe("stop");
+      expect(body.choices[0].message.tool_calls).toBeUndefined();
+      expect(body.choices[0].message.content).toBe("Final answer.");
+      expect(body.choices[0].message.reasoning).toContain("tool_calls");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
@@ -353,6 +885,33 @@ describe("clap server", () => {
         body: JSON.stringify({ model, input: "json", text: { format: { type: "json_object" } } }),
       });
       expect((await json.json()).output_text).toBe(JSON.stringify({ ok: true }));
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves Responses API reasoning items for Harmony output", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-responses-reasoning-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|channel|>thought inspect docs\n<|tool_call|>call::read{path: <|'|>README.md<|'|>}<|/tool_call|>";
+      const response = await createServer().request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "read", tools: [{ type: "function", function: { name: "read" } }] }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.output_text).toBe("");
+      expect(body.output[0]).toMatchObject({ type: "reasoning", content: [{ type: "reasoning_text", text: "inspect docs" }] });
+      expect(body.output[1]).toMatchObject({ type: "function_call", name: "read", arguments: JSON.stringify({ path: "README.md" }) });
+      expect(JSON.stringify(body)).not.toContain("<|tool_call|>");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
@@ -538,6 +1097,65 @@ describe("clap server", () => {
       expect(response.status).toBe(200);
       expect((await response.json()).status).toBe("success");
       expect(existsSync(join(dir, "models", "huggingface", "acme--ollama-pull", "model.Q4_K_M.gguf"))).toBe(true);
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resumes interrupted downloads with HTTP Range and removes models", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-resume-test-"));
+    const content = "0123456789".repeat(100);
+    const seenRanges: string[] = [];
+    const sha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+    const hf = mockHuggingFaceServer({
+      "acme/resume": { "model.Q4_K_M.gguf": content },
+    }, { seenRanges, sha256: { "model.Q4_K_M.gguf": sha256 } });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      const repoDir = join(dir, "models", "huggingface", "acme--resume");
+      const target = join(repoDir, "model.Q4_K_M.gguf");
+      await mkdir(repoDir, { recursive: true });
+      await writeFile(`${target}.part`, content.slice(0, 400));
+
+      const result = await pullModel({ model: "acme/resume", file: "model.Q4_K_M.gguf" });
+      expect(seenRanges).toEqual(["bytes=400-"]);
+      expect(await readFile(target, "utf8")).toBe(content);
+      expect(existsSync(`${target}.part`)).toBe(false);
+      expect(result.modelPath).toBe(target);
+
+      const removed = await removeModel("acme/resume");
+      expect(removed).toEqual([target]);
+      expect(existsSync(repoDir)).toBe(false);
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects downloads whose sha256 does not match Hugging Face metadata", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-checksum-test-"));
+    const hf = mockHuggingFaceServer({
+      "acme/corrupt": { "model.Q4_K_M.gguf": "corrupted bytes" },
+    }, { sha256: { "model.Q4_K_M.gguf": "0".repeat(64) } });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      const target = join(dir, "models", "huggingface", "acme--corrupt", "model.Q4_K_M.gguf");
+
+      expect(pullModel({ model: "acme/corrupt", file: "model.Q4_K_M.gguf" })).rejects.toThrow(/checksum mismatch/);
+      await Bun.sleep(10);
+      expect(existsSync(target)).toBe(false);
+      expect(existsSync(`${target}.part`)).toBe(false);
     } finally {
       hf.stop(true);
       restoreEnv("CLAP_HOME", previousHome);
@@ -735,6 +1353,121 @@ describe("clap server", () => {
       const model = modelsBody.models.find((entry: { id: string }) => entry.id === "acme/tiny-gguf");
       expect(model.backend).toBe("llama");
       expect(model.localPath).toBe(download.modelPath);
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves runnable model options and recommends MLX on macOS arm64", async () => {
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const previousPlatform = process.env.CLAP_TEST_PLATFORM;
+    const hf = mockHuggingFaceServer({
+      "mlx-community/gemma-4-e4b-it-4bit": {
+        "config.json": "{}",
+        "tokenizer_config.json": "{}",
+        "model.safetensors": "mlx weights",
+      },
+      "google/gemma-4-e4b-it": {
+        "model.safetensors": "source weights",
+      },
+    });
+    try {
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      process.env.CLAP_TEST_PLATFORM = "darwin-arm64";
+      const response = await createServer().request("/clap/v1/models/resolve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "mlx-community/gemma-4-e4b-it-4bit" }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.selected).toMatchObject({ backend: "mlx", format: "mlx", supported: true, recommended: true });
+
+      const source = await createServer().request("/clap/v1/models/resolve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "google/gemma-4-e4b-it" }),
+      });
+      const sourceBody = await source.json();
+      expect(sourceBody.selected).toBeUndefined();
+      expect(sourceBody.options[0]).toMatchObject({ format: "safetensors", supported: false });
+      expect(sourceBody.options[0].unsupportedReason).toContain("not directly runnable");
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      restoreEnv("CLAP_TEST_PLATFORM", previousPlatform);
+    }
+  });
+
+  test("selects a recommended GGUF quant without requiring --file", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const previousPlatform = process.env.CLAP_TEST_PLATFORM;
+    const dir = await mkdtemp(join(tmpdir(), "clap-resolve-gguf-test-"));
+    const hf = mockHuggingFaceServer({
+      "acme/multi-gguf": {
+        "model-Q8_0.gguf": "large",
+        "model-Q4_K_M.gguf": "recommended",
+        "model-Q3_K_M.gguf": "small",
+      },
+    });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      process.env.CLAP_TEST_PLATFORM = "linux-x64";
+      const resolve = await createServer().request("/clap/v1/models/resolve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/multi-gguf" }),
+      });
+      const resolveBody = await resolve.json();
+      expect(resolveBody.selected).toMatchObject({ backend: "gguf", file: "model-Q4_K_M.gguf", quantization: "Q4_K_M" });
+
+      const pull = await createServer().request("/clap/v1/models/pull", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/multi-gguf" }),
+      });
+      expect(pull.status).toBe(200);
+      const pullBody = await pull.json();
+      expect(pullBody.download.selected.file).toBe("model-Q4_K_M.gguf");
+      const download = await waitForDownload(pullBody.download.id, "completed");
+      expect(download.modelPath).toEndWith("model-Q4_K_M.gguf");
+    } finally {
+      hf.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_ENDPOINT", previousEndpoint);
+      restoreEnv("CLAP_TEST_PLATFORM", previousPlatform);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("power-user file override selects the requested artifact", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-resolve-override-test-"));
+    const hf = mockHuggingFaceServer({
+      "acme/override-gguf": {
+        "model-Q4_K_M.gguf": "recommended",
+        "model-Q5_K_M.gguf": "bigger",
+      },
+    });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_ENDPOINT = `http://${hf.hostname}:${hf.port}`;
+      const response = await createServer().request("/clap/v1/models/pull", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "acme/override-gguf", backend: "gguf", file: "model-Q5_K_M.gguf" }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.download.file).toBe("model-Q5_K_M.gguf");
+      const download = await waitForDownload(body.download.id, "completed");
+      expect(download.modelPath).toEndWith("model-Q5_K_M.gguf");
     } finally {
       hf.stop(true);
       restoreEnv("CLAP_HOME", previousHome);
@@ -1284,6 +2017,122 @@ describe("clap server", () => {
     }
   });
 
+  test("resident worker errors fail chat instead of returning partial or empty content", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousError = process.env.CLAP_FAKE_WORKER_ERROR;
+    const previousToken = process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-error-test-"));
+    const modelPath = join(dir, "ornith.Q5_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_ERROR = "llama_decode failed";
+      process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN = "_pk";
+      await writeFile(modelPath, "gguf bytes");
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.error.message).toContain("llama_decode failed");
+      expect(body.error.message).toContain("Q4_K_M");
+      expect(body.error.message).toContain("CLAP_LLAMA_GPU_LAYERS");
+      expect(JSON.stringify(body)).not.toContain("_pk");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_ERROR", previousError);
+      restoreEnv("CLAP_FAKE_WORKER_PARTIAL_TOKEN", previousToken);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resident worker context overflow returns actionable prompt guidance", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousError = process.env.CLAP_FAKE_WORKER_ERROR;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-context-test-"));
+    const modelPath = join(dir, "gemma.Q3_K_S.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_ERROR = "prompt exceeds context window; prompt tokens=11236, context=4096, reserved output tokens=32. Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history.";
+      await writeFile(modelPath, "gguf bytes");
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "long prompt" }] }),
+      });
+
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.error.message).toContain("prompt exceeds context window");
+      expect(body.error.message).toContain("CLAP_LLAMA_CONTEXT");
+      expect(JSON.stringify(body)).not.toContain("choices");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_ERROR", previousError);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resident worker exits during chat fail instead of returning empty content", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousExit = process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-exit-test-"));
+    const modelPath = join(dir, "exit.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT = "134";
+      await writeFile(modelPath, "gguf bytes");
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.error.message).toContain("resident worker exited with code 134");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_EXIT_ON_CHAT", previousExit);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streaming resident worker errors emit an error event instead of empty completion", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousError = process.env.CLAP_FAKE_WORKER_ERROR;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-stream-error-test-"));
+    const modelPath = join(dir, "stream-error.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_ERROR = "llama_decode failed";
+      await writeFile(modelPath, "gguf bytes");
+
+      const response = await createServer().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, stream: true, messages: [{ role: "user", content: "hey" }] }),
+      });
+
+      expect(response.status).toBe(200);
+      const events = await sseData(response);
+      expect(events[0].choices[0].delta).toEqual({ role: "assistant" });
+      const errorEvent = events.find((event) => event.error);
+      expect(errorEvent.error.message).toContain("llama_decode failed");
+      expect(errorEvent.error.message).toContain("Q4_K_M");
+      expect(events.some((event) => event.choices?.[0]?.delta?.content)).toBe(false);
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_ERROR", previousError);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("routes cached Hugging Face repo ids to local worker paths", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousWorker = process.env.CLAP_MLX_WORKER;
@@ -1461,8 +2310,27 @@ for await (const chunk of Bun.stdin.stream()) {
       console.log(JSON.stringify({ id: request.id, unloaded: true, done: true }));
       continue;
     }
-    console.log(JSON.stringify({ id: request.id, content: process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok" }));
-    console.log(JSON.stringify({ id: request.id, done: true }));
+    if (process.env.CLAP_FAKE_WORKER_ERROR) {
+      if (process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN) console.log(JSON.stringify({ id: request.id, token: process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN }));
+      console.log(JSON.stringify({ id: request.id, error: process.env.CLAP_FAKE_WORKER_ERROR }));
+      continue;
+    }
+    if (process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT) {
+      process.exit(Number(process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT));
+    }
+    if (process.env.CLAP_FAKE_WORKER_TOKENS) {
+      for (const token of JSON.parse(process.env.CLAP_FAKE_WORKER_TOKENS)) {
+        console.log(JSON.stringify({ id: request.id, token }));
+        await Bun.sleep(2);
+      }
+      const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
+      console.log(JSON.stringify({ id: request.id, done: true, ...doneExtras }));
+      continue;
+    }
+    const content = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS ? String(request.max_tokens) : (process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok");
+    console.log(JSON.stringify({ id: request.id, content }));
+    const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
+    console.log(JSON.stringify({ id: request.id, done: true, ...doneExtras }));
   }
 }
 `);
@@ -1489,7 +2357,7 @@ async function responseSseEvents(response: Response): Promise<Array<{ event: str
   });
 }
 
-function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, options: { requireAuth?: boolean; seenAuth?: string[]; chunkDelayMs?: number; requestCounts?: Record<string, number> } = {}) {
+function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, options: { requireAuth?: boolean; seenAuth?: string[]; seenRanges?: string[]; chunkDelayMs?: number; requestCounts?: Record<string, number>; sha256?: Record<string, string> } = {}) {
   return Bun.serve({
     port: 0,
     fetch(request) {
@@ -1506,7 +2374,11 @@ function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, op
         const files = repos[repo];
         if (!files) return Response.json({ error: "not found" }, { status: 404 });
         return Response.json({
-          siblings: Object.entries(files).map(([rfilename, content]) => ({ rfilename, size: content.length })),
+          siblings: Object.entries(files).map(([rfilename, content]) => ({
+            rfilename,
+            size: content.length,
+            ...(options.sha256?.[rfilename] ? { lfs: { sha256: options.sha256[rfilename], size: content.length } } : {}),
+          })),
         });
       }
 
@@ -1516,6 +2388,16 @@ function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, op
         const file = decodeURIComponent(resolveMatch[2]!);
         const content = repos[repo]?.[file];
         if (content === undefined) return new Response("not found", { status: 404 });
+        const range = request.headers.get("range");
+        if (range) {
+          options.seenRanges?.push(range);
+          const offset = Number(range.match(/^bytes=(\d+)-$/)?.[1] ?? 0);
+          if (offset >= content.length) return new Response(null, { status: 416 });
+          return new Response(content.slice(offset), {
+            status: 206,
+            headers: { "content-range": `bytes ${offset}-${content.length - 1}/${content.length}` },
+          });
+        }
         if (options.chunkDelayMs) return new Response(chunkedBody(content, options.chunkDelayMs));
         return new Response(content);
       }

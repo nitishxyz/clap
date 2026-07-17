@@ -10,27 +10,42 @@ export type ResidentWorkerInfo = {
   limitation?: string;
 };
 
+export type ResidentUsage = {
+  promptTokens?: number;
+  completionTokens?: number;
+};
+
+export type ResidentChatResult = {
+  content: string;
+  usage?: ResidentUsage;
+  finishReason?: "stop" | "length" | "cancel";
+};
+
 export type ResidentWorkerHandle = {
   key: string;
   backend: ResidentBackend;
   modelPath: string;
   info(): ResidentWorkerInfo;
   load(): Promise<ResidentWorkerInfo>;
-  chat(request: ChatCompletionRequest): Promise<string>;
+  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult>;
   unload(): Promise<void>;
   shutdown(): void;
 };
 
 type Pending = {
   content: string[];
-  resolve: (content: string) => void;
+  resolve: (result: ResidentChatResult) => void;
   reject: (error: Error) => void;
+  onToken?: (token: string) => void;
+  usage?: ResidentUsage;
+  finishReason?: "stop" | "length" | "cancel";
 };
 
 export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private proc?: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
   private readonly pending = new Map<string, Pending>();
   private loaded = false;
+  private logPath?: string;
 
   constructor(
     public readonly key: string,
@@ -54,9 +69,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     return this.info();
   }
 
-  async chat(request: ChatCompletionRequest): Promise<string> {
+  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult> {
     await this.load();
-    return this.sendControl("chat", request);
+    return this.sendControl("chat", request, onToken, signal);
   }
 
   async unload(): Promise<void> {
@@ -100,6 +115,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       env: process.env,
     });
     this.proc = proc;
+    this.logPath = status.logPath;
     void this.readLoop(proc);
   }
 
@@ -123,7 +139,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     const exitCode = await proc.exited;
     if (this.proc === proc) this.proc = undefined;
-    if (exitCode !== 0) this.rejectAll(new Error(`${this.backend} resident worker exited with code ${exitCode}`));
+    if (exitCode !== 0) this.rejectAll(this.workerError(`${this.backend} resident worker exited with code ${exitCode}`));
   }
 
   private handleLine(line: string): void {
@@ -132,7 +148,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       message = JSON.parse(line) as Record<string, unknown>;
     } catch {
       const pending = this.firstPending();
-      pending?.content.push(line);
+      if (pending) {
+        pending.content.push(line);
+        pending.onToken?.(line);
+      }
       return;
     }
     const id = typeof message.id === "string" ? message.id : undefined;
@@ -140,24 +159,52 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     if (!pending) return;
     if (message.error) {
       this.pending.delete(id ?? "");
-      pending.reject(new Error(String(message.error)));
+      pending.reject(this.workerError(String(message.error)));
       return;
     }
-    if (typeof message.token === "string") pending.content.push(message.token);
-    if (typeof message.content === "string") pending.content.push(message.content);
+    if (typeof message.token === "string") {
+      pending.content.push(message.token);
+      pending.onToken?.(message.token);
+    }
+    if (typeof message.content === "string") {
+      pending.content.push(message.content);
+      pending.onToken?.(message.content);
+    }
+    if (message.usage && typeof message.usage === "object") {
+      const usage = message.usage as Record<string, unknown>;
+      pending.usage = {
+        promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined,
+        completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
+      };
+    }
+    if (message.finish_reason === "stop" || message.finish_reason === "length" || message.finish_reason === "cancel") {
+      pending.finishReason = message.finish_reason;
+    }
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) this.pending.delete(id);
       else this.deleteFirstPending();
-      pending.resolve(pending.content.join(""));
+      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason });
     }
   }
 
-  private sendControl(type: string, body: Record<string, unknown>): Promise<string> {
+  private sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal): Promise<ResidentChatResult> {
     this.ensureStarted();
     const id = `req_${crypto.randomUUID()}`;
-    const promise = new Promise<string>((resolve, reject) => {
-      this.pending.set(id, { content: [], resolve, reject });
+    const promise = new Promise<ResidentChatResult>((resolve, reject) => {
+      this.pending.set(id, { content: [], resolve, reject, onToken });
     });
+    if (signal) {
+      const cancel = () => {
+        if (!this.pending.has(id)) return;
+        try {
+          this.write({ id, type: "cancel" });
+        } catch {
+          // worker already gone; pending will be rejected by shutdown paths
+        }
+      };
+      if (signal.aborted) queueMicrotask(cancel);
+      else signal.addEventListener("abort", cancel, { once: true });
+    }
     this.write({ id, type, ...body });
     return promise;
   }
@@ -180,6 +227,20 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
+
+  private workerError(message: string): Error {
+    const detail = enrichWorkerError(message, this.backend, this.logPath);
+    if (this.backend === "mlx") return new MlxWorkerError(detail, "resident_worker_error");
+    return new LlamaWorkerError(detail, "resident_worker_error");
+  }
+}
+
+function enrichWorkerError(message: string, backend: ResidentBackend, logPath?: string): string {
+  const logHint = logPath ? ` See ${logPath}.` : "";
+  if (backend === "llama" && /llama_decode|outofmemory|out of memory|metal|gpu/i.test(message)) {
+    return `${message}${logHint} For GGUF/llama.cpp Metal failures, try a smaller quant such as Q4_K_M, reduce CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, lower CLAP_LLAMA_GPU_LAYERS, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.`;
+  }
+  return `${message}${logHint}`;
 }
 
 export class ResidentWorkerRegistry {

@@ -12,6 +12,7 @@ import {
   OllamaGenerateRequestSchema,
   OllamaPullRequestSchema,
   OllamaShowRequestSchema,
+  ModelResolveResponseSchema,
   PullModelRequestSchema,
   PullModelResponseSchema,
   ResponseRequestSchema,
@@ -25,14 +26,16 @@ import {
   type LoadedModel,
   type ResponseRequest,
 } from "@clap/api";
-import { cachedPullResultForTarget, listAliases, listModels, pullModel, resolveModel, resolvePullTarget, type ResolvedModel } from "@clap/models";
+import { cachedPullResultForTarget, listAliases, listModels, pullModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
-import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry } from "@clap/runtime-router";
+import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { readFile, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { z } from "zod";
-import { parseAssistantOutput, prepareChatRequest } from "./chat-compat";
+import { parseAssistantOutput, prepareChatRequest, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 
 const startedAt = Date.now();
 const downloads = new Map<string, Download>();
@@ -128,9 +131,22 @@ export function createServer(
     return c.json(UnloadModelResponseSchema.parse(lifecycle.unload(resolved.model)));
   });
 
+  app.post("/clap/v1/models/resolve", async (c) => {
+    const request = PullModelRequestSchema.parse(await c.req.json());
+    return c.json(ModelResolveResponseSchema.parse(await resolveModelOptions(request)));
+  });
+
   app.post("/clap/v1/models/pull", async (c) => {
     const request = PullModelRequestSchema.parse(await c.req.json());
-    const target = resolvePullTarget(request);
+    const useResolver = !request.file && request.backend !== "mlx";
+    const resolvedOptions = useResolver ? await resolveModelOptions(request) : undefined;
+    const selected = resolvedOptions?.selected;
+    if (useResolver && !selected) {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: `No supported runnable artifacts found for ${request.model}`, type: "model_error", code: "no_supported_artifact" },
+      }), 400);
+    }
+    const target = selected ? resolvePullTarget({ model: selected.repo, backend: selected.backend, file: selected.file, force: request.force }) : resolvePullTarget(request);
     const active = activeDownloads.get(target.key);
     if (active) {
       const download = downloads.get(active.id);
@@ -145,8 +161,9 @@ export function createServer(
     const download: Download = {
       id,
       model: request.model,
-      file: request.file,
-      backend: request.backend,
+      file: selected?.file ?? request.file,
+      backend: selected?.backend ?? request.backend,
+      selected,
       targetKey: target.key,
       status: cached ? "completed" : "running",
       bytesReceived: 0,
@@ -161,7 +178,7 @@ export function createServer(
 
     const controller = new AbortController();
     activeDownloads.set(target.key, { id, controller });
-    void pullModel(request, {
+    void pullModel(selected ? { model: selected.repo, backend: selected.backend, file: selected.file, force: request.force } : request, {
       signal: controller.signal,
       onProgress: (progress) => {
         if (progress.bytesReceived !== undefined) download.bytesReceived = progress.bytesReceived;
@@ -238,20 +255,21 @@ export function createServer(
         error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
       }), 400);
     }
+    const templateInfo = await resolveParserTemplateInfo(resolved.model);
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, () => lifecycle.finishUsage(loaded));
+        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded));
       }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest));
+      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo));
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, () => lifecycle.finishUsage(loaded));
+        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded));
       }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest));
+      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo));
     }
 
     return c.json(ErrorResponseSchema.parse({
@@ -340,13 +358,14 @@ export function createServer(
     const raw = await c.req.json();
     if (hasOllamaImages(raw)) return c.json({ error: "image input is not supported by the selected local text runtime yet" }, 400);
     const request = OllamaChatRequestSchema.parse(raw);
+    const stream = request.stream !== false;
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: request.model,
         messages: request.messages,
-        stream: false,
+        stream,
         tools: request.tools,
         temperature: request.options?.temperature,
         top_p: request.options?.top_p,
@@ -356,14 +375,16 @@ export function createServer(
       }),
     });
     if (!response.ok) return response;
+    if (stream) return ollamaStreamFromSse(request.model, response, "chat");
     const body = await response.json() as ChatCompletionResponse;
-    return ollamaChatResponse(c, request.model, body, request.stream !== false);
+    return ollamaChatResponse(c, request.model, body, false);
   });
 
   app.post("/api/generate", async (c) => {
     const raw = await c.req.json();
     if (hasOllamaImages(raw)) return c.json({ error: "image input is not supported by the selected local text runtime yet" }, 400);
     const request = OllamaGenerateRequestSchema.parse(raw);
+    const stream = request.stream !== false;
     const messages = [
       ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
       { role: "user" as const, content: request.prompt },
@@ -374,7 +395,7 @@ export function createServer(
       body: JSON.stringify({
         model: request.model,
         messages,
-        stream: false,
+        stream,
         response_format: request.format ? request.format === "json" ? { type: "json_object" } : { type: "json_schema", json_schema: { name: "OllamaFormat", schema: request.format } } : undefined,
         temperature: request.options?.temperature,
         top_p: request.options?.top_p,
@@ -384,8 +405,9 @@ export function createServer(
       }),
     });
     if (!response.ok) return response;
+    if (stream) return ollamaStreamFromSse(request.model, response, "generate");
     const body = await response.json() as ChatCompletionResponse;
-    return ollamaGenerateResponse(c, request.model, body, request.stream !== false);
+    return ollamaGenerateResponse(c, request.model, body, false);
   });
 
   const unsupportedOllama = (name: string) => (c: { json: (body: unknown, status?: number) => Response | Promise<Response> }) => c.json({ error: `${name} is not implemented by Clap yet` }, 501);
@@ -433,9 +455,19 @@ function responseFromChat(request: ResponseRequest, chat: ChatCompletionResponse
   const choice = chat.choices[0];
   const message = choice?.message;
   type ResponseOutput =
+    | { id: string; type: "reasoning"; status: "completed"; summary: Array<{ type: "summary_text"; text: string }>; content: Array<{ type: "reasoning_text"; text: string }> }
     | { id: string; type: "message"; status: "completed"; role: "assistant"; content: Array<{ type: "output_text"; text: string }> }
     | { id: string; type: "function_call"; status: "completed"; call_id: string; name: string; arguments: string };
   const output: ResponseOutput[] = [];
+  if (message?.reasoning) {
+    output.push({
+      id: `rs_${crypto.randomUUID()}`,
+      type: "reasoning" as const,
+      status: "completed" as const,
+      summary: [{ type: "summary_text" as const, text: message.reasoning }],
+      content: [{ type: "reasoning_text" as const, text: message.reasoning }],
+    });
+  }
   if (message?.tool_calls?.length) {
     for (const call of message.tool_calls) {
       output.push({
@@ -488,8 +520,11 @@ function streamResponseBody(body: ReturnType<typeof responseFromChat>): Response
     if (item.type === "message") {
       const text = item.content.map((part) => part.text).join("");
       if (text) events.push({ event: "response.output_text.delta", data: { output_index: index, content_index: 0, delta: text } });
-    } else {
+    } else if (item.type === "function_call") {
       events.push({ event: "response.function_call_arguments.delta", data: { output_index: index, item_id: item.id, delta: item.arguments } });
+    } else {
+      const text = item.content?.map((part) => part.text).join("") ?? item.summary?.map((part) => part.text).join("") ?? "";
+      if (text) events.push({ event: "response.reasoning_text.delta", data: { output_index: index, item_id: item.id, delta: text } });
     }
   }
   events.push({ event: "response.completed", data: body });
@@ -566,6 +601,79 @@ function ndjsonResponse(values: unknown[]): Response {
   });
 }
 
+type ChatCompletionChunk = {
+  error?: { message?: string };
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      reasoning?: string;
+      tool_calls?: Array<{ index: number; id?: string; type?: string; function?: { name?: string; arguments?: string } }>;
+    };
+    finish_reason?: string | null;
+  }>;
+};
+
+async function* sseCompletionChunks(response: Response): AsyncGenerator<ChatCompletionChunk> {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let separator: number;
+    while ((separator = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      for (const line of block.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") return;
+        if (data) yield JSON.parse(data) as ChatCompletionChunk;
+      }
+    }
+  }
+}
+
+function ollamaStreamFromSse(model: string, sse: Response, kind: "chat" | "generate"): Response {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    async start(controller) {
+      const write = (value: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
+      let doneReason = "stop";
+      try {
+        for await (const chunk of sseCompletionChunks(sse)) {
+          if (chunk.error) {
+            write({ error: chunk.error.message ?? "backend error" });
+            controller.close();
+            return;
+          }
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta ?? {};
+          if (choice?.finish_reason) doneReason = choice.finish_reason;
+          const createdAt = new Date().toISOString();
+          if (kind === "chat") {
+            if (delta.content) write({ model, created_at: createdAt, message: { role: "assistant", content: delta.content }, done: false });
+            if (delta.reasoning) write({ model, created_at: createdAt, message: { role: "assistant", content: "", thinking: delta.reasoning }, done: false });
+            if (delta.tool_calls?.length) write({ model, created_at: createdAt, message: { role: "assistant", content: "", tool_calls: delta.tool_calls }, done: false });
+          } else {
+            if (delta.content) write({ model, created_at: createdAt, response: delta.content, done: false });
+            if (delta.reasoning) write({ model, created_at: createdAt, response: "", thinking: delta.reasoning, done: false });
+          }
+        }
+        const finalPayload = kind === "chat"
+          ? { model, created_at: new Date().toISOString(), message: { role: "assistant", content: "" }, done: true, done_reason: doneReason }
+          : { model, created_at: new Date().toISOString(), response: "", done: true, done_reason: doneReason };
+        write(finalPayload);
+      } catch (error) {
+        write({ error: error instanceof Error ? error.message : String(error) });
+      }
+      controller.close();
+    },
+  }), { headers: { "content-type": "application/x-ndjson" } });
+}
+
 function resolveAvailableModel(model: string, backend?: "gguf" | "mlx"):
   | { model: ResolvedModel }
   | { response: (c: { json: (body: unknown, status?: number) => Response | Promise<Response> }) => Response | Promise<Response> } {
@@ -588,31 +696,153 @@ async function assertResidentModelPath(model: ResolvedModel): Promise<void> {
   else await assertMlxModelPath(path);
 }
 
-async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response> }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
-  entry.worker = await worker.load();
-  const content = await worker.chat(request);
-  entry.worker = worker.info();
-  return c.json(chatResponse(request, content));
+async function resolveParserTemplateInfo(model: ResolvedModel): Promise<ParserTemplateInfo | undefined> {
+  const root = await metadataRoot(model);
+  if (!root) return undefined;
+  const sourceFiles: string[] = [];
+  const chunks: string[] = [];
+  for (const file of ["tokenizer_config.json", "tokenizer.json", "config.json", "generation_config.json"]) {
+    const path = join(root, file);
+    try {
+      const text = await readFile(path, "utf8");
+      sourceFiles.push(file);
+      chunks.push(text.slice(0, 250_000));
+    } catch {
+      // optional metadata file
+    }
+  }
+  if (!chunks.length) return undefined;
+  const haystack = chunks.join("\n").toLowerCase();
+  const familyHints = inferParserFamilies(haystack);
+  return {
+    familyHints,
+    hasToolCalls: /tool_call|tool_calls|\[tool_calls\]|python_tag|call:/.test(haystack),
+    hasReasoning: /enable_thinking|reasoning_effort|reasoning_content|<think>|analysis|commentary|final/.test(haystack),
+    sourceFiles,
+  };
 }
 
-function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, onDone?: () => void) {
+async function metadataRoot(model: ResolvedModel): Promise<string | undefined> {
+  const path = model.modelPath ?? model.input;
+  try {
+    const info = await stat(path);
+    return info.isDirectory() ? path : dirname(path);
+  } catch {
+    return undefined;
+  }
+}
+
+function inferParserFamilies(text: string): string[] {
+  const hints: string[] = [];
+  const add = (family: string, pattern: RegExp) => {
+    if (pattern.test(text) && !hints.includes(family)) hints.push(family);
+  };
+  add("harmony", /<\|channel\|>|analysis|commentary|final|gpt-oss|harmony|codex/);
+  add("qwen", /<\|tool_call_start\|>|enable_thinking|qwen/);
+  add("deepseek", /<｜tool▁calls▁begin｜>|deepseek/);
+  add("mistral", /\[tool_calls\]|mistral|mixtral/);
+  add("llama", /python_tag|llama/);
+  add("gemma", /call:|functiongemma|gemma/);
+  add("hermes", /<tool_call>|hermes|xlam|functionary/);
+  return hints;
+}
+
+async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo) {
+  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+  entry.worker = await worker.load();
+  const result = await worker.chat(request, undefined, c.req.raw.signal);
+  entry.worker = worker.info();
+  return c.json(chatResponse(request, result, templateInfo));
+}
+
+function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void) {
   return streamSSE(c, async (stream) => {
+    const id = completionId();
+    const created = nowSeconds();
+    const aborter = new AbortController();
+    stream.onAbort(() => aborter.abort());
+    if (c.req.raw.signal.aborted) aborter.abort();
+    else c.req.raw.signal.addEventListener("abort", () => aborter.abort(), { once: true });
+    let wroteRole = false;
+    let writeQueue = Promise.resolve();
+    const ensureRole = async () => {
+      if (wroteRole) return;
+      wroteRole = true;
+      await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, { role: "assistant" })) });
+    };
+    // Send the role chunk immediately so clients get a first byte right away,
+    // then heartbeat comments while the worker ingests a long prompt. Without
+    // this, nothing is written until the first generated token, which can take
+    // minutes for large prompts and trips client time-to-first-byte timeouts.
+    await ensureRole();
+    let sawOutput = false;
+    const heartbeat = setInterval(() => {
+      if (sawOutput || aborter.signal.aborted) return;
+      writeQueue = writeQueue.then(async () => { await stream.write(": processing\n\n"); }).catch(() => undefined);
+    }, 5_000);
+    const writeDelta = async (delta: StreamDelta) => {
+      await ensureRole();
+      const payload = delta.type === "reasoning"
+        ? { reasoning: delta.text, reasoning_content: delta.text }
+        : { content: delta.text };
+      await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, payload)) });
+    };
     try {
       const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
       entry.worker = await worker.load();
-      const content = await worker.chat(request);
+      const filter = new StreamingOutputFilter({
+        toolMode: Boolean(request.tools?.length),
+        bufferAll: Boolean(request.response_format && request.response_format.type !== "text"),
+        stops: typeof request.stop === "string" ? [request.stop] : request.stop ?? [],
+      });
+      const result = await worker.chat(request, (token) => {
+        sawOutput = true;
+        const deltas = filter.feed(token);
+        if (!deltas.length) return;
+        writeQueue = writeQueue.then(async () => {
+          for (const delta of deltas) await writeDelta(delta);
+        });
+      }, aborter.signal);
+      await writeQueue;
       entry.worker = worker.info();
-      await writeParsedStream(stream, request, content);
+      if (result.finishReason === "cancel" || aborter.signal.aborted) return;
+      const parsed = parseAssistantOutput(result.content, request, templateInfo);
+      await ensureRole();
+      const reasoningTail = remainingDelta(parsed.reasoning, filter.emittedReasoning);
+      if (reasoningTail) await writeDelta({ type: "reasoning", text: reasoningTail });
+      if (parsed.toolCalls?.length) {
+        for (const [index, call] of parsed.toolCalls.entries()) {
+          await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {
+            tool_calls: [{ index, id: call.id, type: "function", function: { name: call.function.name, arguments: call.function.arguments } }],
+          })) });
+        }
+      } else {
+        const contentTail = remainingDelta(parsed.content, filter.emittedContent);
+        if (contentTail) await writeDelta({ type: "content", text: contentTail });
+      }
+      const finishReason = parsed.finishReason === "tool_calls" ? "tool_calls" : workerFinishReason(result) ?? parsed.finishReason;
+      await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {}, finishReason, usageFor(request, result))) });
+      await stream.writeSSE({ data: "[DONE]" });
+    } catch (error) {
+      await writeQueue.catch(() => undefined);
+      await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) });
     } finally {
+      clearInterval(heartbeat);
       onDone?.();
     }
   });
 }
 
+function backendErrorBody(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return ErrorResponseSchema.parse({
+    error: { message, type: "backend_error", code: "resident_worker_error" },
+  });
+}
+
 export function startServer(options: ServerOptions = {}) {
   const port = options.port ?? portFromEnv();
-  const hostname = options.hostname ?? "127.0.0.1";
+  const hostname = options.hostname ?? hostnameFromEnv();
   const idleTimeout = options.idleTimeout ?? idleTimeoutFromEnv();
   const residents = new ResidentWorkerRegistry();
   const lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key));
@@ -642,6 +872,18 @@ function portFromEnv(): number {
   return Number(process.env.PORT ?? fromUrl ?? 11435);
 }
 
+function hostnameFromEnv(): string {
+  const fromEnv = process.env.CLAP_HOST?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const fromUrl = new URL(process.env.CLAP_BASE_URL ?? defaultBaseURL).hostname;
+    if (fromUrl && fromUrl !== "localhost") return fromUrl;
+  } catch {
+    // fall through to loopback default
+  }
+  return "127.0.0.1";
+}
+
 export function idleTimeoutFromEnv(): number {
   const raw = process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS;
   if (raw === undefined || raw.trim() === "") return defaultIdleTimeoutSeconds;
@@ -659,12 +901,17 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-function chatResponse(request: ChatCompletionRequest, rawContent: string): ChatCompletionResponse {
-  const parsed = parseAssistantOutput(rawContent, request);
+function workerFinishReason(result: ResidentChatResult): "stop" | "length" | undefined {
+  return result.finishReason === "cancel" ? "stop" : result.finishReason;
+}
+
+function chatResponse(request: ChatCompletionRequest, result: ResidentChatResult, templateInfo?: ParserTemplateInfo): ChatCompletionResponse {
+  const parsed = parseAssistantOutput(result.content, request, templateInfo);
   const message = {
     role: "assistant" as const,
     content: parsed.content,
     reasoning: parsed.reasoning,
+    reasoning_content: parsed.reasoning,
     tool_calls: parsed.toolCalls,
   };
   return {
@@ -675,37 +922,15 @@ function chatResponse(request: ChatCompletionRequest, rawContent: string): ChatC
     choices: [{
       index: 0,
       message,
-      finish_reason: parsed.finishReason,
+      finish_reason: parsed.finishReason === "tool_calls" ? "tool_calls" : workerFinishReason(result) ?? parsed.finishReason,
     }],
-    usage: usageFor(request, rawContent),
+    usage: usageFor(request, result),
   };
 }
 
-async function writeParsedStream(stream: { writeSSE: (event: { data: string }) => Promise<void> }, request: ChatCompletionRequest, rawContent: string): Promise<void> {
-  const id = completionId();
-  const created = nowSeconds();
-  const parsed = parseAssistantOutput(rawContent, request);
-  await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, { role: "assistant" })) });
-  if (parsed.reasoning) {
-    await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, { reasoning: parsed.reasoning })) });
-  }
-  if (parsed.toolCalls?.length) {
-    for (const [index, call] of parsed.toolCalls.entries()) {
-      await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {
-        tool_calls: [{ index, id: call.id, type: "function", function: { name: call.function.name, arguments: call.function.arguments } }],
-      })) });
-    }
-  } else if (parsed.content) {
-    await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, { content: parsed.content })) });
-  }
-  await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {}, parsed.finishReason, usageFor(request, rawContent))) });
-  await stream.writeSSE({ data: "[DONE]" });
-}
-
-function usageFor(request: ChatCompletionRequest, completion: string) {
-  const promptText = JSON.stringify(request.messages);
-  const promptTokens = estimateTokens(promptText);
-  const completionTokens = estimateTokens(completion);
+function usageFor(request: ChatCompletionRequest, result: ResidentChatResult) {
+  const promptTokens = result.usage?.promptTokens ?? estimateTokens(JSON.stringify(request.messages));
+  const completionTokens = result.usage?.completionTokens ?? estimateTokens(result.content);
   return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens };
 }
 
@@ -717,7 +942,7 @@ function chunk(
   id: string,
   created: number,
   model: string,
-  delta: { role?: "assistant"; content?: string | null; reasoning?: string; tool_calls?: Array<{ index: number; id?: string; type?: "function"; function?: { name?: string; arguments?: string } }> },
+  delta: { role?: "assistant"; content?: string | null; reasoning?: string; reasoning_content?: string; tool_calls?: Array<{ index: number; id?: string; type?: "function"; function?: { name?: string; arguments?: string } }> },
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | "function_call" | null = null,
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
 ) {

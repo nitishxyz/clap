@@ -46,6 +46,7 @@ const compile = [
   "-I", join(llamaDir, "include"),
   "-I", join(llamaDir, "ggml", "include"),
   "-I", join(llamaDir, "ggml", "src"),
+  "-I", join(llamaDir, "vendor"),
   "-L", join(buildDir, "src"),
   "-L", join(buildDir, "ggml", "src"),
   "-L", join(buildDir, "ggml", "src", "ggml-cpu"),

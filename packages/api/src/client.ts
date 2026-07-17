@@ -9,6 +9,7 @@ import {
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
+  ModelResolveResponseSchema,
   OpenAIModelsResponseSchema,
   PullModelRequestSchema,
   PullModelResponseSchema,
@@ -28,6 +29,7 @@ import {
   type LoadedModelsResponse,
   type LoadModelRequest,
   type LoadModelResponse,
+  type ModelResolveResponse,
   type OpenAIModelsResponse,
   type PullModelRequest,
   type PullModelResponse,
@@ -108,6 +110,11 @@ export class ClapClient {
   async pullModel(request: PullModelRequest): Promise<PullModelResponse> {
     const body = PullModelRequestSchema.parse(request);
     return PullModelResponseSchema.parse(await this.postJson("/clap/v1/models/pull", body));
+  }
+
+  async resolveModel(request: PullModelRequest): Promise<ModelResolveResponse> {
+    const body = PullModelRequestSchema.parse(request);
+    return ModelResolveResponseSchema.parse(await this.postJson("/clap/v1/models/resolve", body));
   }
 
   async cancelDownload(id: string): Promise<PullModelResponse> {

@@ -138,7 +138,11 @@ export async function tailFile(path: string, lineCount: number): Promise<string>
 }
 
 export function currentCliCommand(): string[] {
-  return [process.execPath, import.meta.resolve("./index.ts").replace("file://", "")];
+  const script = import.meta.resolve("./index.ts").replace("file://", "");
+  // In a bun-compiled binary the entrypoint is embedded (/$bunfs/...); the
+  // executable itself is the CLI.
+  if (script.startsWith("/$bunfs/") || script.startsWith("B:/~BUN/")) return [process.execPath];
+  return [process.execPath, script];
 }
 
 export function launchdPlist(command: string[], paths = serverPaths()): string {

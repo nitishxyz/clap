@@ -9,10 +9,10 @@ See `docs/clap-local-model-server-plan.md` for the product plan and milestone do
 ```bash
 bun install
 bun run generate:openapi
-bun run serve
+bun run cli run llama3.2:3b
 ```
 
-Then, in another shell:
+`clap run <model>` auto-starts the background server, pulls the model into the local cache if it is not downloaded yet (with a progress bar), and opens an interactive streaming chat session. Type `/bye` to exit and `/clear` to reset the conversation history. Pass a prompt argument for a single-shot answer instead:
 
 ```bash
 bun run cli server status
@@ -21,6 +21,23 @@ bun run cli pull llama3.2:3b --backend gguf
 bun run cli chat --model llama3.2:3b --backend gguf "hello"
 bun run cli run llama3.2:3b --backend gguf "hello"
 ```
+
+Responses stream token by token for both MLX and GGUF backends; pass `--no-stream` for buffered output. `bun run serve` runs the server in the foreground for debugging.
+
+Remove cached models with `bun run cli rm <owner/model|alias>`. Interrupted downloads keep a `.part` file and resume from where they stopped (HTTP Range) on the next pull. Files with Hugging Face LFS metadata are sha256-verified during download (including resumed downloads); corrupt payloads are deleted with a clear retry message.
+
+## Standalone Binary
+
+Build a self-contained `clap` executable (Bun runtime embedded) plus its native workers:
+
+```bash
+bun run native:build   # once: builds libexec/clap-llama and libexec/clap-mlx
+bun run build:binary   # compiles dist/clap and copies dist/libexec/
+```
+
+Ship `dist/clap` together with the sibling `dist/libexec/` directory (the CLI resolves workers relative to the executable). The compiled binary supports every CLI command, including spawning its own background server.
+
+CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push/PR. Tagging `v*` triggers the release workflow (`.github/workflows/release.yml`), which builds the native workers and compiled binary on macOS arm64 and attaches `clap-<tag>-darwin-arm64.tar.gz` (with a `.sha256` checksum) to a GitHub release. Native binaries are never committed to git — `libexec/` build outputs are gitignored and distributed through release artifacts.
 
 ## Background Server
 
@@ -75,6 +92,14 @@ Management APIs are `POST /clap/v1/models/load`, `POST /clap/v1/models/unload`, 
 
 `POST /v1/chat/completions` accepts OpenAI-style text requests plus `tools`, `tool_choice`, `parallel_tool_calls`, `response_format` (`text`, `json_object`, or `json_schema`), `stop`, `seed`, `top_p`, and penalty fields. Clap serializes tool definitions and JSON-output instructions into the local text prompt, then parses generated JSON tool-call shapes back into OpenAI-compatible `tool_calls` for non-streaming responses and streaming deltas. JSON mode/schema support is best effort: valid generated JSON is normalized, while unparsable text is returned as raw assistant content. Text content parts are accepted; `image_url` parts return a precise unsupported-content error until a served multimodal runtime path exists.
 
+Streaming is real token streaming for both MLX and GGUF backends: resident workers emit tokens as they are generated and `stream: true` requests receive incremental SSE `delta.content` / `delta.reasoning` chunks as soon as the first token is decoded. An incremental output filter routes `<think>`/Harmony channel markers into reasoning deltas, applies `stop` sequences mid-stream, and holds back tool-call protocol markers so raw markers never appear in streamed content; parsed `tool_calls` are emitted as deltas once the model output is complete. `clap chat` and `clap run` stream by default (pass `--no-stream` to opt out).
+
+Native workers handle requests robustly: the GGUF worker parses request JSON with a real JSON parser (nlohmann/json), so message content containing JSON — tool results, tool-call histories, code — survives round trips intact. `stop` sequences halt generation inside the worker (not post-hoc), `presence_penalty`/`frequency_penalty`/`top_k` are applied in the sampler chain, and both workers report real `prompt_tokens`/`completion_tokens` plus a real `finish_reason` (`stop` or `length`) that flow into API `usage` fields (the MLX worker reads them from MLX's generation info). The MLX worker sends the full chat history (system prompts, tool instructions, multi-turn context, tool results) through the model's chat template instead of only the last user message. Tool-call parsing repairs the almost-valid JSON that small local models commonly emit — missing or extra closing brackets and truncated argument objects are balanced before parsing, so `{"tool_calls":[{...}}}` still yields a structured `tool_calls` entry instead of leaking raw JSON as content.
+
+Generation is cancellable and cache-aware: when a client disconnects mid-stream (or aborts a non-streaming request), the server sends a `cancel` message to the resident worker and both the GGUF and MLX workers stop decoding within a few tokens, freeing the GPU immediately. The GGUF worker also reuses the longest common KV-cache prefix between consecutive requests, so multi-turn conversations only ingest the new suffix instead of re-processing the whole history (first-token latency on a warmed multi-turn chat drops from seconds to ~100ms).
+
+Clap uses a model/template-aware parser registry, inspired by Ollama, vLLM, SGLang, and Unsloth behavior, to normalize common local-model protocol markers without showing raw template text. It selects parser families from model ids and cached local metadata (`tokenizer_config.json`, `tokenizer.json`, `config.json`, and `generation_config.json`) such as Qwen, DeepSeek, Mistral, Llama, Gemma, Harmony/GPT-OSS, Hermes, xLAM, and Functionary, then extracts reasoning before parsing tools from remaining content. `<|channel|>thought`, `<|channel|>analysis`, commentary, and `<think>...</think>` become structured `reasoning` / `reasoning_content` fields or Responses `reasoning` output items. `<|channel|>final` becomes normal assistant content. Tool markers from Harmony/Codex, Hermes/Nous/Qwen (`<tool_call>`, `<|tool_call_start|>`), DeepSeek special tokens, Llama `<|python_tag|>`, Mistral `[TOOL_CALLS]`, FunctionGemma `call:name{...}`, and fenced JSON tool calls become OpenAI-compatible `tool_calls` / Responses `function_call` items, with raw markers removed from visible content and Ollama response text. In active tool mode, args-only JSON can be inferred as a tool call when it matches exactly one tool schema or the preceding text explicitly names that tool; JSON response-format answers are preserved. Requests without `max_tokens` default to 4096 output tokens before reaching the native runtime.
+
 `POST /v1/responses` supports the newer OpenAI Responses API shape for local compatibility. It accepts `input` as a string or message array, `instructions`, tools, tool choice, structured text formats, streaming, and sampling fields, then maps them through the same local chat/tool/structured-output pipeline. Stateful continuation via `previous_response_id` is accepted by schema but returns an explicit unsupported error. Legacy `/v1/completions` is intentionally not implemented.
 
 ```ts
@@ -91,7 +116,7 @@ console.log(response.output_text);
 
 ## Ollama Compatibility
 
-Clap exposes Ollama-compatible routes for common local clients: `GET /api/tags`, `POST /api/show`, `POST /api/pull`, `POST /api/chat`, and `POST /api/generate`. Model names are the same public Clap ids shown by `clap models`, including aliases such as `llama3.2:3b` and cached Hugging Face ids such as `mlx-community/gemma-4-e4b-it-4bit`. `/api/chat` maps tools through Clap's OpenAI tool-call compatibility layer. `/api/delete`, `/api/copy`, `/api/embeddings`, and `/api/embed` return honest `501` responses until implemented. Ollama image inputs are rejected with a text-runtime unsupported error unless a future served multimodal runtime path is active.
+Clap exposes Ollama-compatible routes for common local clients: `GET /api/tags`, `POST /api/show`, `POST /api/pull`, `POST /api/chat`, and `POST /api/generate`. Model names are the same public Clap ids shown by `clap models`, including aliases such as `llama3.2:3b` and cached Hugging Face ids such as `mlx-community/gemma-4-e4b-it-4bit`. `/api/chat` maps tools through Clap's OpenAI tool-call compatibility layer. `/api/chat` and `/api/generate` stream incremental ndjson lines per token by default (reasoning text is exposed as `thinking`); pass `"stream": false` for a single JSON response. `/api/delete`, `/api/copy`, `/api/embeddings`, and `/api/embed` return honest `501` responses until implemented. Ollama image inputs are rejected with a text-runtime unsupported error unless a future served multimodal runtime path is active.
 
 ```bash
 curl -s http://localhost:11435/api/tags | jq
@@ -104,11 +129,16 @@ curl -s http://localhost:11435/api/chat -d '{"model":"llama3.2:3b","stream":fals
 Explicit Hugging Face repos can be pulled into the local cache under `$CLAP_HOME/models/huggingface` (default `~/.clap/models/huggingface`):
 
 ```bash
+bun run cli resolve owner/model
+bun run cli pull owner/model
+bun run cli pull owner/gguf-repo --quant Q4_K_M --yes
 bun run cli pull owner/gguf-repo --file model.Q4_K_M.gguf
 bun run cli pull mlx-community/TinyLlama-4bit
 ```
 
-`POST /clap/v1/models/pull` starts a background download for either a selected `.gguf` file or a detected MLX repo layout and returns a download id immediately. Pulls are idempotent by resolved target: if the same alias/repo/file/backend/cache path is already downloading, a second pull reuses the existing download id instead of starting another network transfer. If the target is already fully cached, pulls return a completed download immediately; pass `--force` or `{ "force": true }` to re-download.
+`POST /clap/v1/models/resolve` inspects a Hugging Face repo or alias without downloading full weights and returns runnable options with `backend`, `format`, `repo`, `file`, `sizeBytes`, `quantization`, `supported`, `recommended`, and a human-readable reason. Clap prefers MLX on macOS arm64 when an MLX layout is available; otherwise it chooses practical GGUF quants such as `Q4_K_M`, `Q4_K_S`, or `Q3_K_M`. Raw source safetensors repos are shown as unsupported/direct-safetensors pending with conversion guidance. `bun run cli resolve owner/model` prints supported choices first and unsupported source weights separately as non-selectable guidance.
+
+`POST /clap/v1/models/pull` starts a background download for either a selected `.gguf` file or a detected MLX repo layout and returns a download id immediately. If `backend`/`file` are omitted and the resolver finds multiple supported options, interactive `clap pull owner/model` prompts with numbered choices and defaults to the recommended option; non-interactive pulls deterministically select the recommendation and print it. Power users can pass `--backend`, `--file`, `--quant`, or `--yes` to skip the picker. Pulls are idempotent by resolved target: if the same alias/repo/file/backend/cache path is already downloading, a second pull reuses the existing download id instead of starting another network transfer. If the target is already fully cached, pulls return a completed download immediately; pass `--force` or `{ "force": true }` to re-download.
 
 `GET /clap/v1/downloads` reports incremental pull status (`running`, `completed`, `cancelled`, or `failed`), `bytesReceived`, `totalBytes` when known, and the current file being downloaded. `POST /clap/v1/downloads/:id/cancel` cancels a running pull and removes partial files while keeping completed cache files intact. `bun run cli pull ...` polls download progress, renders a progress bar when the total is known, and cancels the active download on Ctrl-C before exiting non-zero. `GET /clap/v1/models` includes cached GGUF files and MLX directories. After a pull, `clap run owner/repo --backend mlx` and `clap chat --model owner/repo --backend mlx` resolve to the cached Hugging Face directory; GGUF repo ids resolve when the cached repo contains a single GGUF file. Set `CLAP_HF_ENDPOINT` for tests or mirrors.
 
@@ -188,7 +218,16 @@ The native worker is discovered from `CLAP_LLAMA_WORKER`, bundled `libexec/clap-
 CLAP_LLAMA_WORKER="/path/to/clap-llama" bun run cli run ./model.gguf "hello"
 ```
 
-`clap-llama` is a direct llama.cpp resident worker. It reads JSON-line `load`, `chat`, `unload`, and `shutdown` commands, keeps the loaded GGUF model/context in process, and emits JSON-line `loaded`, `token`, `done`, or `error` events. Missing workers are reported as backend errors.
+`clap-llama` is a direct llama.cpp resident worker. It reads JSON-line `load`, `chat`, `unload`, and `shutdown` commands, keeps the loaded GGUF model/context in process, and emits JSON-line `loaded`, `token`, `done`, or `error` events. Missing workers and worker `error` events are reported as backend errors instead of successful empty assistant responses.
+
+GGUF runtime knobs are available for large models or Metal memory pressure:
+
+- `CLAP_LLAMA_CONTEXT` controls llama.cpp context size, default `4096`.
+- `CLAP_LLAMA_BATCH` controls logical batch size, default `128`.
+- `CLAP_LLAMA_UBATCH` controls physical micro-batch size, default `64`.
+- `CLAP_LLAMA_GPU_LAYERS` controls GPU offload, default `999`; set `0` for CPU fallback.
+
+If a model fails with `prompt exceeds context window`, reduce the prompt/tool history or increase `CLAP_LLAMA_CONTEXT` if your machine has enough memory. If a model fails with `llama_decode failed` or the worker log contains `kIOGPUCommandBufferCallbackErrorOutOfMemory`, try a smaller quant such as `Q4_K_M`, lower context/batch/micro-batch, reduce GPU layers, or run with `CLAP_LLAMA_GPU_LAYERS=0`.
 
 Real GGUF residency smoke test:
 

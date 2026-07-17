@@ -511,6 +511,67 @@
                 },
                 "completedAt": {
                   "type": "string"
+                },
+                "selected": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "backend": {
+                      "type": "string",
+                      "enum": [
+                        "gguf",
+                        "mlx"
+                      ]
+                    },
+                    "format": {
+                      "type": "string",
+                      "enum": [
+                        "gguf",
+                        "mlx",
+                        "safetensors"
+                      ]
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "file": {
+                      "type": "string"
+                    },
+                    "sizeBytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "quantization": {
+                      "type": "string"
+                    },
+                    "supported": {
+                      "type": "boolean"
+                    },
+                    "unsupportedReason": {
+                      "type": "string"
+                    },
+                    "recommended": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "model",
+                    "backend",
+                    "format",
+                    "repo",
+                    "supported",
+                    "recommended",
+                    "reason"
+                  ]
                 }
               },
               "required": [
@@ -993,6 +1054,67 @@
               },
               "completedAt": {
                 "type": "string"
+              },
+              "selected": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx",
+                      "safetensors"
+                    ]
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "sizeBytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "quantization": {
+                    "type": "string"
+                  },
+                  "supported": {
+                    "type": "boolean"
+                  },
+                  "unsupportedReason": {
+                    "type": "string"
+                  },
+                  "recommended": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "model",
+                  "backend",
+                  "format",
+                  "repo",
+                  "supported",
+                  "recommended",
+                  "reason"
+                ]
               }
             },
             "required": [
@@ -1005,6 +1127,147 @@
         },
         "required": [
           "download"
+        ]
+      },
+      "ModelResolveResponse": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string",
+                  "enum": [
+                    "gguf",
+                    "mlx"
+                  ]
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "gguf",
+                    "mlx",
+                    "safetensors"
+                  ]
+                },
+                "repo": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "quantization": {
+                  "type": "string"
+                },
+                "supported": {
+                  "type": "boolean"
+                },
+                "unsupportedReason": {
+                  "type": "string"
+                },
+                "recommended": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "model",
+                "backend",
+                "format",
+                "repo",
+                "supported",
+                "recommended",
+                "reason"
+              ]
+            }
+          },
+          "selected": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "gguf",
+                  "mlx"
+                ]
+              },
+              "format": {
+                "type": "string",
+                "enum": [
+                  "gguf",
+                  "mlx",
+                  "safetensors"
+                ]
+              },
+              "repo": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "quantization": {
+                "type": "string"
+              },
+              "supported": {
+                "type": "boolean"
+              },
+              "unsupportedReason": {
+                "type": "string"
+              },
+              "recommended": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "model",
+              "backend",
+              "format",
+              "repo",
+              "supported",
+              "recommended",
+              "reason"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "repo",
+          "options"
         ]
       },
       "OpenAIModelsResponse": {
@@ -1876,6 +2139,9 @@
                     },
                     "reasoning": {
                       "type": "string"
+                    },
+                    "reasoning_content": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -2339,6 +2605,73 @@
             "type": "array",
             "items": {
               "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "reasoning"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "completed"
+                      ]
+                    },
+                    "summary": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "summary_text"
+                            ]
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "text"
+                        ]
+                      }
+                    },
+                    "content": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "reasoning_text"
+                            ]
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "text"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "status"
+                  ]
+                },
                 {
                   "type": "object",
                   "properties": {
@@ -3571,6 +3904,67 @@
                           },
                           "completedAt": {
                             "type": "string"
+                          },
+                          "selected": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "model": {
+                                "type": "string"
+                              },
+                              "backend": {
+                                "type": "string",
+                                "enum": [
+                                  "gguf",
+                                  "mlx"
+                                ]
+                              },
+                              "format": {
+                                "type": "string",
+                                "enum": [
+                                  "gguf",
+                                  "mlx",
+                                  "safetensors"
+                                ]
+                              },
+                              "repo": {
+                                "type": "string"
+                              },
+                              "file": {
+                                "type": "string"
+                              },
+                              "sizeBytes": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "quantization": {
+                                "type": "string"
+                              },
+                              "supported": {
+                                "type": "boolean"
+                              },
+                              "unsupportedReason": {
+                                "type": "string"
+                              },
+                              "recommended": {
+                                "type": "boolean"
+                              },
+                              "reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "model",
+                              "backend",
+                              "format",
+                              "repo",
+                              "supported",
+                              "recommended",
+                              "reason"
+                            ]
                           }
                         },
                         "required": [
@@ -4160,6 +4554,227 @@
         }
       }
     },
+    "/clap/v1/models/resolve": {
+      "post": {
+        "summary": "Resolve runnable model artifacts before pulling",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "gguf",
+                      "mlx"
+                    ]
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string"
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string",
+                            "enum": [
+                              "gguf",
+                              "mlx"
+                            ]
+                          },
+                          "format": {
+                            "type": "string",
+                            "enum": [
+                              "gguf",
+                              "mlx",
+                              "safetensors"
+                            ]
+                          },
+                          "repo": {
+                            "type": "string"
+                          },
+                          "file": {
+                            "type": "string"
+                          },
+                          "sizeBytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "quantization": {
+                            "type": "string"
+                          },
+                          "supported": {
+                            "type": "boolean"
+                          },
+                          "unsupportedReason": {
+                            "type": "string"
+                          },
+                          "recommended": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "model",
+                          "backend",
+                          "format",
+                          "repo",
+                          "supported",
+                          "recommended",
+                          "reason"
+                        ]
+                      }
+                    },
+                    "selected": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "model": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx"
+                          ]
+                        },
+                        "format": {
+                          "type": "string",
+                          "enum": [
+                            "gguf",
+                            "mlx",
+                            "safetensors"
+                          ]
+                        },
+                        "repo": {
+                          "type": "string"
+                        },
+                        "file": {
+                          "type": "string"
+                        },
+                        "sizeBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "quantization": {
+                          "type": "string"
+                        },
+                        "supported": {
+                          "type": "boolean"
+                        },
+                        "unsupportedReason": {
+                          "type": "string"
+                        },
+                        "recommended": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "model",
+                        "backend",
+                        "format",
+                        "repo",
+                        "supported",
+                        "recommended",
+                        "reason"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model",
+                    "repo",
+                    "options"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/clap/v1/models/pull": {
       "post": {
         "summary": "Download a Hugging Face model into the local cache",
@@ -4259,6 +4874,67 @@
                         },
                         "completedAt": {
                           "type": "string"
+                        },
+                        "selected": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "model": {
+                              "type": "string"
+                            },
+                            "backend": {
+                              "type": "string",
+                              "enum": [
+                                "gguf",
+                                "mlx"
+                              ]
+                            },
+                            "format": {
+                              "type": "string",
+                              "enum": [
+                                "gguf",
+                                "mlx",
+                                "safetensors"
+                              ]
+                            },
+                            "repo": {
+                              "type": "string"
+                            },
+                            "file": {
+                              "type": "string"
+                            },
+                            "sizeBytes": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "quantization": {
+                              "type": "string"
+                            },
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "unsupportedReason": {
+                              "type": "string"
+                            },
+                            "recommended": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "model",
+                            "backend",
+                            "format",
+                            "repo",
+                            "supported",
+                            "recommended",
+                            "reason"
+                          ]
                         }
                       },
                       "required": [
@@ -4388,6 +5064,67 @@
                         },
                         "completedAt": {
                           "type": "string"
+                        },
+                        "selected": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "model": {
+                              "type": "string"
+                            },
+                            "backend": {
+                              "type": "string",
+                              "enum": [
+                                "gguf",
+                                "mlx"
+                              ]
+                            },
+                            "format": {
+                              "type": "string",
+                              "enum": [
+                                "gguf",
+                                "mlx",
+                                "safetensors"
+                              ]
+                            },
+                            "repo": {
+                              "type": "string"
+                            },
+                            "file": {
+                              "type": "string"
+                            },
+                            "sizeBytes": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "quantization": {
+                              "type": "string"
+                            },
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "unsupportedReason": {
+                              "type": "string"
+                            },
+                            "recommended": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "model",
+                            "backend",
+                            "format",
+                            "repo",
+                            "supported",
+                            "recommended",
+                            "reason"
+                          ]
                         }
                       },
                       "required": [
@@ -5385,6 +6122,9 @@
                               },
                               "reasoning": {
                                 "type": "string"
+                              },
+                              "reasoning_content": {
+                                "type": "string"
                               }
                             },
                             "required": [
@@ -5901,6 +6641,73 @@
                       "type": "array",
                       "items": {
                         "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "reasoning"
+                                ]
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "completed"
+                                ]
+                              },
+                              "summary": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string",
+                                      "enum": [
+                                        "summary_text"
+                                      ]
+                                    },
+                                    "text": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "text"
+                                  ]
+                                }
+                              },
+                              "content": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string",
+                                      "enum": [
+                                        "reasoning_text"
+                                      ]
+                                    },
+                                    "text": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "text"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "type",
+                              "status"
+                            ]
+                          },
                           {
                             "type": "object",
                             "properties": {
