@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { assets } from "./web-assets.generated";
 
 export type WebAsset = { bytes: ArrayBuffer; type: string };

@@ -18,12 +18,20 @@ describe("resident worker registry", () => {
       expect(info.state).toBe("resident");
       expect(info.pid).toBeNumber();
       const tokens: string[] = [];
-      const first = await worker.chat({ model: join(dir, "model.gguf"), messages: [{ role: "user", content: "one" }], stream: false }, (token) => tokens.push(token));
+      let dispatches = 0;
+      const first = await worker.chat(
+        { model: join(dir, "model.gguf"), messages: [{ role: "user", content: "one" }], stream: false },
+        (token) => tokens.push(token),
+        undefined,
+        undefined,
+        () => { dispatches += 1; },
+      );
       const second = await worker.chat({ model: join(dir, "model.gguf"), messages: [{ role: "user", content: "two" }], stream: false });
       expect(first.content).toBe("resident response");
       expect(first.usage).toEqual({ promptTokens: 12, completionTokens: 2 });
       expect(first.finishReason).toBe("stop");
       expect(tokens).toEqual(["resident ", "response"]);
+      expect(dispatches).toBe(1);
       expect(second.content).toBe("resident response");
       expect(worker.info().pid).toBe(info.pid);
 
@@ -87,6 +95,7 @@ for await (const chunk of Bun.stdin.stream()) {
       console.log(JSON.stringify({ id: request.id, unloaded: true, done: true }));
       continue;
     }
+    console.log(JSON.stringify({ id: request.id, started: true }));
     console.log(JSON.stringify({ id: request.id, token: "resident " }));
     console.log(JSON.stringify({ id: request.id, token: "response" }));
     console.log(JSON.stringify({ id: request.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 12, completion_tokens: 2 } }));

@@ -30,7 +30,7 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bun test apps packages
+      - run: bun run test
 
       - name: Build native workers
         run: |
@@ -71,7 +71,7 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bun test apps packages
+      - run: bun run test
 
       - name: Build llama worker (CPU)
         run: |

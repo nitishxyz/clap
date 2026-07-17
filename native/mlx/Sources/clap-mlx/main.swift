@@ -38,6 +38,7 @@ struct WorkerPrefill: Encodable {
 
 struct WorkerMessage: Encodable {
   let id: String?
+  let started: Bool?
   let token: String?
   let content: String?
   let loaded: Bool?
@@ -61,8 +62,8 @@ struct ControlRequest: Decodable {
   let temperature: Double?
 }
 
-func emit(id: String? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, prefill: WorkerPrefill? = nil) {
-  let message = WorkerMessage(id: id, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, prefill: prefill)
+func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, prefill: WorkerPrefill? = nil) {
+  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, prefill: prefill)
   let data = try! JSONEncoder().encode(message)
   FileHandle.standardOutput.write(data)
   FileHandle.standardOutput.write(Data([0x0a]))
@@ -404,6 +405,7 @@ func main() async {
         continue
       }
 
+      emit(id: id, started: true)
       guard let model = control.model else {
         emit(id: id, error: "chat.model is required")
         continue

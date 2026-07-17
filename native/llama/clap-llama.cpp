@@ -628,6 +628,9 @@ int main() {
           emit(id, json{{"loaded", true}, {"done", true}});
           continue;
         }
+        // Dispatch signal: lets the server distinguish time spent queued
+        // behind other requests from time spent actually working.
+        emit(id, json{{"started", true}});
         generate(loaded, id, request, make_cancel_check(id));
       } catch (const std::exception& error) {
         emit_error(id, error.what());

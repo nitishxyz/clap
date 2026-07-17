@@ -163,12 +163,16 @@ export function listModels(): ClapModel[] {
 // is saturated by model weight reads or downloads, freezing every request.
 // Directory listings are awaited here and results are memoized briefly with
 // stale-while-revalidate so pollers never wait on a refresh already running.
-let listModelsMemo: { at: number; value: ClapModel[] } | undefined;
-let listModelsRefresh: Promise<ClapModel[]> | undefined;
+let listModelsMemo: { key: string; at: number; value: ClapModel[] } | undefined;
+let listModelsRefresh: { key: string; promise: Promise<ClapModel[]> } | undefined;
 
 function listModelsTtlMs(): number {
   const raw = Number(process.env.CLAP_MODEL_LIST_TTL_MS);
   return Number.isFinite(raw) ? raw : 2000;
+}
+
+function listModelsCacheKey(root: string): string {
+  return [root, process.env.CLAP_GGUF_MODEL_PATHS ?? "", process.env.CLAP_MLX_MODEL_PATHS ?? ""].join("\0");
 }
 
 export function invalidateModelListCache(): void {
@@ -178,11 +182,11 @@ export function invalidateModelListCache(): void {
 
 export async function listModelsAsync(): Promise<ClapModel[]> {
   const ttl = listModelsTtlMs();
-  if (listModelsMemo && Date.now() - listModelsMemo.at < ttl) return listModelsMemo.value;
-  if (!listModelsRefresh) {
-    listModelsRefresh = (async () => {
-      try {
-        const root = hfCacheRoot();
+  const root = hfCacheRoot();
+  const key = listModelsCacheKey(root);
+  if (listModelsMemo?.key === key && Date.now() - listModelsMemo.at < ttl) return listModelsMemo.value;
+  if (listModelsRefresh?.key !== key) {
+    const promise = (async () => {
         const repoEntries = existsSync(root)
           ? (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory())
           : [];
@@ -193,17 +197,19 @@ export async function listModelsAsync(): Promise<ClapModel[]> {
           cached.push(...cachedModelsForRepo(repoPath, repoFromCacheDirName(entry.name), files));
         }
         const value = [...envConfiguredModels(), ...cached];
-        listModelsMemo = { at: Date.now(), value };
+        listModelsMemo = { key, at: Date.now(), value };
         return value;
-      } finally {
-        listModelsRefresh = undefined;
-      }
     })();
+    listModelsRefresh = { key, promise };
+    void promise.then(
+      () => { if (listModelsRefresh?.promise === promise) listModelsRefresh = undefined; },
+      () => { if (listModelsRefresh?.promise === promise) listModelsRefresh = undefined; },
+    );
   }
   // Serve moderately stale data instantly while a refresh is in flight so a
   // slow disk never delays pollers; hard-cap staleness at 10x the TTL.
-  if (listModelsMemo && Date.now() - listModelsMemo.at < ttl * 10) return listModelsMemo.value;
-  return listModelsRefresh;
+  if (listModelsMemo?.key === key && Date.now() - listModelsMemo.at < ttl * 10) return listModelsMemo.value;
+  return listModelsRefresh.promise;
 }
 
 export function listAliases(): ClapModel[] {

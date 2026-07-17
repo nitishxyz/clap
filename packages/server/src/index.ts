@@ -865,7 +865,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     // queued until worker prefill progress or the first token proves it is
     // actually running.
     handle?.phase("queued");
-    const result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total));
+    const result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
     entry.worker = worker.info();
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
@@ -951,7 +951,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         writeQueue = writeQueue.then(async () => {
           for (const delta of deltas) await writeDelta(delta);
         });
-      }, aborter.signal, (done, total) => handle?.prefill(done, total));
+      }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
       await writeQueue;
       entry.worker = worker.info();
       if (result.finishReason === "cancel" || aborter.signal.aborted) {

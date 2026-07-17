@@ -22,8 +22,9 @@
     "llama:vendor": "bun run runtime:llama:vendor",
     "llama:build": "bun run runtime:llama:build",
     "mlx:build": "bun run runtime:mlx:build",
-    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
-    "test": "bun test apps packages"
+    "ensure:libexec": "bun run scripts/ensure-libexec.ts",
+    "typecheck": "bun run ensure:libexec && bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun run ensure:libexec && bun test apps packages"
   },
   "devDependencies": {
     "@types/bun": "latest",

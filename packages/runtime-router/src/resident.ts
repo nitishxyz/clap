@@ -37,7 +37,7 @@ export type ResidentWorkerHandle = {
   modelPath: string;
   info(): ResidentWorkerInfo;
   load(): Promise<ResidentWorkerInfo>;
-  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult>;
+  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult>;
   unload(): Promise<void>;
   shutdown(): void;
 };
@@ -48,6 +48,7 @@ type Pending = {
   reject: (error: Error) => void;
   onToken?: (token: string) => void;
   onProgress?: ResidentProgress;
+  onDispatch?: () => void;
   usage?: ResidentUsage;
   finishReason?: "stop" | "length" | "cancel";
   cache?: ResidentCacheInfo;
@@ -81,9 +82,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     return this.info();
   }
 
-  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult> {
+  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
     await this.load();
-    return this.sendControl("chat", request, onToken, signal, onProgress);
+    return this.sendControl("chat", request, onToken, signal, onProgress, onDispatch);
   }
 
   async unload(): Promise<void> {
@@ -169,6 +170,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     const id = typeof message.id === "string" ? message.id : undefined;
     const pending = id ? this.pending.get(id) : this.firstPending();
     if (!pending) return;
+    if (message.started === true) {
+      const onDispatch = pending.onDispatch;
+      pending.onDispatch = undefined;
+      onDispatch?.();
+    }
     if (message.error) {
       this.pending.delete(id ?? "");
       pending.reject(this.workerError(String(message.error)));
@@ -214,11 +220,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
   }
 
-  private sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress): Promise<ResidentChatResult> {
+  private sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
     this.ensureStarted();
     const id = `req_${crypto.randomUUID()}`;
     const promise = new Promise<ResidentChatResult>((resolve, reject) => {
-      this.pending.set(id, { content: [], resolve, reject, onToken, onProgress });
+      this.pending.set(id, { content: [], resolve, reject, onToken, onProgress, onDispatch });
     });
     if (signal) {
       const cancel = () => {
