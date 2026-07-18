@@ -89,7 +89,7 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
   if (toolCalls.length) {
     return { content: null, reasoning: normalized.reasoning, toolCalls, finishReason: "tool_calls" };
   }
-  if (context.toolMode && hasExplicitParserMarker(input) && !normalized.content.trim()) {
+  if (context.toolMode && (hasExplicitParserMarker(input) || /["']?tool_calls["']?\s*:/.test(normalized.content))) {
     throw new Error("model emitted a tool call that Clap could not parse; retry the request");
   }
 
@@ -672,7 +672,16 @@ function parseToolCalls(text: string, request: ChatCompletionRequest): ChatToolC
   if (!parsed || typeof parsed !== "object") return undefined;
   const value = parsed as Record<string, unknown>;
   const rawCalls = Array.isArray(value.tool_calls) ? value.tool_calls : Array.isArray(value.tools) ? value.tools : undefined;
-  if (rawCalls) return rawCalls.map((call, index) => normalizeToolCall(call, index)).filter((call): call is ChatToolCall => Boolean(call));
+  if (rawCalls) {
+    return rawCalls.map((call, index) => {
+      const normalized = normalizeToolCall(call, index);
+      if (normalized || !call || typeof call !== "object" || Array.isArray(call)) return normalized;
+      const record = call as Record<string, unknown>;
+      const args = record.arguments ?? record.args ?? record.parameters;
+      if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+      return inferArgsOnlyToolCall(args as Record<string, unknown>, text, request);
+    }).filter((call): call is ChatToolCall => Boolean(call));
+  }
   const single = normalizeToolCall(value, 0);
   if (single) return [single];
   const inferred = inferArgsOnlyToolCall(value, text, request);

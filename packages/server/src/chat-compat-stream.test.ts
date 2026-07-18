@@ -195,6 +195,23 @@ describe("malformed tool JSON repair", () => {
     ]);
   });
 
+  test("recovers a prose-prefixed truncated tool call with an inferred name", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit", tools: [{
+      type: "function" as const,
+      function: { name: "write", parameters: { type: "object", properties: { content: { type: "string" }, path: { type: "string" }, createDirs: { type: "boolean" } } } },
+    }] };
+    const raw = 'I will correct this with the write tool.\n\n{"tool_calls":[{"arguments":{"content":"# Comparison","path":"NATIVE_COMPARISON.md","createDirs":true}';
+    const parsed = parseAssistantOutput(raw, gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.content).toBeNull();
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("write");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({
+      content: "# Comparison",
+      path: "NATIVE_COMPARISON.md",
+      createDirs: true,
+    });
+  });
+
   test("repairs gemma-4 tool_calls lists with quoted-key colons", () => {
     const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit", tools: [{ type: "function" as const, function: { name: "glob", parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" } } } } }] };
     const raw = '<|tool_call>call:tool_calls:[{args:{path:"."},name:"glob","pattern:"**/*.md""}]<tool_call|>';
@@ -207,6 +224,11 @@ describe("malformed tool JSON repair", () => {
   test("fails explicitly instead of returning an empty malformed tool response", () => {
     const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit" };
     expect(() => parseAssistantOutput("<|tool_call>unrecoverable<tool_call|>", gemmaRequest)).toThrow("could not parse");
+  });
+
+  test("fails explicitly instead of leaking an unrecoverable bare tool envelope", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit" };
+    expect(() => parseAssistantOutput('I will call it.\n\n{"tool_calls":[{"arguments":', gemmaRequest)).toThrow("could not parse");
   });
 
   test("bare closing channel markers return following tool JSON to content", () => {
