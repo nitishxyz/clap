@@ -41,7 +41,7 @@ await ensureEmbeddedWorkers();
 
 try {
   if (command === "serve") {
-    await serve();
+    await serve(args.slice(1));
   } else if (command === "auth") {
     await authCommand(args.slice(1));
   } else if (command === "keys") {
@@ -75,7 +75,8 @@ try {
   process.exit(1);
 }
 
-async function serve() {
+async function serve(argv: string[] = []) {
+  if (argv.includes("--network")) process.env.CLAP_HOST = "0.0.0.0";
   const server = startServer();
   console.log(`clap server listening on http://${server.hostname}:${server.port}`);
   await new Promise(() => undefined);
@@ -128,20 +129,20 @@ async function serverCommand(argv: string[]) {
   const action = rest[0] ?? "status";
   const force = flags.force === "true";
   if (action === "start") {
-    await startBackgroundServer();
+    await startBackgroundServer({ network: flags.network === "true" });
   } else if (action === "stop") {
     await stopBackgroundServer({ force });
   } else if (action === "status") {
     await serverStatus();
   } else if (action === "restart") {
     await stopBackgroundServer({ quiet: true, force });
-    await startBackgroundServer();
+    await startBackgroundServer({ network: flags.network === "true" });
   } else if (action === "logs") {
     await serverLogs(Number(rest[1] ?? "80"));
   } else if (action === "install") {
     await installServiceTemplate();
   } else {
-    throw new Error("usage: clap server <start|stop|status|restart|logs|install> [--force]");
+    throw new Error("usage: clap server <start|stop|status|restart|logs|install> [--network] [--force]");
   }
 }
 
@@ -209,14 +210,17 @@ async function unloadCommand(argv: string[]) {
   console.log(`not loaded: ${model}`);
 }
 
-async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMetadata> {
+async function startBackgroundServer({ quiet = false, network = false } = {}): Promise<ServerMetadata> {
   return withServerStartLock(async () => {
     const paths = serverPaths();
     const baseURL = baseURLFromEnv();
     const existingHealth = await healthCheck(baseURL);
     const existingMetadata = await readServerMetadata(paths);
     if (existingHealth?.status === "ok" && existingMetadata && isLivePid(existingMetadata.pid)) {
-      if (!quiet) console.log(`clap server already running at ${baseURL} (pid ${existingMetadata.pid})`);
+      if (!quiet) {
+        console.log(`clap server already running at ${baseURL} (pid ${existingMetadata.pid})`);
+        if (network) console.log("note: --network ignored; restart to change the bind address: clap server restart --network");
+      }
       return existingMetadata;
     }
     if (existingHealth?.status === "ok") {
@@ -243,7 +247,12 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
     const stderr = Bun.file(paths.stderrLog);
     const command = [...currentCliCommand(), "serve"];
     const proc = Bun.spawn(command, {
-      env: { ...process.env, CLAP_BASE_URL: baseURL, PORT: String(portFromBaseURL(baseURL)) },
+      env: {
+        ...process.env,
+        CLAP_BASE_URL: baseURL,
+        PORT: String(portFromBaseURL(baseURL)),
+        ...(network ? { CLAP_HOST: "0.0.0.0" } : {}),
+      },
       stdout,
       stderr,
     });
@@ -263,7 +272,10 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
       managed: true,
     };
     await writeServerMetadata(metadata, paths);
-    if (!quiet) console.log(`clap server started at ${baseURL} (pid ${metadata.pid})`);
+    if (!quiet) {
+      console.log(`clap server started at ${baseURL} (pid ${metadata.pid})`);
+      if (network) console.log("network mode: listening on 0.0.0.0 (all interfaces)");
+    }
     return metadata;
   });
 }
@@ -833,11 +845,11 @@ function printError(error: unknown) {
 
 function help() {
   console.log(`Usage:
-  clap serve
+  clap serve [--network]
   clap auth login|logout|status
   clap keys create <name> | list | revoke <id>
   clap config
-  clap server start|stop|status|restart|logs|install [--force]
+  clap server start|stop|status|restart|logs|install [--network] [--force]
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
   clap unload <model|alias|path> [--backend mlx|gguf]
@@ -852,6 +864,8 @@ Models that are not cached locally are pulled automatically before the first rep
 
 Environment:
   CLAP_HOME      State/log directory (default: ~/.clap)
+  CLAP_HOST      Server bind address (default: 127.0.0.1; --network sets 0.0.0.0)
+  PORT           Server port (default: 11435)
   CLAP_BASE_URL  Server URL (default: ${defaultBaseURL})
   CLAP_DEFAULT_MODEL  Default model for clap chat
   CLAP_HF_ENDPOINT  Hugging Face endpoint (default: https://huggingface.co)

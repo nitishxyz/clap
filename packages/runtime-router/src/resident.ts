@@ -73,6 +73,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private crashes = 0;
   private consecutiveCrashes = 0;
   private lastCrashAt?: number;
+  private expectedExit = false;
 
   constructor(
     public readonly key: string,
@@ -123,6 +124,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.pending.clear();
     try {
       if (this.proc && this.proc.exitCode === null) {
+        // Deliberate termination (unload/server shutdown): the SIGTERM exit
+        // (143) must not count as a crash or trigger restart backoff.
+        this.expectedExit = true;
         this.write({ type: "shutdown" });
         this.proc.kill();
       }
@@ -135,6 +139,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private ensureStarted(): void {
     if (this.proc && this.proc.exitCode === null) return;
+    this.expectedExit = false;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
@@ -174,7 +179,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     const exitCode = await proc.exited;
     if (this.proc === proc) this.proc = undefined;
     this.loaded = false;
-    if (exitCode !== 0) {
+    if (exitCode !== 0 && !this.expectedExit) {
       this.crashes += 1;
       this.consecutiveCrashes += 1;
       this.lastCrashAt = Date.now();
