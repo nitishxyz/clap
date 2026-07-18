@@ -35,6 +35,8 @@ import { streamSSE } from "hono/streaming";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
+export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
@@ -111,6 +113,50 @@ export function createServer(
     version: clapVersion,
     uptimeMs: Date.now() - startedAt,
   }));
+
+  // API key auth. Loopback clients (CLI, dashboard on the box) stay open
+  // unless CLAP_REQUIRE_API_KEY=1; remote clients must present a valid
+  // Bearer key once any active key exists. Health stays open for probes.
+  const apiKeys = new ApiKeyVerifier();
+  app.use("*", async (c, next) => {
+    if (c.req.path === "/clap/v1/health") return next();
+    const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1";
+    let loopback = true;
+    try {
+      const env = c.env as { requestIP?: (request: Request) => { address?: string } | null } | undefined;
+      const address = env?.requestIP?.(c.req.raw)?.address;
+      if (address) loopback = isLoopbackAddress(address);
+    } catch {
+      // no transport info (tests, embedded fetch); treat as loopback
+    }
+    const required = requireAlways || (!loopback && apiKeys.hasActiveKeys());
+    if (!required) return next();
+    const token = bearerToken(c.req.header("authorization")) ?? c.req.header("x-api-key");
+    if (token && apiKeys.verify(token)) return next();
+    return c.json(ErrorResponseSchema.parse({
+      error: { message: "missing or invalid API key; pass Authorization: Bearer <key>", type: "invalid_request_error", code: "invalid_api_key" },
+    }), 401);
+  });
+
+  app.post("/clap/v1/keys", async (c) => {
+    const body = z.object({ name: z.string().min(1) }).parse(await c.req.json());
+    const { record, key } = createApiKey(body.name);
+    metrics.event("server", `API key created: ${record.name} (${record.id})`);
+    return c.json({ ...record, key }, 201);
+  });
+
+  app.get("/clap/v1/keys", (c) => c.json({ keys: listApiKeys() }));
+
+  app.delete("/clap/v1/keys/:id", (c) => {
+    const revoked = revokeApiKey(c.req.param("id"));
+    if (!revoked) {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: `no active key with id ${c.req.param("id")}`, type: "invalid_request_error", code: "key_not_found" },
+      }), 404);
+    }
+    metrics.event("server", `API key revoked: ${c.req.param("id")}`);
+    return c.json({ revoked: true });
+  });
 
   app.get("/clap/v1/runtime", (c) => c.json({
     platform: process.platform,

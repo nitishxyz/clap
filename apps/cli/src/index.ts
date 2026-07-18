@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
-import { startServer } from "@clap/server";
+import { createApiKey, keysFilePath, listApiKeys, revokeApiKey, startServer } from "@clap/server";
 import { ensureCudaWorker } from "./cuda-worker";
 import { ensureEmbeddedWorkers } from "./embedded-workers";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -44,6 +44,8 @@ try {
     await serve();
   } else if (command === "auth") {
     await authCommand(args.slice(1));
+  } else if (command === "keys") {
+    await keysCommand(args.slice(1));
   } else if (command === "server") {
     await serverCommand(args.slice(1));
   } else if (command === "models") {
@@ -355,6 +357,38 @@ async function authLogin(argv: string[]) {
   console.log(`source: ${status.source}`);
   if (status.tokenPreview) console.log(`token: ${status.tokenPreview}`);
   if (status.detail) console.log(`detail: ${status.detail}`);
+}
+
+async function keysCommand(argv: string[]) {
+  const action = argv[0] ?? "list";
+  if (action === "create") {
+    const name = argv[1];
+    if (!name) throw new Error("usage: clap keys create <name>");
+    const { record, key } = createApiKey(name);
+    console.log(`id: ${record.id}`);
+    console.log(`name: ${record.name}`);
+    console.log(`key: ${key}`);
+    console.log("");
+    console.log("Store this key now; it is shown only once.");
+    console.log("Remote clients must send: Authorization: Bearer <key>");
+    console.log("Local (loopback) requests stay open unless CLAP_REQUIRE_API_KEY=1.");
+  } else if (action === "list") {
+    const keys = listApiKeys();
+    if (!keys.length) {
+      console.log(`no API keys (${keysFilePath()})`);
+      return;
+    }
+    for (const key of keys) {
+      console.log(`${key.id}  ${key.revoked ? "revoked" : "active "}  ${key.name}  created ${key.createdAt}${key.lastUsedAt ? `  last used ${key.lastUsedAt}` : ""}`);
+    }
+  } else if (action === "revoke") {
+    const id = argv[1];
+    if (!id) throw new Error("usage: clap keys revoke <id>");
+    if (!revokeApiKey(id)) throw new Error(`no active key with id ${id}`);
+    console.log(`revoked: ${id}`);
+  } else {
+    throw new Error("usage: clap keys <create|list|revoke>");
+  }
 }
 
 async function printAuthStatus() {
@@ -786,6 +820,7 @@ function help() {
   console.log(`Usage:
   clap serve
   clap auth login|logout|status
+  clap keys create <name> | list | revoke <id>
   clap server start|stop|status|restart|logs|install [--force]
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]

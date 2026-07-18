@@ -148,6 +148,14 @@ re-prefill; report evictions per session in metrics.
 ## Tier 3 — Multi-tenant operations
 
 ### 9. AuthN/AuthZ
+Status: PARTIAL — keys shipped (sha256-hashed at rest in
+`$CLAP_HOME/keys.json` mode 0600, `clap keys create|list|revoke`,
+`/clap/v1/keys` admin API, `Authorization: Bearer clap_sk_*` or `x-api-key`).
+Enforcement: loopback clients stay open (CLI/dashboard on the box) unless
+`CLAP_REQUIRE_API_KEY=1`; remote clients require a key once any active key
+exists; `/clap/v1/health` always open. Remaining: per-key rate limits and
+token quotas (with T1.3 queue fairness), dashboard key management UI.
+
 API keys (`Authorization: Bearer`): hashed at rest, per-key rate limits and
 token quotas, key management via CLI + admin API + dashboard. An org box on
 `0.0.0.0` without auth is a non-starter. SSO/OIDC later.
@@ -211,7 +219,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 1. Continuous batching (T1.1) — DONE
 2. Admission control (T1.2) — DONE
 3. Watchdog (T1.4) — DONE
-4. API keys (T3.9)
+4. API keys (T3.9) — DONE (rate limits/quotas ride on T1.3)
 5. Config file (T3.10) — carries KV-type/slot policy surfacing (T2.7)
 6. Queue fairness (T1.3) — needs keys for per-client fairness
 7. Prometheus metrics (T3.11)

@@ -46,6 +46,58 @@ describe("clap server", () => {
     expect([301, 302]).toContain(redirect.status);
   });
 
+  test("api keys: create, list, enforce with CLAP_REQUIRE_API_KEY, revoke", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-keys-test-"));
+    try {
+      process.env.CLAP_HOME = home;
+      const app = createServer();
+
+      const created = await app.request("/clap/v1/keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "ci" }),
+      });
+      expect(created.status).toBe(201);
+      const key = await created.json() as { id: string; key: string };
+      expect(key.key).toStartWith("clap_sk_");
+
+      const listed = await app.request("/clap/v1/keys");
+      const listBody = await listed.json() as { keys: Array<{ id: string; name: string }> };
+      expect(listBody.keys).toHaveLength(1);
+      expect(JSON.stringify(listBody)).not.toContain("sha256");
+
+      process.env.CLAP_REQUIRE_API_KEY = "1";
+      const denied = await app.request("/clap/v1/models");
+      expect(denied.status).toBe(401);
+      expect(((await denied.json()) as { error: { code: string } }).error.code).toBe("invalid_api_key");
+
+      const health = await app.request("/clap/v1/health");
+      expect(health.status).toBe(200);
+
+      const allowed = await app.request("/clap/v1/models", {
+        headers: { authorization: `Bearer ${key.key}` },
+      });
+      expect(allowed.status).toBe(200);
+
+      const revoked = await app.request(`/clap/v1/keys/${key.id}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${key.key}` },
+      });
+      expect(revoked.status).toBe(200);
+
+      const deniedAfterRevoke = await app.request("/clap/v1/models", {
+        headers: { authorization: `Bearer ${key.key}` },
+      });
+      expect(deniedAfterRevoke.status).toBe(401);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("model remove endpoint 404s for unknown models", async () => {
     const response = await createServer().request("/clap/v1/models/remove", {
       method: "POST",
