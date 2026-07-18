@@ -9,10 +9,12 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using json = nlohmann::json;
@@ -79,6 +81,7 @@ struct LoadedLlama {
   struct CacheSlot {
     std::vector<llama_token> tokens;
     uint64_t last_used = 0;
+    bool busy = false;  // an active request is generating on this slot
   };
   std::vector<CacheSlot> slots;
   uint64_t use_counter = 0;
@@ -327,42 +330,6 @@ void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits
   batch.n_tokens += 1;
 }
 
-void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, int32_t& n_pos, llama_seq_id seq,
-                   const std::function<void(std::size_t)>& progress = nullptr) {
-  const int32_t n_batch = static_cast<int32_t>(llama_n_batch(loaded.ctx));
-  const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
-  llama_batch batch = llama_batch_init(n_batch, 0, 1);
-  try {
-    for (std::size_t offset = 0; offset < tokens.size();) {
-      batch.n_tokens = 0;
-      const std::size_t remaining = tokens.size() - offset;
-      const int32_t available = n_ctx - n_pos;
-      if (available <= 0) {
-        throw std::runtime_error("prompt exceeds context window; increase CLAP_LLAMA_CONTEXT or reduce prompt size");
-      }
-      const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(std::min(n_batch, available))));
-      for (int32_t i = 0; i < chunk; ++i) {
-        const bool logits = offset + i + 1 == tokens.size();
-        batch_add(batch, tokens[offset + i], n_pos + i, logits, seq);
-      }
-      if (llama_decode(loaded.ctx, batch)) {
-        // A failed decode can leave this sequence's KV slot in a partial
-        // state (hybrid/recurrent models especially); drop the slot so the
-        // next request re-ingests from scratch instead of failing repeatedly.
-        llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, -1, -1);
-        throw std::runtime_error("llama_decode failed while ingesting prompt; prompt was chunked to fit n_batch but llama.cpp rejected the batch");
-      }
-      n_pos += chunk;
-      offset += static_cast<std::size_t>(chunk);
-      if (progress && offset < tokens.size()) progress(offset);
-    }
-  } catch (...) {
-    llama_batch_free(batch);
-    throw;
-  }
-  llama_batch_free(batch);
-}
-
 std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
   char buffer[256];
   int n = llama_token_to_piece(vocab, token, buffer, sizeof(buffer), 0, true);
@@ -403,135 +370,7 @@ std::size_t partial_stop_suffix(const std::string& text, const std::vector<std::
   return 0;
 }
 
-void generate(LoadedLlama& loaded, const std::string& id, const json& request, const std::function<bool()>& check_cancel) {
-  const std::string model_path = request.value("model", "");
-  if (model_path.empty()) throw std::runtime_error("chat.model is required");
-  load_model(loaded, model_path);
-
-  const llama_vocab* vocab = llama_model_get_vocab(loaded.model);
-  const std::vector<ChatEntry> entries = messages_from_request(request);
-  std::string prompt = templated_prompt(loaded.model, entries);
-  if (prompt.empty()) prompt = fallback_prompt(entries);
-  if (prompt.empty() && request.contains("prompt") && request["prompt"].is_string()) {
-    prompt = request["prompt"].get<std::string>();
-  }
-  if (prompt.empty()) throw std::runtime_error("chat request contains no messages or prompt");
-
-  const SamplingParams params = sampling_from_request(request);
-
-  const bool add_special = prompt.find("<bos>") == std::string::npos && prompt.find("<|turn>") == std::string::npos;
-  const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, add_special, true);
-  if (n_prompt <= 0) throw std::runtime_error("failed to tokenize prompt");
-  std::vector<llama_token> prompt_tokens(n_prompt);
-  if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), add_special, true) < 0) {
-    throw std::runtime_error("failed to tokenize prompt");
-  }
-
-  const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
-  const int32_t output_reserve = std::max(1, std::min(params.max_tokens, 256));
-  if (static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= n_ctx) {
-    throw std::runtime_error(
-      "prompt exceeds context window; prompt tokens=" + std::to_string(prompt_tokens.size()) +
-      ", context=" + std::to_string(n_ctx) +
-      ", reserved output tokens=" + std::to_string(output_reserve) +
-      ". Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history."
-    );
-  }
-
-  const int prompt_token_count = static_cast<int>(prompt_tokens.size());
-  const std::vector<llama_token> full_prompt_tokens = prompt_tokens;
-
-  int32_t n_pos = 0;
-  llama_seq_id seq = 0;
-  int cached_prompt_tokens = 0;
-  LoadedLlama::CacheSlot* slot = nullptr;
-  if (llama_model_has_encoder(loaded.model)) {
-    for (auto& s : loaded.slots) s.tokens.clear();
-    llama_memory_clear(llama_get_memory(loaded.ctx), true);
-    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
-    if (llama_encode(loaded.ctx, batch)) throw std::runtime_error("llama_encode failed");
-    llama_token decoder_start_token_id = llama_model_decoder_start_token(loaded.model);
-    if (decoder_start_token_id == LLAMA_TOKEN_NULL) decoder_start_token_id = llama_vocab_bos(vocab);
-    prompt_tokens = { decoder_start_token_id };
-  } else {
-    // Multi-session KV slots: pick the slot with the longest common prefix
-    // against this prompt so any number of interleaved sessions keep warm
-    // caches. Ties/misses recycle the least-recently-used slot.
-    std::size_t best_slot = 0;
-    std::size_t best_prefix = 0;
-    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-      const auto& candidate = loaded.slots[index].tokens;
-      std::size_t prefix = 0;
-      const std::size_t max_prefix = std::min(candidate.size(), prompt_tokens.size());
-      while (prefix < max_prefix && candidate[prefix] == prompt_tokens[prefix]) prefix += 1;
-      if (prefix > best_prefix) {
-        best_prefix = prefix;
-        best_slot = index;
-      }
-    }
-    // A tiny shared prefix (e.g. just <bos>) is not a session match; prefer
-    // the LRU empty-or-oldest slot instead so we do not evict a warm session.
-    if (best_prefix < 16) {
-      best_prefix = 0;
-      best_slot = 0;
-      uint64_t oldest = UINT64_MAX;
-      for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-        const auto& candidate = loaded.slots[index];
-        const uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
-        if (age < oldest) {
-          oldest = age;
-          best_slot = index;
-        }
-      }
-    }
-    slot = &loaded.slots[best_slot];
-    slot->last_used = ++loaded.use_counter;
-    seq = static_cast<llama_seq_id>(best_slot);
-    std::size_t prefix = best_prefix;
-    if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token to get logits
-    // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
-    // range from their recurrent state; llama_memory_seq_rm returns false.
-    // In that case fall back to clearing the sequence and re-ingesting the
-    // whole prompt instead of decoding against a corrupt slot.
-    if (prefix > 0 && llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, static_cast<llama_pos>(prefix), -1)) {
-      slot->tokens.resize(prefix);
-      n_pos = static_cast<int32_t>(prefix);
-      prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
-      cached_prompt_tokens = static_cast<int>(prefix);
-    } else {
-      llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, -1, -1);
-      slot->tokens.clear();
-      n_pos = 0;
-    }
-
-    // Proactive KV pressure relief: the unified pool holds n_ctx cells shared
-    // by all slots. If resident sessions plus this prompt would overflow it,
-    // evict idle slots (oldest first) instead of failing into the expensive
-    // wipe-everything self-heal during ingest.
-    std::size_t resident = 0;
-    for (const auto& s : loaded.slots) resident += s.tokens.size();
-    const std::size_t incoming = prompt_tokens.size() + static_cast<std::size_t>(output_reserve);
-    const std::size_t capacity = static_cast<std::size_t>(n_ctx);
-    while (resident + incoming > capacity) {
-      std::size_t victim = loaded.slots.size();
-      uint64_t oldest = UINT64_MAX;
-      for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-        if (&loaded.slots[index] == slot || loaded.slots[index].tokens.empty()) continue;
-        if (loaded.slots[index].last_used < oldest) {
-          oldest = loaded.slots[index].last_used;
-          victim = index;
-        }
-      }
-      if (victim >= loaded.slots.size()) break;
-      llama_memory_seq_rm(llama_get_memory(loaded.ctx), static_cast<llama_seq_id>(victim), -1, -1);
-      resident -= loaded.slots[victim].tokens.size();
-      loaded.slots[victim].tokens.clear();
-      fprintf(stderr, "clap-llama: evicted KV slot %zu to fit incoming prompt\n", victim);
-    }
-  }
-
-  const bool track_cache = slot != nullptr;
-
+llama_sampler* make_sampler(const SamplingParams& params) {
   auto sparams = llama_sampler_chain_default_params();
   sparams.no_perf = true;
   llama_sampler* sampler = llama_sampler_chain_init(sparams);
@@ -550,203 +389,557 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(static_cast<float>(params.temperature)));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(params.seed));
   }
+  return sampler;
+}
 
-  // Report prefill progress for long prompts so the server dashboard can
-  // show real ingestion state instead of an opaque wait.
-  const std::size_t progress_threshold = 1024;
-  auto ingest = [&](const std::vector<llama_token>& tokens) {
-    if (tokens.size() > progress_threshold) {
-      decode_tokens(loaded, tokens, n_pos, seq, [&](std::size_t ingested) {
-        emit(id, json{{"prefill", {
-          {"done", cached_prompt_tokens + static_cast<int>(ingested)},
-          {"total", prompt_token_count},
-        }}});
-      });
-    } else {
-      decode_tokens(loaded, tokens, n_pos, seq);
-    }
-  };
-  try {
-    ingest(prompt_tokens);
-  } catch (...) {
-    // Self-heal: a failed ingest usually means the memory module is in a bad
-    // state (fragmented unified KV, hybrid recurrent slots). Wipe everything
-    // and retry the full prompt once from scratch before surfacing an error.
-    for (auto& s : loaded.slots) s.tokens.clear();
-    llama_memory_clear(llama_get_memory(loaded.ctx), true);
-    n_pos = 0;
-    cached_prompt_tokens = 0;
-    prompt_tokens = full_prompt_tokens;
-    try {
-      ingest(prompt_tokens);
-    } catch (...) {
-      llama_sampler_free(sampler);
-      throw;
-    }
-  }
-  if (track_cache) slot->tokens.insert(slot->tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
+// One in-flight chat request bound to a KV slot. The continuous-batching
+// scheduler advances all active requests together: each decoding request
+// contributes one token per step and prefilling requests fill the remaining
+// batch budget with prompt chunks, so long ingests never stall other streams.
+struct ActiveRequest {
+  std::string id;
+  SamplingParams params;
+  llama_sampler* sampler = nullptr;
+  llama_seq_id seq = 0;
+  LoadedLlama::CacheSlot* slot = nullptr;
 
-  std::string finish_reason = "stop";
-  std::string held;  // tail that may be a partial stop sequence
+  std::vector<llama_token> prompt_tokens;       // un-ingested remainder
+  std::vector<llama_token> full_prompt_tokens;  // for the one ingest retry
+  std::size_t ingested = 0;
+  int32_t n_pos = 0;
+  int prompt_token_count = 0;
+  int cached_prompt_tokens = 0;
+
+  enum class Phase { Prefill, Decode };
+  Phase phase = Phase::Prefill;
+  llama_token pending_token = 0;  // sampled but not yet decoded
+  std::string held;               // tail held for stop/UTF-8 boundaries
   int completion_tokens = 0;
-  bool stopped = false;
+  std::string finish_reason = "stop";
   bool cancelled = false;
+  bool retried = false;
+  bool done = false;
 
-  for (int n_decode = 0; n_decode < params.max_tokens && !stopped; ) {
-    if (check_cancel && check_cancel()) {
-      finish_reason = "cancel";
-      cancelled = true;
-      break;
-    }
-    llama_token token = llama_sampler_sample(sampler, loaded.ctx, -1);
-    if (llama_vocab_is_eog(vocab, token)) break;
+  // per-step scratch
+  int32_t logits_index = -1;
+  int32_t step_tokens = 0;
+};
 
-    completion_tokens += 1;
-    const std::string piece = token_to_piece(vocab, token);
-    if (!piece.empty()) {
-      held += piece;
-      if (!params.stops.empty()) {
-        const std::size_t stop_index = find_stop(held, params.stops);
-        if (stop_index != std::string::npos) {
-          std::string visible = held.substr(0, stop_index);
-          visible.resize(visible.size() - utf8_incomplete_suffix(visible));
-          if (!visible.empty()) emit(id, json{{"token", visible}});
-          finish_reason = "stop";
-          stopped = true;
-          break;
-        }
-        const std::size_t stop_hold = partial_stop_suffix(held, params.stops);
-        const std::size_t utf8_hold = utf8_incomplete_suffix(held);
-        const std::size_t hold = std::max(stop_hold, utf8_hold);
-        const std::string visible = held.substr(0, held.size() - hold);
-        if (!visible.empty()) {
-          emit(id, json{{"token", visible}});
-          held = held.substr(visible.size());
-        }
-      } else {
-        const std::size_t hold = utf8_incomplete_suffix(held);
-        const std::string visible = held.substr(0, held.size() - hold);
-        if (!visible.empty()) {
-          emit(id, json{{"token", visible}});
-          held = held.substr(visible.size());
-        }
-      }
-    }
-
-    std::vector<llama_token> next = { token };
-    try {
-      decode_tokens(loaded, next, n_pos, seq);
-    } catch (...) {
-      if (slot) slot->tokens.clear();
-      llama_sampler_free(sampler);
-      throw std::runtime_error("llama_decode failed; this often indicates llama.cpp/Metal GPU memory pressure. Check the llama worker log for kIOGPUCommandBufferCallbackErrorOutOfMemory. Try a smaller GGUF quant such as Q4_K_M, reduce CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, set CLAP_LLAMA_GPU_LAYERS to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.");
-    }
-    if (track_cache) slot->tokens.push_back(token);
-    n_decode += 1;
-    if (n_decode >= params.max_tokens) finish_reason = "length";
-    if (n_pos + 1 >= n_ctx) {
-      finish_reason = "length";
-      break;
-    }
+void finalize(ActiveRequest& req) {
+  if (req.sampler) {
+    llama_sampler_free(req.sampler);
+    req.sampler = nullptr;
   }
-
-  if (!stopped && !cancelled && !held.empty()) {
-    held.resize(held.size() - utf8_incomplete_suffix(held));
-    if (!held.empty()) emit(id, json{{"token", held}});
-  }
-
-  llama_sampler_free(sampler);
-  emit(id, json{
+  if (req.slot) req.slot->busy = false;
+  req.done = true;
+  emit(req.id, json{
     {"done", true},
-    {"finish_reason", finish_reason},
-    {"cancelled", cancelled},
+    {"finish_reason", req.finish_reason},
+    {"cancelled", req.cancelled},
     {"usage", json{
-      {"prompt_tokens", prompt_token_count},
-      {"completion_tokens", completion_tokens},
+      {"prompt_tokens", req.prompt_token_count},
+      {"completion_tokens", req.completion_tokens},
     }},
     {"cache", json{
-      {"hit", cached_prompt_tokens > 0},
-      {"reused_tokens", cached_prompt_tokens},
-      {"slot", static_cast<int>(seq)},
+      {"hit", req.cached_prompt_tokens > 0},
+      {"reused_tokens", req.cached_prompt_tokens},
+      {"slot", static_cast<int>(req.seq)},
     }},
   });
+}
+
+void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& message) {
+  if (req.sampler) {
+    llama_sampler_free(req.sampler);
+    req.sampler = nullptr;
+  }
+  if (req.slot) {
+    req.slot->busy = false;
+    req.slot->tokens.clear();
+  }
+  llama_memory_seq_rm(llama_get_memory(loaded.ctx), req.seq, -1, -1);
+  req.done = true;
+  emit_error(req.id, message);
+}
+
+void flush_held(ActiveRequest& req) {
+  req.held.resize(req.held.size() - utf8_incomplete_suffix(req.held));
+  if (!req.held.empty()) emit(req.id, json{{"token", req.held}});
+  req.held.clear();
+}
+
+// Emits the visible portion of req.held, holding back partial stop sequences
+// and incomplete UTF-8 tails. Returns true when a stop sequence completed.
+bool emit_visible(ActiveRequest& req) {
+  if (!req.params.stops.empty()) {
+    const std::size_t stop_index = find_stop(req.held, req.params.stops);
+    if (stop_index != std::string::npos) {
+      std::string visible = req.held.substr(0, stop_index);
+      visible.resize(visible.size() - utf8_incomplete_suffix(visible));
+      if (!visible.empty()) emit(req.id, json{{"token", visible}});
+      req.held.clear();
+      return true;
+    }
+    const std::size_t stop_hold = partial_stop_suffix(req.held, req.params.stops);
+    const std::size_t utf8_hold = utf8_incomplete_suffix(req.held);
+    const std::size_t hold = std::max(stop_hold, utf8_hold);
+    const std::string visible = req.held.substr(0, req.held.size() - hold);
+    if (!visible.empty()) {
+      emit(req.id, json{{"token", visible}});
+      req.held = req.held.substr(visible.size());
+    }
+  } else {
+    const std::size_t hold = utf8_incomplete_suffix(req.held);
+    const std::string visible = req.held.substr(0, req.held.size() - hold);
+    if (!visible.empty()) {
+      emit(req.id, json{{"token", visible}});
+      req.held = req.held.substr(visible.size());
+    }
+  }
+  return false;
+}
+
+// Handles one sampled token: EOS, stop sequences, budget checks, streaming
+// emission. Finalizes the request when generation ends.
+void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab, llama_token token) {
+  if (llama_vocab_is_eog(vocab, token)) {
+    flush_held(req);
+    finalize(req);
+    return;
+  }
+  req.completion_tokens += 1;
+  const std::string piece = token_to_piece(vocab, token);
+  if (!piece.empty()) {
+    req.held += piece;
+    if (emit_visible(req)) {
+      req.finish_reason = "stop";
+      finalize(req);
+      return;
+    }
+  }
+  if (req.completion_tokens >= req.params.max_tokens) {
+    req.finish_reason = "length";
+    flush_held(req);
+    finalize(req);
+    return;
+  }
+  const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
+  if (req.n_pos + 1 >= n_ctx) {
+    req.finish_reason = "length";
+    flush_held(req);
+    finalize(req);
+    return;
+  }
+  req.pending_token = token;
+  req.phase = ActiveRequest::Phase::Decode;
+}
+
+// Advances one request after its slice of the batch decoded successfully.
+void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab) {
+  if (req.phase == ActiveRequest::Phase::Prefill) {
+    const std::size_t chunk = static_cast<std::size_t>(req.step_tokens);
+    if (req.slot) {
+      req.slot->tokens.insert(
+        req.slot->tokens.end(),
+        req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested),
+        req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested + chunk));
+    }
+    req.n_pos += req.step_tokens;
+    req.ingested += chunk;
+    if (req.prompt_tokens.size() > 1024 && req.ingested < req.prompt_tokens.size()) {
+      emit(req.id, json{{"prefill", {
+        {"done", req.cached_prompt_tokens + static_cast<int>(req.ingested)},
+        {"total", req.prompt_token_count},
+      }}});
+    }
+    if (req.logits_index >= 0) {
+      const llama_token token = llama_sampler_sample(req.sampler, loaded.ctx, req.logits_index);
+      process_sampled(loaded, req, vocab, token);
+    }
+    return;
+  }
+  req.n_pos += 1;
+  if (req.slot) req.slot->tokens.push_back(req.pending_token);
+  const llama_token token = llama_sampler_sample(req.sampler, loaded.ctx, req.logits_index);
+  process_sampled(loaded, req, vocab, token);
+}
+
+void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_active) {
+  if (req.phase == ActiveRequest::Phase::Prefill && !req.retried) {
+    // Self-heal: wipe this sequence (or everything when alone, which also
+    // clears fragmented unified-KV state) and re-ingest the prompt once.
+    req.retried = true;
+    if (sole_active) {
+      for (auto& s : loaded.slots) s.tokens.clear();
+      llama_memory_clear(llama_get_memory(loaded.ctx), true);
+    } else {
+      llama_memory_seq_rm(llama_get_memory(loaded.ctx), req.seq, -1, -1);
+      if (req.slot) req.slot->tokens.clear();
+    }
+    req.prompt_tokens = req.full_prompt_tokens;
+    req.ingested = 0;
+    req.n_pos = 0;
+    req.cached_prompt_tokens = 0;
+    fprintf(stderr, "clap-llama: ingest failed for request %s; retrying from scratch\n", req.id.c_str());
+    return;
+  }
+  fail_request(loaded, req,
+    "llama_decode failed; this often indicates llama.cpp GPU memory pressure. "
+    "Check the llama worker log. Try a smaller GGUF quant such as Q4_K_M, reduce "
+    "CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, set CLAP_LLAMA_GPU_LAYERS "
+    "to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.");
+}
+
+// Adds one request's contribution to a batch. Returns tokens added.
+int32_t add_contribution(llama_batch& batch, ActiveRequest& req, int32_t budget) {
+  if (req.phase == ActiveRequest::Phase::Decode) {
+    req.logits_index = batch.n_tokens;
+    req.step_tokens = 1;
+    batch_add(batch, req.pending_token, req.n_pos, true, req.seq);
+    return 1;
+  }
+  const std::size_t remaining = req.prompt_tokens.size() - req.ingested;
+  const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(budget)));
+  req.logits_index = -1;
+  req.step_tokens = chunk;
+  for (int32_t i = 0; i < chunk; ++i) {
+    const bool last = req.ingested + static_cast<std::size_t>(i) + 1 == req.prompt_tokens.size();
+    if (last) req.logits_index = batch.n_tokens;
+    batch_add(batch, req.prompt_tokens[req.ingested + static_cast<std::size_t>(i)], req.n_pos + i, last, req.seq);
+  }
+  return chunk;
+}
+
+// Runs one request's contribution as its own batch so a failing sequence can
+// be isolated (and healed) without erroring every stream in the mixed batch.
+void step_single(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab, bool sole_active) {
+  const int32_t size = std::max<int32_t>(req.step_tokens, 1);
+  llama_batch batch = llama_batch_init(size, 0, 1);
+  batch.n_tokens = 0;
+  add_contribution(batch, req, size);
+  const int result = llama_decode(loaded.ctx, batch);
+  llama_batch_free(batch);
+  if (result == 0) {
+    post_decode(loaded, req, vocab);
+  } else {
+    handle_decode_failure(loaded, req, sole_active);
+  }
+}
+
+// One scheduler step: cancellations, then a mixed batch of decode tokens and
+// prefill chunks, then per-request sampling/emission.
+void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& active) {
+  const llama_vocab* vocab = llama_model_get_vocab(loaded.model);
+  const int32_t n_batch = static_cast<int32_t>(llama_n_batch(loaded.ctx));
+
+  for (auto& req : active) {
+    if (!req->done && req->cancelled) {
+      req->finish_reason = "cancel";
+      finalize(*req);
+    }
+  }
+
+  llama_batch batch = llama_batch_init(n_batch, 0, 1);
+  batch.n_tokens = 0;
+  std::vector<ActiveRequest*> contributors;
+  int32_t budget = n_batch;
+
+  // Decode streams first: one token each keeps every session moving.
+  for (auto& req : active) {
+    if (req->done || req->phase != ActiveRequest::Phase::Decode) continue;
+    if (budget <= 0) break;
+    budget -= add_contribution(batch, *req, budget);
+    contributors.push_back(req.get());
+  }
+  // Prefill fills the remaining budget in admission order.
+  for (auto& req : active) {
+    if (req->done || req->phase != ActiveRequest::Phase::Prefill) continue;
+    if (budget <= 0) break;
+    if (req->prompt_tokens.size() == req->ingested) continue;
+    budget -= add_contribution(batch, *req, budget);
+    contributors.push_back(req.get());
+  }
+
+  if (contributors.empty()) {
+    llama_batch_free(batch);
+    return;
+  }
+
+  const bool sole = contributors.size() == 1 && active.size() == 1;
+  if (llama_decode(loaded.ctx, batch) == 0) {
+    llama_batch_free(batch);
+    for (auto* req : contributors) post_decode(loaded, *req, vocab);
+    return;
+  }
+  llama_batch_free(batch);
+  if (contributors.size() == 1) {
+    handle_decode_failure(loaded, *contributors.front(), sole);
+    return;
+  }
+  fprintf(stderr, "clap-llama: mixed batch decode failed; isolating %zu sequences\n", contributors.size());
+  for (auto* req : contributors) step_single(loaded, *req, vocab, false);
+}
+
+std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::string& id, const json& request) {
+  const llama_vocab* vocab = llama_model_get_vocab(loaded.model);
+  const std::vector<ChatEntry> entries = messages_from_request(request);
+  std::string prompt = templated_prompt(loaded.model, entries);
+  if (prompt.empty()) prompt = fallback_prompt(entries);
+  if (prompt.empty() && request.contains("prompt") && request["prompt"].is_string()) {
+    prompt = request["prompt"].get<std::string>();
+  }
+  if (prompt.empty()) throw std::runtime_error("chat request contains no messages or prompt");
+
+  auto req = std::make_unique<ActiveRequest>();
+  req->id = id;
+  req->params = sampling_from_request(request);
+
+  const bool add_special = prompt.find("<bos>") == std::string::npos && prompt.find("<|turn>") == std::string::npos;
+  const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, add_special, true);
+  if (n_prompt <= 0) throw std::runtime_error("failed to tokenize prompt");
+  std::vector<llama_token> prompt_tokens(n_prompt);
+  if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), add_special, true) < 0) {
+    throw std::runtime_error("failed to tokenize prompt");
+  }
+
+  const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
+  const int32_t output_reserve = std::max(1, std::min(req->params.max_tokens, 256));
+  if (static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= n_ctx) {
+    throw std::runtime_error(
+      "prompt exceeds context window; prompt tokens=" + std::to_string(prompt_tokens.size()) +
+      ", context=" + std::to_string(n_ctx) +
+      ", reserved output tokens=" + std::to_string(output_reserve) +
+      ". Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history."
+    );
+  }
+
+  req->prompt_token_count = static_cast<int>(prompt_tokens.size());
+  req->full_prompt_tokens = prompt_tokens;
+
+  if (llama_model_has_encoder(loaded.model)) {
+    // Encoder-decoder models run alone (admission guarantees no other active
+    // request) and reset all cache state.
+    for (auto& s : loaded.slots) s.tokens.clear();
+    llama_memory_clear(llama_get_memory(loaded.ctx), true);
+    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+    if (llama_encode(loaded.ctx, batch)) throw std::runtime_error("llama_encode failed");
+    llama_token decoder_start = llama_model_decoder_start_token(loaded.model);
+    if (decoder_start == LLAMA_TOKEN_NULL) decoder_start = llama_vocab_bos(vocab);
+    req->prompt_tokens = { decoder_start };
+    req->full_prompt_tokens = req->prompt_tokens;
+    req->seq = 0;
+    req->slot = &loaded.slots[0];
+    req->slot->busy = true;
+    req->slot->last_used = ++loaded.use_counter;
+    req->sampler = make_sampler(req->params);
+    return req;
+  }
+
+  // Pick the idle slot with the longest common prefix against this prompt so
+  // interleaved sessions keep warm caches; ties/misses recycle the LRU slot.
+  std::size_t best_slot = SIZE_MAX;
+  std::size_t best_prefix = 0;
+  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+    if (loaded.slots[index].busy) continue;
+    const auto& candidate = loaded.slots[index].tokens;
+    std::size_t prefix = 0;
+    const std::size_t max_prefix = std::min(candidate.size(), prompt_tokens.size());
+    while (prefix < max_prefix && candidate[prefix] == prompt_tokens[prefix]) prefix += 1;
+    if (prefix > best_prefix) {
+      best_prefix = prefix;
+      best_slot = index;
+    }
+  }
+  // A tiny shared prefix (e.g. just <bos>) is not a session match; prefer the
+  // LRU empty-or-oldest idle slot so we do not evict a warm session.
+  if (best_prefix < 16) {
+    best_prefix = 0;
+    best_slot = SIZE_MAX;
+    uint64_t oldest = UINT64_MAX;
+    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+      if (loaded.slots[index].busy) continue;
+      const auto& candidate = loaded.slots[index];
+      const uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
+      if (age < oldest) {
+        oldest = age;
+        best_slot = index;
+      }
+    }
+  }
+  if (best_slot == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
+  auto* slot = &loaded.slots[best_slot];
+  slot->last_used = ++loaded.use_counter;
+  req->slot = slot;
+  req->seq = static_cast<llama_seq_id>(best_slot);
+
+  std::size_t prefix = best_prefix;
+  if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token for logits
+  // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
+  // range from their recurrent state; llama_memory_seq_rm returns false. In
+  // that case clear the sequence and re-ingest the whole prompt.
+  if (prefix > 0 && llama_memory_seq_rm(llama_get_memory(loaded.ctx), req->seq, static_cast<llama_pos>(prefix), -1)) {
+    slot->tokens.resize(prefix);
+    req->n_pos = static_cast<int32_t>(prefix);
+    prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
+    req->cached_prompt_tokens = static_cast<int>(prefix);
+  } else {
+    llama_memory_seq_rm(llama_get_memory(loaded.ctx), req->seq, -1, -1);
+    slot->tokens.clear();
+    req->n_pos = 0;
+  }
+
+  // Proactive KV pressure relief: evict idle slots (oldest first) when the
+  // resident sessions plus this prompt would overflow the unified pool.
+  std::size_t resident = 0;
+  for (const auto& s : loaded.slots) resident += s.tokens.size();
+  const std::size_t incoming = prompt_tokens.size() + static_cast<std::size_t>(output_reserve);
+  const std::size_t capacity = static_cast<std::size_t>(n_ctx);
+  while (resident + incoming > capacity) {
+    std::size_t victim = loaded.slots.size();
+    uint64_t oldest = UINT64_MAX;
+    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+      if (&loaded.slots[index] == slot || loaded.slots[index].busy || loaded.slots[index].tokens.empty()) continue;
+      if (loaded.slots[index].last_used < oldest) {
+        oldest = loaded.slots[index].last_used;
+        victim = index;
+      }
+    }
+    if (victim >= loaded.slots.size()) break;
+    llama_memory_seq_rm(llama_get_memory(loaded.ctx), static_cast<llama_seq_id>(victim), -1, -1);
+    resident -= loaded.slots[victim].tokens.size();
+    loaded.slots[victim].tokens.clear();
+    fprintf(stderr, "clap-llama: evicted KV slot %zu to fit incoming prompt\n", victim);
+  }
+
+  req->prompt_tokens = std::move(prompt_tokens);
+  req->sampler = make_sampler(req->params);
+  slot->busy = true;
+  return req;
 }
 
 }  // namespace
 
 int main() {
   LoadedLlama loaded;
+  std::vector<std::unique_ptr<ActiveRequest>> active;
+  std::deque<std::pair<std::string, json>> waiting;
+
   try {
     ggml_backend_load_all();
 
     StdinReader reader;
-    std::deque<std::string> deferred;
+    bool running = true;
 
-    // Non-blockingly drains stdin during generation; returns true when a
-    // cancel for the active request arrives. Other messages are deferred.
-    auto make_cancel_check = [&](const std::string& active_id) {
-      return [&reader, &deferred, active_id]() {
-        std::string pending;
-        while (reader.poll(pending)) {
-          if (pending.empty()) continue;
-          try {
-            const json message = json::parse(pending);
-            if (message.value("type", "") == "cancel") {
-              const std::string target = message.value("id", "");
-              if (target.empty() || target == active_id) return true;
-              continue;  // cancel for an unknown request: drop it
-            }
-          } catch (...) {
-            // Defer unparsable lines to the main loop for error reporting.
-          }
-          deferred.push_back(pending);
-        }
-        return false;
-      };
-    };
-
-    std::string line;
-    while (true) {
-      if (!deferred.empty()) {
-        line = std::move(deferred.front());
-        deferred.pop_front();
-      } else if (!reader.next(line)) {
-        break;
-      }
-      if (line.empty()) continue;
-
+    // Returns false on shutdown.
+    auto handle_message = [&](const std::string& line) -> bool {
+      if (line.empty()) return true;
       std::string id;
       try {
-        const json request = json::parse(line);
-        id = request.value("id", "");
-        const std::string type = request.value("type", "");
+        const json message = json::parse(line);
+        id = message.value("id", "");
+        const std::string type = message.value("type", "");
 
         if (type == "shutdown") {
           emit(id, json{{"done", true}});
-          unload(loaded);
-          return 0;
+          return false;
         }
         if (type == "cancel") {
-          continue;  // request already finished; nothing to cancel
+          const std::string target = message.value("id", "");
+          for (auto& req : active) {
+            if (!req->done && (target.empty() || req->id == target)) req->cancelled = true;
+          }
+          for (auto it = waiting.begin(); it != waiting.end(); ++it) {
+            if (!target.empty() && it->first == target) {
+              emit(target, json{{"done", true}, {"finish_reason", "cancel"}, {"cancelled", true}});
+              waiting.erase(it);
+              break;
+            }
+          }
+          return true;
         }
         if (type == "unload") {
+          if (!active.empty()) throw std::runtime_error("cannot unload while requests are active");
           unload(loaded);
           emit(id, json{{"unloaded", true}, {"done", true}});
-          continue;
+          return true;
         }
         if (type == "load") {
-          const std::string model = request.value("model", "");
+          const std::string model = message.value("model", "");
           if (model.empty()) throw std::runtime_error("load.model is required");
+          if (!active.empty() && loaded.model && loaded.model_path != model) {
+            throw std::runtime_error("cannot switch models while requests are active");
+          }
           load_model(loaded, model);
           emit(id, json{{"loaded", true}, {"done", true}});
-          continue;
+          return true;
         }
-        // Dispatch signal: lets the server distinguish time spent queued
-        // behind other requests from time spent actually working.
-        emit(id, json{{"started", true}});
-        generate(loaded, id, request, make_cancel_check(id));
+        // Anything else is a chat request; it queues until a slot frees up.
+        waiting.emplace_back(id, message);
+        return true;
       } catch (const std::exception& error) {
         emit_error(id, error.what());
+        return true;
+      }
+    };
+
+    while (running) {
+      std::string line;
+      if (active.empty() && waiting.empty()) {
+        if (!reader.next(line)) break;  // idle: block until work or EOF
+        running = handle_message(line);
+        if (!running) break;
+      }
+      while (reader.poll(line)) {
+        running = handle_message(line);
+        if (!running) break;
+      }
+      if (!running) break;
+
+      // Admit queued requests to free slots.
+      while (!waiting.empty()) {
+        const std::string req_model = waiting.front().second.value("model", "");
+        if (req_model.empty()) {
+          emit_error(waiting.front().first, "chat.model is required");
+          waiting.pop_front();
+          continue;
+        }
+        // Drain in-flight requests before switching models.
+        if (!active.empty() && loaded.model && loaded.model_path != req_model) break;
+        try {
+          load_model(loaded, req_model);
+        } catch (const std::exception& error) {
+          emit_error(waiting.front().first, error.what());
+          waiting.pop_front();
+          continue;
+        }
+        if (llama_model_has_encoder(loaded.model) && !active.empty()) break;
+        std::size_t busy = 0;
+        for (const auto& s : loaded.slots) busy += s.busy ? 1 : 0;
+        if (busy >= loaded.slots.size()) break;
+        auto [wid, wreq] = std::move(waiting.front());
+        waiting.pop_front();
+        try {
+          auto prepared = prepare_request(loaded, wid, wreq);
+          emit(wid, json{{"started", true}});
+          active.push_back(std::move(prepared));
+        } catch (const std::exception& error) {
+          emit_error(wid, error.what());
+        }
+      }
+
+      if (!active.empty()) {
+        step(loaded, active);
+        active.erase(
+          std::remove_if(active.begin(), active.end(), [](const std::unique_ptr<ActiveRequest>& r) { return r->done; }),
+          active.end());
+      }
+    }
+
+    for (auto& req : active) {
+      if (!req->done) {
+        req->finish_reason = "cancel";
+        req->cancelled = true;
+        finalize(*req);
       }
     }
     unload(loaded);
