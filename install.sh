@@ -46,7 +46,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 say "downloading clap $version ($target)..."
-curl -fsSL -o "$tmp/$archive" "$url" || fail "download failed: $url"
+curl -fL --progress-bar -o "$tmp/$archive" "$url" || fail "download failed: $url"
 
 if command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1; then
   say "verifying checksum..."
