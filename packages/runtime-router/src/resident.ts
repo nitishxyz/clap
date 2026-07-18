@@ -79,6 +79,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     public readonly backend: ResidentBackend,
     public readonly modelPath: string,
     private readonly onCrash?: ResidentCrashListener,
+    private readonly envOverrides?: Record<string, string>,
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -145,7 +146,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       stdin: "pipe",
       stdout: "pipe",
       stderr: Bun.file(status.logPath),
-      env: process.env,
+      env: this.envOverrides ? { ...process.env, ...this.envOverrides } : process.env,
     });
     this.proc = proc;
     this.logPath = status.logPath;
@@ -325,11 +326,14 @@ function enrichWorkerError(message: string, backend: ResidentBackend, logPath?: 
 export class ResidentWorkerRegistry {
   private readonly workers = new Map<string, ResidentWorkerHandle>();
   onCrash?: ResidentCrashListener;
+  // Per-model worker environment (e.g. [models."x"] config sections);
+  // consulted once when the worker handle is first created.
+  workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
 
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string): ResidentWorkerHandle {
     const existing = this.workers.get(key);
     if (existing) return existing;
-    const worker = new ResidentWorkerProcess(key, backend, modelPath, (info) => this.onCrash?.(info));
+    const worker = new ResidentWorkerProcess(key, backend, modelPath, (info) => this.onCrash?.(info), this.workerEnv?.(modelPath, backend));
     this.workers.set(key, worker);
     return worker;
   }

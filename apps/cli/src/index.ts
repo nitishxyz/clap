@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
-import { createApiKey, keysFilePath, listApiKeys, revokeApiKey, startServer } from "@clap/server";
+import { configPaths, createApiKey, keysFilePath, listApiKeys, loadClapConfig, revokeApiKey, startServer } from "@clap/server";
 import { ensureCudaWorker } from "./cuda-worker";
 import { ensureEmbeddedWorkers } from "./embedded-workers";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -46,6 +46,8 @@ try {
     await authCommand(args.slice(1));
   } else if (command === "keys") {
     await keysCommand(args.slice(1));
+  } else if (command === "config") {
+    configCommand();
   } else if (command === "server") {
     await serverCommand(args.slice(1));
   } else if (command === "models") {
@@ -388,6 +390,19 @@ async function keysCommand(argv: string[]) {
     console.log(`revoked: ${id}`);
   } else {
     throw new Error("usage: clap keys <create|list|revoke>");
+  }
+}
+
+function configCommand() {
+  const { config, sources } = loadClapConfig();
+  console.log("files:");
+  for (const source of sources) {
+    console.log(`  ${source.path}  ${source.loaded ? "(loaded)" : "(absent)"}`);
+  }
+  console.log("effective:");
+  console.log(JSON.stringify(config, null, 2));
+  if (!sources.some((s) => s.loaded)) {
+    console.log(`\nCreate ${configPaths().at(-1)} to configure clap, e.g.:\n\n[server]\nhost = "0.0.0.0"\nport = 11435\n\n[auth]\nrequire_api_key = true\n\n[llama]\nkv_type = "q8_0"\nslots = 16\n\n[models."owner/name-GGUF"]\ncontext = 65536`);
   }
 }
 
@@ -821,6 +836,7 @@ function help() {
   clap serve
   clap auth login|logout|status
   clap keys create <name> | list | revoke <id>
+  clap config
   clap server start|stop|status|restart|logs|install [--force]
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]

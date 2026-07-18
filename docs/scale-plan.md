@@ -161,6 +161,15 @@ token quotas, key management via CLI + admin API + dashboard. An org box on
 `0.0.0.0` without auth is a non-starter. SSO/OIDC later.
 
 ### 10. Config file
+Status: DONE for read path (`/etc/clap/clap.toml` < `$CLAP_HOME/clap.toml`
+< env; `clap config` shows files + effective config; `GET /clap/v1/config`
+serves it). Wired: `[server]` host/port/idle timeout, `[auth]`
+require_api_key, `[llama]` globals mapped to worker env, and per-model
+`[models."owner/name"]` overrides injected into that model's worker process
+environment on (re)start — this delivers the config half of T2.7 KV-quant
+surfacing. Remaining: write path (PATCH endpoint + dashboard settings
+panel), `[limits]` section once queue fairness exists.
+
 `clap.toml` (TOML for comments; Bun parses natively). Layering:
 defaults < system file < user file < env < flags. Admin API writes the same
 file. Machine state stays JSON under `~/.clap/state`.
@@ -220,7 +229,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 2. Admission control (T1.2) — DONE
 3. Watchdog (T1.4) — DONE
 4. API keys (T3.9) — DONE (rate limits/quotas ride on T1.3)
-5. Config file (T3.10) — carries KV-type/slot policy surfacing (T2.7)
+5. Config file (T3.10) — DONE (read path; write API + dashboard panel pending)
 6. Queue fairness (T1.3) — needs keys for per-client fairness
 7. Prometheus metrics (T3.11)
 8. Shared-prefix dedup (T2.5) — DONE

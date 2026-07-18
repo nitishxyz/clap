@@ -46,6 +46,70 @@ describe("clap server", () => {
     expect([301, 302]).toContain(redirect.status);
   });
 
+  test("clap.toml config: llama env mapping, per-model overrides, auth requirement, config endpoint", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousSlots = process.env.CLAP_LLAMA_SLOTS;
+    const previousKvType = process.env.CLAP_LLAMA_KV_TYPE;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-config-test-"));
+    try {
+      process.env.CLAP_HOME = home;
+      delete process.env.CLAP_LLAMA_KV_TYPE;
+      delete process.env.CLAP_REQUIRE_API_KEY;
+      process.env.CLAP_LLAMA_SLOTS = "7";
+      await writeFile(join(home, "clap.toml"), [
+        "[server]",
+        "port = 12999",
+        "[auth]",
+        "require_api_key = true",
+        "[llama]",
+        'kv_type = "q8_0"',
+        "slots = 32",
+        '[models."owner/big-GGUF"]',
+        "context = 65536",
+        'kv_type = "q4_0"',
+      ].join("\n"));
+
+      const { loadClapConfig, configPaths } = await import("./config");
+      expect(configPaths().at(-1)).toBe(join(home, "clap.toml"));
+      const { config } = loadClapConfig();
+      expect(config.server.port).toBe(12999);
+      expect(String(config.llama.kv_type)).toBe("q8_0");
+
+      const app = createServer();
+      // config file applied kv_type (env unset), but env wins for slots
+      expect(process.env.CLAP_LLAMA_KV_TYPE ?? "").toBe("q8_0");
+      expect(process.env.CLAP_LLAMA_SLOTS ?? "").toBe("7");
+
+      // require_api_key = true denies unauthenticated requests even loopback
+      const denied = await app.request("/clap/v1/models");
+      expect(denied.status).toBe(401);
+      const health = await app.request("/clap/v1/health");
+      expect(health.status).toBe(200);
+
+      // env CLAP_REQUIRE_API_KEY=0-style override: unset config effect
+      process.env.CLAP_REQUIRE_API_KEY = "0";
+      const allowed = await app.request("/clap/v1/models");
+      expect(allowed.status).toBe(200);
+
+      const configResponse = await app.request("/clap/v1/config");
+      expect(configResponse.status).toBe(200);
+      const body = await configResponse.json() as { config: { models: Record<string, { context?: number }> }; sources: Array<{ loaded: boolean }> };
+      expect(body.config.models["owner/big-GGUF"].context).toBe(65536);
+      expect(body.sources.some((s) => s.loaded)).toBe(true);
+
+      const { workerEnvForModel } = await import("./config");
+      const env = workerEnvForModel(config, "owner/big-GGUF");
+      expect(env).toEqual({ CLAP_LLAMA_CONTEXT: "65536", CLAP_LLAMA_KV_TYPE: "q4_0" });
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_SLOTS", previousSlots);
+      restoreEnv("CLAP_LLAMA_KV_TYPE", previousKvType);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("api keys: create, list, enforce with CLAP_REQUIRE_API_KEY, revoke", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;

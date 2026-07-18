@@ -37,6 +37,8 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
+import { applyConfigToEnv, loadClapConfig, workerEnvForModel } from "./config";
+export { configPaths, loadClapConfig } from "./config";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
@@ -60,6 +62,17 @@ export function createServer(
 ) {
   const app = new Hono();
   const metrics = new MetricsCollector();
+  const { config, sources: configSources } = loadClapConfig();
+  applyConfigToEnv(config);
+  residents.workerEnv = (modelPath) => {
+    for (const modelId of Object.keys(config.models)) {
+      // HF cache paths embed the repo id as owner--name; match either form.
+      if (modelPath === modelId || modelPath.includes(modelId.replace("/", "--"))) {
+        return workerEnvForModel(config, modelId);
+      }
+    }
+    return undefined;
+  };
   metrics.event("server", `clap server started (v${clapVersion})`);
   lifecycle.removeListener = (entry, reason) => {
     if (reason === "cleanup") return;
@@ -115,12 +128,14 @@ export function createServer(
   }));
 
   // API key auth. Loopback clients (CLI, dashboard on the box) stay open
-  // unless CLAP_REQUIRE_API_KEY=1; remote clients must present a valid
-  // Bearer key once any active key exists. Health stays open for probes.
+  // unless CLAP_REQUIRE_API_KEY=1 or [auth] require_api_key = true; remote
+  // clients must present a valid Bearer key once any active key exists.
+  // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   app.use("*", async (c, next) => {
     if (c.req.path === "/clap/v1/health") return next();
-    const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1";
+    const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1"
+      || (process.env.CLAP_REQUIRE_API_KEY === undefined && config.auth.require_api_key === true);
     let loopback = true;
     try {
       const env = c.env as { requestIP?: (request: Request) => { address?: string } | null } | undefined;
@@ -146,6 +161,8 @@ export function createServer(
   });
 
   app.get("/clap/v1/keys", (c) => c.json({ keys: listApiKeys() }));
+
+  app.get("/clap/v1/config", (c) => c.json({ config, sources: configSources }));
 
   app.delete("/clap/v1/keys/:id", (c) => {
     const revoked = revokeApiKey(c.req.param("id"));
@@ -1082,9 +1099,10 @@ function backendErrorBody(error: unknown) {
 }
 
 export function startServer(options: ServerOptions = {}) {
-  const port = options.port ?? portFromEnv();
-  const hostname = options.hostname ?? hostnameFromEnv();
-  const idleTimeout = options.idleTimeout ?? idleTimeoutFromEnv();
+  const { config } = loadClapConfig();
+  const port = options.port ?? portFromEnv(config.server.port);
+  const hostname = options.hostname ?? hostnameFromEnv(config.server.host);
+  const idleTimeout = options.idleTimeout ?? idleTimeoutFromEnv(config.server.idle_timeout_seconds);
   const residents = new ResidentWorkerRegistry();
   const lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key));
   const server = Bun.serve({
@@ -1108,14 +1126,16 @@ function installShutdownCleanup(server: ReturnType<typeof Bun.serve>, lifecycle:
   process.once("SIGTERM", cleanup);
 }
 
-function portFromEnv(): number {
+function portFromEnv(configPort?: number): number {
+  if (process.env.PORT === undefined && process.env.CLAP_BASE_URL === undefined && configPort !== undefined) return configPort;
   const fromUrl = new URL(process.env.CLAP_BASE_URL ?? defaultBaseURL).port;
   return Number(process.env.PORT ?? fromUrl ?? 11435);
 }
 
-function hostnameFromEnv(): string {
+function hostnameFromEnv(configHost?: string): string {
   const fromEnv = process.env.CLAP_HOST?.trim();
   if (fromEnv) return fromEnv;
+  if (configHost) return configHost;
   try {
     const fromUrl = new URL(process.env.CLAP_BASE_URL ?? defaultBaseURL).hostname;
     if (fromUrl && fromUrl !== "localhost") return fromUrl;
@@ -1125,9 +1145,12 @@ function hostnameFromEnv(): string {
   return "127.0.0.1";
 }
 
-export function idleTimeoutFromEnv(): number {
+export function idleTimeoutFromEnv(configSeconds?: number): number {
   const raw = process.env.CLAP_SERVER_IDLE_TIMEOUT_SECONDS;
-  if (raw === undefined || raw.trim() === "") return defaultIdleTimeoutSeconds;
+  if (raw === undefined || raw.trim() === "") {
+    if (configSeconds !== undefined) return configSeconds === 0 ? 0 : Math.min(configSeconds, maxBunIdleTimeoutSeconds);
+    return defaultIdleTimeoutSeconds;
+  }
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) return defaultIdleTimeoutSeconds;
   if (value === 0) return 0;
