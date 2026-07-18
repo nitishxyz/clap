@@ -341,8 +341,12 @@ void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, 
 std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
   char buffer[256];
   int n = llama_token_to_piece(vocab, token, buffer, sizeof(buffer), 0, true);
+  if (n >= 0) return std::string(buffer, n);
+  // Negative return is the required size; retry instead of dropping the piece.
+  std::vector<char> big(static_cast<std::size_t>(-n));
+  n = llama_token_to_piece(vocab, token, big.data(), static_cast<int32_t>(big.size()), 0, true);
   if (n < 0) return "";
-  return std::string(buffer, n);
+  return std::string(big.data(), n);
 }
 
 std::size_t max_stop_length(const std::vector<std::string>& stops) {
