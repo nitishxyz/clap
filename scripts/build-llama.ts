@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -46,7 +47,8 @@ if (wantCuda) {
 }
 
 await run(configure);
-await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j"]);
+const buildJobs = process.env.CLAP_BUILD_JOBS ?? String(availableParallelism());
+await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j", buildJobs]);
 
 await mkdir(libexec, { recursive: true });
 
