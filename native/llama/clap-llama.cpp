@@ -102,12 +102,36 @@ struct SamplingParams {
 
 void emit(const std::string& id, json fields) {
   if (!id.empty()) fields["id"] = id;
-  std::cout << fields.dump() << "\n";
+  // error_handler_t::replace: never throw on stray invalid UTF-8 bytes from
+  // byte-level BPE pieces; substitute U+FFFD instead of killing the request.
+  std::cout << fields.dump(-1, ' ', false, json::error_handler_t::replace) << "\n";
   std::cout.flush();
 }
 
 void emit_error(const std::string& id, const std::string& message) {
   emit(id, json{{"error", message}});
+}
+
+// Number of trailing bytes forming an incomplete (but so far valid) UTF-8
+// sequence. Byte-level BPE tokens can split a multi-byte character across
+// pieces; those bytes must be held back until the character completes.
+std::size_t utf8_incomplete_suffix(const std::string& text) {
+  const std::size_t size = text.size();
+  std::size_t cont = 0;
+  while (cont < 3 && cont < size &&
+         (static_cast<unsigned char>(text[size - 1 - cont]) & 0xC0) == 0x80) {
+    cont += 1;
+  }
+  if (cont >= size) return 0;
+  const unsigned char lead = static_cast<unsigned char>(text[size - 1 - cont]);
+  std::size_t need = 0;
+  if ((lead & 0x80) == 0) need = 1;
+  else if ((lead & 0xE0) == 0xC0) need = 2;
+  else if ((lead & 0xF0) == 0xE0) need = 3;
+  else if ((lead & 0xF8) == 0xF0) need = 4;
+  else return 0;
+  const std::size_t have = cont + 1;
+  return have < need ? have : 0;
 }
 
 int env_int(const char* name, int fallback) {
@@ -530,21 +554,28 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
       if (!params.stops.empty()) {
         const std::size_t stop_index = find_stop(held, params.stops);
         if (stop_index != std::string::npos) {
-          const std::string visible = held.substr(0, stop_index);
+          std::string visible = held.substr(0, stop_index);
+          visible.resize(visible.size() - utf8_incomplete_suffix(visible));
           if (!visible.empty()) emit(id, json{{"token", visible}});
           finish_reason = "stop";
           stopped = true;
           break;
         }
-        const std::size_t hold = partial_stop_suffix(held, params.stops);
+        const std::size_t stop_hold = partial_stop_suffix(held, params.stops);
+        const std::size_t utf8_hold = utf8_incomplete_suffix(held);
+        const std::size_t hold = std::max(stop_hold, utf8_hold);
         const std::string visible = held.substr(0, held.size() - hold);
         if (!visible.empty()) {
           emit(id, json{{"token", visible}});
           held = held.substr(visible.size());
         }
       } else {
-        emit(id, json{{"token", held}});
-        held.clear();
+        const std::size_t hold = utf8_incomplete_suffix(held);
+        const std::string visible = held.substr(0, held.size() - hold);
+        if (!visible.empty()) {
+          emit(id, json{{"token", visible}});
+          held = held.substr(visible.size());
+        }
       }
     }
 
@@ -565,7 +596,10 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     }
   }
 
-  if (!stopped && !cancelled && !held.empty()) emit(id, json{{"token", held}});
+  if (!stopped && !cancelled && !held.empty()) {
+    held.resize(held.size() - utf8_incomplete_suffix(held));
+    if (!held.empty()) emit(id, json{{"token", held}});
+  }
 
   llama_sampler_free(sampler);
   emit(id, json{
