@@ -381,6 +381,7 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
   }
 
   const int prompt_token_count = static_cast<int>(prompt_tokens.size());
+  const std::vector<llama_token> full_prompt_tokens = prompt_tokens;
 
   int32_t n_pos = 0;
   llama_seq_id seq = 0;
@@ -467,24 +468,38 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(params.seed));
   }
 
-  try {
-    // Report prefill progress for long prompts so the server dashboard can
-    // show real ingestion state instead of an opaque wait.
-    const std::size_t progress_threshold = 1024;
-    if (prompt_tokens.size() > progress_threshold) {
-      decode_tokens(loaded, prompt_tokens, n_pos, seq, [&](std::size_t ingested) {
+  // Report prefill progress for long prompts so the server dashboard can
+  // show real ingestion state instead of an opaque wait.
+  const std::size_t progress_threshold = 1024;
+  auto ingest = [&](const std::vector<llama_token>& tokens) {
+    if (tokens.size() > progress_threshold) {
+      decode_tokens(loaded, tokens, n_pos, seq, [&](std::size_t ingested) {
         emit(id, json{{"prefill", {
           {"done", cached_prompt_tokens + static_cast<int>(ingested)},
           {"total", prompt_token_count},
         }}});
       });
     } else {
-      decode_tokens(loaded, prompt_tokens, n_pos, seq);
+      decode_tokens(loaded, tokens, n_pos, seq);
     }
+  };
+  try {
+    ingest(prompt_tokens);
   } catch (...) {
-    if (slot) slot->tokens.clear();
-    llama_sampler_free(sampler);
-    throw;
+    // Self-heal: a failed ingest usually means the memory module is in a bad
+    // state (fragmented unified KV, hybrid recurrent slots). Wipe everything
+    // and retry the full prompt once from scratch before surfacing an error.
+    for (auto& s : loaded.slots) s.tokens.clear();
+    llama_memory_clear(llama_get_memory(loaded.ctx), true);
+    n_pos = 0;
+    cached_prompt_tokens = 0;
+    prompt_tokens = full_prompt_tokens;
+    try {
+      ingest(prompt_tokens);
+    } catch (...) {
+      llama_sampler_free(sampler);
+      throw;
+    }
   }
   if (track_cache) slot->tokens.insert(slot->tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
 
