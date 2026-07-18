@@ -82,9 +82,13 @@ struct LoadedLlama {
     std::vector<llama_token> tokens;
     uint64_t last_used = 0;
     bool busy = false;  // an active request is generating on this slot
+    bool is_anchor = false;  // holds a shared prefix snapshot, never generates
   };
   std::vector<CacheSlot> slots;
   uint64_t use_counter = 0;
+  // Hybrid/recurrent models (e.g. Gated DeltaNet) only support whole-sequence
+  // KV state copies; attention-only models support partial-range copies.
+  bool hybrid = false;
 };
 
 struct ChatEntry {
@@ -337,6 +341,7 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   loaded.model_path = model_path;
   loaded.slots.assign(static_cast<std::size_t>(n_slots), {});
   loaded.use_counter = 0;
+  loaded.hybrid = llama_model_is_recurrent(loaded.model) || llama_model_is_hybrid(loaded.model);
 }
 
 void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits, llama_seq_id seq) {
@@ -439,10 +444,44 @@ struct ActiveRequest {
   bool retried = false;
   bool done = false;
 
+  // When >= 0: during full prefill of a hybrid model, snapshot a shared-prefix
+  // anchor into an empty slot once ingestion reaches exactly this position.
+  int32_t anchor_at = -1;
+
   // per-step scratch
   int32_t logits_index = -1;
   int32_t step_tokens = 0;
 };
+
+// Snapshots the current (mid-prefill) state of req.seq into an empty slot as
+// a shared-prefix anchor. Hybrid models cannot branch a partial range off a
+// longer sequence, but they can whole-copy a sequence that holds exactly the
+// shared prefix — so future sessions with the same system prompt + tools
+// branch from the anchor and skip that prefill entirely. Never evicts a warm
+// session; anchors only claim currently-empty slots.
+void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
+  const std::size_t count = static_cast<std::size_t>(req.anchor_at);
+  if (count < 16 || count > req.full_prompt_tokens.size()) return;
+  // The sequence state must hold exactly the prefix (chunking lands a
+  // boundary on anchor_at; anything else means the plan was disrupted).
+  if (req.ingested != count || req.cached_prompt_tokens != 0) return;
+  std::size_t target = SIZE_MAX;
+  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+    if (!loaded.slots[index].busy && loaded.slots[index].tokens.empty()) {
+      target = index;
+      break;
+    }
+  }
+  if (target == SIZE_MAX) return;
+  llama_memory_t mem = llama_get_memory(loaded.ctx);
+  llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
+  llama_memory_seq_cp(mem, req.seq, static_cast<llama_seq_id>(target), -1, -1);
+  auto& slot = loaded.slots[target];
+  slot.tokens.assign(req.full_prompt_tokens.begin(), req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
+  slot.is_anchor = true;
+  slot.last_used = ++loaded.use_counter;
+  fprintf(stderr, "clap-llama: created prefix anchor (%zu tokens) in slot %zu\n", count, target);
+}
 
 void finalize(ActiveRequest& req) {
   if (req.sampler) {
@@ -565,6 +604,10 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
     }
     req.n_pos += req.step_tokens;
     req.ingested += chunk;
+    if (req.anchor_at >= 0 && req.ingested >= static_cast<std::size_t>(req.anchor_at)) {
+      maybe_create_anchor(loaded, req);
+      req.anchor_at = -1;
+    }
     if (req.prompt_tokens.size() > 1024 && req.ingested < req.prompt_tokens.size()) {
       emit(req.id, json{{"prefill", {
         {"done", req.cached_prompt_tokens + static_cast<int>(req.ingested)},
@@ -589,7 +632,10 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
     // clears fragmented unified-KV state) and re-ingest the prompt once.
     req.retried = true;
     if (sole_active) {
-      for (auto& s : loaded.slots) s.tokens.clear();
+      for (auto& s : loaded.slots) {
+        s.tokens.clear();
+        s.is_anchor = false;
+      }
       llama_memory_clear(llama_get_memory(loaded.ctx), true);
     } else {
       llama_memory_seq_rm(llama_get_memory(loaded.ctx), req.seq, -1, -1);
@@ -617,7 +663,12 @@ int32_t add_contribution(llama_batch& batch, ActiveRequest& req, int32_t budget)
     batch_add(batch, req.pending_token, req.n_pos, true, req.seq);
     return 1;
   }
-  const std::size_t remaining = req.prompt_tokens.size() - req.ingested;
+  std::size_t remaining = req.prompt_tokens.size() - req.ingested;
+  // Land a chunk boundary exactly on a pending anchor position so the
+  // sequence state can be snapshotted at the shared-prefix boundary.
+  if (req.anchor_at >= 0 && static_cast<std::size_t>(req.anchor_at) > req.ingested) {
+    remaining = std::min(remaining, static_cast<std::size_t>(req.anchor_at) - req.ingested);
+  }
   const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(budget)));
   req.logits_index = -1;
   req.step_tokens = chunk;
@@ -738,7 +789,10 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   if (llama_model_has_encoder(loaded.model)) {
     // Encoder-decoder models run alone (admission guarantees no other active
     // request) and reset all cache state.
-    for (auto& s : loaded.slots) s.tokens.clear();
+    for (auto& s : loaded.slots) {
+      s.tokens.clear();
+      s.is_anchor = false;
+    }
     llama_memory_clear(llama_get_memory(loaded.ctx), true);
     llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
     if (llama_encode(loaded.ctx, batch)) throw std::runtime_error("llama_encode failed");
@@ -754,61 +808,118 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     return req;
   }
 
-  // Pick the idle slot with the longest common prefix against this prompt so
-  // interleaved sessions keep warm caches; ties/misses recycle the LRU slot.
-  std::size_t best_slot = SIZE_MAX;
-  std::size_t best_prefix = 0;
+  llama_memory_t mem = llama_get_memory(loaded.ctx);
+  auto common_prefix = [&](const std::vector<llama_token>& candidate) {
+    std::size_t p = 0;
+    const std::size_t limit = std::min(candidate.size(), prompt_tokens.size());
+    while (p < limit && candidate[p] == prompt_tokens[p]) p += 1;
+    return p;
+  };
+
+  // Donor scan across ALL slots — busy sessions and anchors included — for
+  // the longest shared prefix. A tiny prefix (e.g. just <bos>) is noise.
+  std::size_t donor = SIZE_MAX;
+  std::size_t donor_prefix = 0;
   for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-    if (loaded.slots[index].busy) continue;
-    const auto& candidate = loaded.slots[index].tokens;
-    std::size_t prefix = 0;
-    const std::size_t max_prefix = std::min(candidate.size(), prompt_tokens.size());
-    while (prefix < max_prefix && candidate[prefix] == prompt_tokens[prefix]) prefix += 1;
-    if (prefix > best_prefix) {
-      best_prefix = prefix;
-      best_slot = index;
+    if (loaded.slots[index].tokens.empty()) continue;
+    const std::size_t p = common_prefix(loaded.slots[index].tokens);
+    if (p > donor_prefix) {
+      donor_prefix = p;
+      donor = index;
     }
   }
-  // A tiny shared prefix (e.g. just <bos>) is not a session match; prefer the
-  // LRU empty-or-oldest idle slot so we do not evict a warm session.
-  if (best_prefix < 16) {
-    best_prefix = 0;
-    best_slot = SIZE_MAX;
+  if (donor_prefix < 16) {
+    donor = SIZE_MAX;
+    donor_prefix = 0;
+  }
+  const bool donor_exact = donor != SIZE_MAX && donor_prefix == loaded.slots[donor].tokens.size();
+  const bool donor_usable_in_place =
+      donor != SIZE_MAX && donor_exact && !loaded.slots[donor].busy && !loaded.slots[donor].is_anchor;
+
+  // Fresh slot pick: empty first, then oldest idle session; anchors are
+  // recycled last because they serve every future session of their prefix.
+  auto pick_fresh_slot = [&]() -> std::size_t {
+    std::size_t best = SIZE_MAX;
     uint64_t oldest = UINT64_MAX;
     for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-      if (loaded.slots[index].busy) continue;
+      if (loaded.slots[index].busy || index == donor) continue;
       const auto& candidate = loaded.slots[index];
-      const uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
+      uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
+      if (candidate.is_anchor && !candidate.tokens.empty()) age = (UINT64_MAX / 2) + candidate.last_used;
       if (age < oldest) {
         oldest = age;
-        best_slot = index;
+        best = index;
       }
     }
-  }
-  if (best_slot == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
-  auto* slot = &loaded.slots[best_slot];
-  slot->last_used = ++loaded.use_counter;
-  req->slot = slot;
-  req->seq = static_cast<llama_seq_id>(best_slot);
+    return best;
+  };
 
-  std::size_t prefix = best_prefix;
-  if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token for logits
-  // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
-  // range from their recurrent state; llama_memory_seq_rm returns false. In
-  // that case clear the sequence and re-ingest the whole prompt.
-  if (prefix > 0 && llama_memory_seq_rm(llama_get_memory(loaded.ctx), req->seq, static_cast<llama_pos>(prefix), -1)) {
-    slot->tokens.resize(prefix);
-    req->n_pos = static_cast<int32_t>(prefix);
-    prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
-    req->cached_prompt_tokens = static_cast<int>(prefix);
+  if (donor_usable_in_place) {
+    // Same-session continuation: extend the donor slot in place (no copy).
+    auto* slot = &loaded.slots[donor];
+    slot->last_used = ++loaded.use_counter;
+    req->slot = slot;
+    req->seq = static_cast<llama_seq_id>(donor);
+    std::size_t prefix = donor_prefix;
+    if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token for logits
+    // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
+    // range from their recurrent state; llama_memory_seq_rm returns false. In
+    // that case clear the sequence and re-ingest the whole prompt.
+    if (prefix > 0 && llama_memory_seq_rm(mem, req->seq, static_cast<llama_pos>(prefix), -1)) {
+      slot->tokens.resize(prefix);
+      req->n_pos = static_cast<int32_t>(prefix);
+      prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
+      req->cached_prompt_tokens = static_cast<int>(prefix);
+    } else {
+      llama_memory_seq_rm(mem, req->seq, -1, -1);
+      slot->tokens.clear();
+      req->n_pos = 0;
+    }
   } else {
-    llama_memory_seq_rm(llama_get_memory(loaded.ctx), req->seq, -1, -1);
+    const std::size_t target = pick_fresh_slot();
+    if (target == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
+    auto* slot = &loaded.slots[target];
+    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
     slot->tokens.clear();
+    slot->is_anchor = false;
+    slot->last_used = ++loaded.use_counter;
+    req->slot = slot;
+    req->seq = static_cast<llama_seq_id>(target);
     req->n_pos = 0;
+
+    if (donor != SIZE_MAX) {
+      // Shared-prefix dedup: branch the common prefix off the donor without
+      // disturbing it, so sessions sharing a system prompt + tool schema skip
+      // that prefill entirely. In the unified KV pool a sequence copy shares
+      // cells (no duplicate memory). Attention KV supports partial-range
+      // copies from any donor; hybrid/recurrent state only supports
+      // whole-sequence copies (exact-prefix donors, e.g. anchors).
+      const std::size_t want = std::min(donor_prefix, prompt_tokens.size() - 1);
+      if (!loaded.hybrid && want >= 16) {
+        llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor), req->seq, 0, static_cast<llama_pos>(want));
+        slot->tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(want));
+        req->n_pos = static_cast<int32_t>(want);
+        prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(want));
+        req->cached_prompt_tokens = static_cast<int>(want);
+      } else if (loaded.hybrid && donor_exact && donor_prefix < prompt_tokens.size()) {
+        llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor), req->seq, -1, -1);
+        slot->tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
+        req->n_pos = static_cast<int32_t>(donor_prefix);
+        prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
+        req->cached_prompt_tokens = static_cast<int>(donor_prefix);
+      } else if (loaded.hybrid && !donor_exact) {
+        // Cannot branch mid-stream off hybrid state. Prefill fully, but
+        // snapshot an anchor at the shared boundary so every future session
+        // with this prefix branches instantly.
+        req->anchor_at = static_cast<int32_t>(donor_prefix);
+      }
+    }
   }
 
   // Proactive KV pressure relief: evict idle slots (oldest first) when the
   // resident sessions plus this prompt would overflow the unified pool.
+  // Note: in the unified pool, copied prefixes share cells, so this sum
+  // over-counts shared tokens — a conservative (early) eviction trigger.
   std::size_t resident = 0;
   for (const auto& s : loaded.slots) resident += s.tokens.size();
   const std::size_t incoming = prompt_tokens.size() + static_cast<std::size_t>(output_reserve);
@@ -817,7 +928,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     std::size_t victim = loaded.slots.size();
     uint64_t oldest = UINT64_MAX;
     for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-      if (&loaded.slots[index] == slot || loaded.slots[index].busy || loaded.slots[index].tokens.empty()) continue;
+      if (&loaded.slots[index] == req->slot || loaded.slots[index].busy || loaded.slots[index].tokens.empty()) continue;
       if (loaded.slots[index].last_used < oldest) {
         oldest = loaded.slots[index].last_used;
         victim = index;
@@ -827,12 +938,13 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     llama_memory_seq_rm(llama_get_memory(loaded.ctx), static_cast<llama_seq_id>(victim), -1, -1);
     resident -= loaded.slots[victim].tokens.size();
     loaded.slots[victim].tokens.clear();
+    loaded.slots[victim].is_anchor = false;
     fprintf(stderr, "clap-llama: evicted KV slot %zu to fit incoming prompt\n", victim);
   }
 
   req->prompt_tokens = std::move(prompt_tokens);
   req->sampler = make_sampler(req->params);
-  slot->busy = true;
+  req->slot->busy = true;
   return req;
 }
 
