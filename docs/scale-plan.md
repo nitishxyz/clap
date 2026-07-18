@@ -102,6 +102,19 @@ dashboard; alert threshold. A native fault must never require manual
 ## Tier 2 — Memory economics (users-per-GPU)
 
 ### 5. Shared-prefix KV dedup
+Status: DONE (attention models branch any shared prefix off any slot via
+`llama_memory_seq_cp` — zero-copy in the unified pool; hybrid models get
+prefix anchors: the first full prefill snapshots the shared boundary into an
+empty slot and later sessions whole-copy it. Verified on pod: 6-session
+stress wall 80.4s → 61.7s, 40.5% reuse ratio, one first-turn request
+branched 2k tokens off another session's in-flight prefill).
+
+Hybrid caveat (Qwen3.6/Gated DeltaNet class): same-session continuation
+requires rewinding recurrent state to a checkpoint; llama.cpp only lands
+checkpoints as a session decodes, so turns 1-3 often re-prefill while turns
+4+ hit reliably. Attention models have no such constraint. If it matters
+later, explore llama.cpp checkpoint-frequency tuning.
+
 Org harnesses share one system prompt + tool schema (10-40k tokens) across
 all sessions of a project. Store that prefix KV once (radix/prefix tree over
 token ids), sessions branch from it; new session prefill skips the shared
@@ -202,7 +215,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 5. Config file (T3.10) — carries KV-type/slot policy surfacing (T2.7)
 6. Queue fairness (T1.3) — needs keys for per-client fairness
 7. Prometheus metrics (T3.11)
-8. Shared-prefix dedup (T2.5)
+8. Shared-prefix dedup (T2.5) — DONE
 9. Adaptive capacity + session ctx caps (T2.6)
 10. Session-aware eviction (T2.8)
 11. Multi-GPU split (T4.13)
