@@ -25,7 +25,7 @@ function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: 
   );
 }
 
-export function LoadedModels({ models, now, actions, systemMemoryBytes }: { models: DashboardLoadedModel[]; now: number; actions: ActionState; systemMemoryBytes?: number }) {
+export function LoadedModels({ models, now, actions, systemMemoryBytes, cpuCount }: { models: DashboardLoadedModel[]; now: number; actions: ActionState; systemMemoryBytes?: number; cpuCount?: number }) {
   return (
     <Panel title="loaded models" count={models.length || ""}>
       {models.length ? (
@@ -48,7 +48,7 @@ export function LoadedModels({ models, now, actions, systemMemoryBytes }: { mode
               <Td numeric>
                 {entry.usage ? (
                   <span className="flex items-center justify-end gap-2">
-                    <BoxBar pct={entry.usage.cpuPercent} segments={10} className="w-16" />
+                    <BoxBar pct={cpuCount ? entry.usage.cpuPercent / cpuCount : Math.min(100, entry.usage.cpuPercent)} segments={10} className="w-16" />
                     <span>{`${entry.usage.cpuPercent.toFixed(0)}%`}</span>
                   </span>
                 ) : (

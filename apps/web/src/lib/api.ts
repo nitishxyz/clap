@@ -8,6 +8,9 @@ export type DashboardServer = {
   rssBytes?: number;
   cpuPercent?: number;
   systemMemoryBytes?: number;
+  systemMemoryUsedBytes?: number;
+  systemCpuPercent?: number;
+  cpuCount?: number;
 };
 
 export type DashboardGpu = {

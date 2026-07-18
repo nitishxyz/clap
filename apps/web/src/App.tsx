@@ -51,7 +51,7 @@ export function App() {
         <>
           <Tiles data={data} />
           <UsagePanel data={data} />
-          <LoadedModels models={data.loaded} now={now} actions={actions} systemMemoryBytes={data.server.systemMemoryBytes} />
+          <LoadedModels models={data.loaded} now={now} actions={actions} systemMemoryBytes={data.server.systemMemoryBytes} cpuCount={data.server.cpuCount} />
           <ActiveRequests requests={data.active} now={now} onSelect={setSelectedRequest} />
           <RecentRequests requests={data.requests} onSelect={setSelectedRequest} />
           <Events events={data.events ?? []} />

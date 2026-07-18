@@ -31,70 +31,67 @@ export function BoxBar({ pct, segments = 20, tone, className }: { pct: number; s
   );
 }
 
-function GroupLabel({ children }: { children: ReactNode }) {
-  return <div className="px-3 pt-2 pb-0.5 text-[0.66rem] uppercase tracking-[0.08em] text-muted">{children}</div>;
-}
+// Every row shares this template so all bars start and end on the same
+// columns: fixed label, flexible bar, fixed right-aligned value.
+const ROW = "grid grid-cols-[3.75rem_minmax(0,1fr)_minmax(8rem,auto)] items-center gap-x-3 px-3 py-[3px]";
 
-function UsageRow({ label, pct, value, tone }: { label: string; pct?: number; value: string; tone?: string }) {
+function Row({ label, pct, value, tone }: { label: string; pct?: number; value?: string; tone?: string }) {
+  const na = pct === undefined && value === undefined;
   return (
-    <div className="grid grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-2 px-3 py-1">
-      <span className="truncate text-[0.7rem] uppercase tracking-[0.06em] text-muted">{label}</span>
-      {pct === undefined ? <span className="text-[0.72rem] text-muted">·</span> : <BoxBar pct={pct} tone={tone} />}
-      <span className="min-w-[5.5rem] text-right text-[0.74rem] tabular-nums">{value}</span>
+    <div className={ROW}>
+      <span className="truncate text-[0.68rem] uppercase tracking-[0.06em] text-muted">{label}</span>
+      <BoxBar pct={pct ?? 0} tone={tone} className={pct === undefined ? "opacity-35" : ""} />
+      <span className={`truncate text-right text-[0.72rem] tabular-nums ${na || pct === undefined ? "text-muted" : ""}`}>
+        {value ?? "n/a"}
+      </span>
     </div>
   );
 }
 
-function MiniBar({ label, pct, value, tone }: { label: string; pct?: number; value: string; tone?: string }) {
+function Section({ title, aside, children }: { title: ReactNode; aside?: ReactNode; children: ReactNode }) {
   return (
-    <span className="flex min-w-0 items-center gap-2 text-[0.72rem]">
-      <span className="w-9 shrink-0 uppercase tracking-[0.04em] text-muted">{label}</span>
-      {pct === undefined ? (
-        <span className="min-w-0 flex-1 text-muted">·</span>
-      ) : (
-        <BoxBar pct={pct} segments={12} tone={tone} className="min-w-0 flex-1" />
-      )}
-      <span className="shrink-0 tabular-nums text-muted">{value}</span>
-    </span>
+    <div className="py-1.5">
+      <div className="flex items-baseline justify-between gap-3 px-3 pb-1">
+        <span className="shrink-0 text-[0.66rem] uppercase tracking-[0.08em] text-muted">{title}</span>
+        {aside ? <span className="truncate text-[0.68rem] text-muted">{aside}</span> : null}
+      </div>
+      {children}
+    </div>
   );
 }
 
-function GpuUsageRows({ gpu }: { gpu: DashboardGpu }) {
+function GpuSection({ gpu }: { gpu: DashboardGpu }) {
   const util = gpu.utilizationPercent;
   const used = gpu.memoryUsedBytes;
   const total = gpu.memoryTotalBytes;
   const hasVram = used !== undefined && total !== undefined && total > 0;
   return (
-    <div>
-      <div className="truncate px-3 pt-1 text-[0.74rem]" title={gpu.name}>
-        {gpu.name} <span className="text-muted">({gpu.vendor})</span>
-      </div>
-      {util !== undefined ? <UsageRow label="util" pct={util} value={`${util.toFixed(0)}%`} /> : null}
-      {hasVram ? <UsageRow label="vram" pct={(used / total) * 100} tone="bg-cache" value={`${fmtBytes(used)} / ${fmtBytes(total)}`} /> : null}
-      {util === undefined && !hasVram ? (
-        <div className="px-3 py-1 text-[0.72rem] text-muted">utilization not reported on this platform</div>
-      ) : null}
-    </div>
+    <Section title="gpu" aside={`${gpu.name} (${gpu.vendor})`}>
+      <Row label="util" pct={util} value={util !== undefined ? `${util.toFixed(0)}%` : undefined} />
+      <Row
+        label="vram"
+        pct={hasVram ? (used / total) * 100 : undefined}
+        tone="bg-cache"
+        value={hasVram ? `${fmtBytes(used)} / ${fmtBytes(total)}` : undefined}
+      />
+    </Section>
   );
 }
 
-function WorkerUsage({ entry, systemMemoryBytes, gpuTotalBytes }: { entry: DashboardLoadedModel; systemMemoryBytes?: number; gpuTotalBytes?: number }) {
+function WorkerSection({ entry, systemMemoryBytes, cpuCount, gpuTotalBytes }: { entry: DashboardLoadedModel; systemMemoryBytes?: number; cpuCount?: number; gpuTotalBytes?: number }) {
   const usage = entry.usage;
+  const cpuPct = usage ? (cpuCount ? usage.cpuPercent / cpuCount : Math.min(100, usage.cpuPercent)) : undefined;
   const rssPct = usage && systemMemoryBytes ? (usage.rssBytes / systemMemoryBytes) * 100 : undefined;
-  const gpuPct = entry.gpuMemoryBytes !== undefined && gpuTotalBytes ? (entry.gpuMemoryBytes / gpuTotalBytes) * 100 : undefined;
+  const gpuBytes = entry.gpuMemoryBytes;
+  const gpuPct = gpuBytes !== undefined && gpuTotalBytes ? (gpuBytes / gpuTotalBytes) * 100 : undefined;
   return (
-    <div className="px-3 py-1.5">
-      <div className="truncate text-[0.74rem]" title={entry.localPath}>
-        {entry.id} <span className="text-muted">pid {entry.worker?.pid ?? "-"}</span>
-      </div>
-      <div className="mt-1 grid gap-x-6 gap-y-1 sm:grid-cols-2 xl:grid-cols-3">
-        <MiniBar label="cpu" pct={usage?.cpuPercent} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : "-"} />
-        <MiniBar label="rss" pct={rssPct} value={usage ? fmtBytes(usage.rssBytes) : "-"} />
-        {entry.gpuMemoryBytes !== undefined ? (
-          <MiniBar label="vram" pct={gpuPct} tone="bg-cache" value={fmtBytes(entry.gpuMemoryBytes)} />
-        ) : null}
-      </div>
-    </div>
+    <Section title="worker" aside={<span title={entry.localPath}>{entry.id} · pid {entry.worker?.pid ?? "-"}</span>}>
+      <Row label="cpu" pct={cpuPct} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : undefined} />
+      <Row label="mem" pct={rssPct} value={usage ? fmtBytes(usage.rssBytes) : undefined} />
+      {gpuBytes !== undefined ? (
+        <Row label="vram" pct={gpuPct} tone="bg-cache" value={fmtBytes(gpuBytes)} />
+      ) : null}
+    </Section>
   );
 }
 
@@ -102,48 +99,68 @@ export function UsagePanel({ data }: { data: DashboardData }) {
   const server = data.server;
   const gpus = data.gpus ?? [];
   const queue = data.queue;
-  const memPct = server.rssBytes !== undefined && server.systemMemoryBytes ? (server.rssBytes / server.systemMemoryBytes) * 100 : undefined;
+  const memUsed = server.systemMemoryUsedBytes;
+  const memTotal = server.systemMemoryBytes;
+  const memPct = memUsed !== undefined && memTotal ? (memUsed / memTotal) * 100 : undefined;
+  const sysCpu = server.systemCpuPercent;
   const gpuTotal = gpus[0]?.memoryTotalBytes;
   const workers = data.loaded.filter((entry) => entry.usage || entry.gpuMemoryBytes !== undefined);
+  const systemAside = [
+    server.rssBytes !== undefined ? `server rss ${fmtBytes(server.rssBytes)}` : null,
+    server.cpuCount ? `${server.cpuCount} cores` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <Panel title="usage" count={queue ? `${queue.inflight}/${queue.maxInflight} inflight` : ""}>
-      <div className="grid lg:grid-cols-2 lg:gap-x-4">
-        <div className="pb-2">
-          <GroupLabel>server</GroupLabel>
-          <UsageRow label="cpu" pct={server.cpuPercent} value={server.cpuPercent !== undefined ? `${server.cpuPercent.toFixed(0)}%` : "-"} />
-          <UsageRow label="mem" pct={memPct} value={`${fmtBytes(server.rssBytes)} / ${fmtBytes(server.systemMemoryBytes)}`} />
-          {queue ? (
-            <>
-              <GroupLabel>queue</GroupLabel>
-              <UsageRow
-                label="inflight"
-                pct={queue.maxInflight ? (queue.inflight / queue.maxInflight) * 100 : 0}
-                tone="bg-accent"
-                value={`${queue.inflight} / ${queue.maxInflight}`}
-              />
-              <UsageRow
-                label="queued"
-                pct={queue.queueDepth ? (queue.queued / queue.queueDepth) * 100 : 0}
-                tone={queue.queued ? "bg-warn" : "bg-accent"}
-                value={`${queue.queued} / ${queue.queueDepth}`}
-              />
-            </>
-          ) : null}
+      <div className="grid divide-y divide-soft-border lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+        <div className="pb-1">
+          <Section title="system" aside={systemAside}>
+            <Row label="cpu" pct={sysCpu} value={sysCpu !== undefined ? `${sysCpu.toFixed(0)}%` : undefined} />
+            <Row
+              label="mem"
+              pct={memPct}
+              value={memUsed !== undefined && memTotal ? `${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}` : undefined}
+            />
+          </Section>
+          <Section title="queue" aside={queue ? `${queue.inflight + queue.queued} in system` : undefined}>
+            <Row
+              label="inflight"
+              pct={queue && queue.maxInflight ? (queue.inflight / queue.maxInflight) * 100 : undefined}
+              tone="bg-accent"
+              value={queue ? `${queue.inflight} / ${queue.maxInflight}` : undefined}
+            />
+            <Row
+              label="waiting"
+              pct={queue && queue.queueDepth ? (queue.queued / queue.queueDepth) * 100 : undefined}
+              tone={queue?.queued ? "bg-warn" : "bg-accent"}
+              value={queue ? `${queue.queued} / ${queue.queueDepth}` : undefined}
+            />
+          </Section>
         </div>
-        <div className="pb-2 lg:border-l lg:border-soft-border">
-          <GroupLabel>gpu</GroupLabel>
+        <div className="pb-1">
           {gpus.length ? (
-            gpus.map((gpu, index) => <GpuUsageRows key={`${gpu.vendor}-${gpu.name}-${index}`} gpu={gpu} />)
+            gpus.map((gpu, index) => <GpuSection key={`${gpu.vendor}-${gpu.name}-${index}`} gpu={gpu} />)
           ) : (
-            <div className="px-3 py-1.5 text-[0.74rem] text-muted">no gpu telemetry</div>
+            <Section title="gpu" aside="no telemetry">
+              <Row label="util" />
+              <Row label="vram" />
+            </Section>
           )}
-          {workers.length ? (
-            <>
-              <GroupLabel>workers</GroupLabel>
-              {workers.map((entry) => (
-                <WorkerUsage key={entry.key} entry={entry} systemMemoryBytes={server.systemMemoryBytes} gpuTotalBytes={gpuTotal} />
-              ))}
-            </>
+          {workers.map((entry) => (
+            <WorkerSection
+              key={entry.key}
+              entry={entry}
+              systemMemoryBytes={memTotal}
+              cpuCount={server.cpuCount}
+              gpuTotalBytes={gpuTotal}
+            />
+          ))}
+          {workers.length === 0 ? (
+            <Section title="worker" aside="none resident">
+              <Row label="cpu" />
+              <Row label="mem" />
+            </Section>
           ) : null}
         </div>
       </div>
