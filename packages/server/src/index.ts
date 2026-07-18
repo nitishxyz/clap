@@ -329,7 +329,7 @@ export function createServer(
   // updates without polling. Clients reconnect on drop (standard SSE).
   app.get("/clap/v1/dashboard/stream", (c) => {
     const intervalMs = Math.max(500, Math.min(10000, Number(c.req.query("interval") ?? 2000) || 2000));
-    return streamSSE(c, async (stream) => {
+    return strictStreamSSE(c, async (stream) => {
       let open = true;
       stream.onAbort(() => {
         open = false;
@@ -1137,9 +1137,67 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
   }
 }
 
+type StrictSseStream = {
+  aborted: boolean;
+  writeSSE(message: { data: string; event?: string; id?: string; retry?: number }): Promise<void>;
+  onAbort(listener: () => void | Promise<void>): void;
+};
+
+function strictStreamSSE(c: Parameters<typeof streamSSE>[0], callback: (stream: StrictSseStream) => Promise<void>) {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const reader = readable.getReader();
+  const encoder = new TextEncoder();
+  const abortSubscribers: Array<() => void | Promise<void>> = [];
+  const stream: StrictSseStream = {
+    aborted: false,
+    async writeSSE(message) {
+      const data = message.data.split(/\r\n|\r|\n/).map((line) => `data: ${line}`).join("\n");
+      const payload = [
+        message.event && `event: ${message.event}`,
+        data,
+        message.id && `id: ${message.id}`,
+        message.retry && `retry: ${message.retry}`,
+      ].filter(Boolean).join("\n") + "\n\n";
+      await writer.write(encoder.encode(payload));
+    },
+    onAbort(listener) {
+      abortSubscribers.push(listener);
+    },
+  };
+  const abort = () => {
+    if (stream.aborted) return;
+    stream.aborted = true;
+    for (const subscriber of abortSubscribers) void subscriber();
+  };
+  const responseReadable = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    async cancel() {
+      abort();
+      await reader.cancel().catch(() => undefined);
+    },
+  });
+  c.header("Transfer-Encoding", "chunked");
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+  void (async () => {
+    try {
+      await callback(stream);
+    } finally {
+      await writer.close().catch(() => undefined);
+    }
+  })();
+  return c.newResponse(responseReadable);
+}
+
 function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void, handle?: RequestHandle) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
-  return streamSSE(c, async (stream) => {
+  return strictStreamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();
     const aborter = new AbortController();
@@ -1148,6 +1206,11 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
     else c.req.raw.signal.addEventListener("abort", () => aborter.abort(), { once: true });
     let wroteRole = false;
     let writeQueue = Promise.resolve();
+    const enqueueWrite = (write: () => Promise<void>) => {
+      const queued = writeQueue.then(write);
+      writeQueue = queued;
+      void queued.catch(() => aborter.abort());
+    };
     const ensureRole = async () => {
       if (wroteRole) return;
       wroteRole = true;
@@ -1161,10 +1224,10 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
     await ensureRole();
     let sawOutput = false;
     const heartbeat = setInterval(() => {
-      if (sawOutput || aborter.signal.aborted) return;
-      writeQueue = writeQueue.then(async () => {
+      if (aborter.signal.aborted) return;
+      enqueueWrite(async () => {
         await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {})) });
-      }).catch(() => undefined);
+      });
     }, 5_000);
     const writeDelta = async (delta: StreamDelta) => {
       await ensureRole();
@@ -1193,7 +1256,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         sawOutput = true;
         const deltas = filter.feed(token);
         if (!deltas.length) return;
-        writeQueue = writeQueue.then(async () => {
+        enqueueWrite(async () => {
           for (const delta of deltas) await writeDelta(delta);
         });
       }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
@@ -1253,8 +1316,12 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
     } catch (error) {
       entry.worker = worker.info();
       await writeQueue.catch(() => undefined);
+      if (aborter.signal.aborted) {
+        handle?.finish({ status: "cancelled", finishReason: "cancel" });
+        return;
+      }
       handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
-      await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) });
+      await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) }).catch(() => undefined);
     } finally {
       clearInterval(heartbeat);
       onDone?.();

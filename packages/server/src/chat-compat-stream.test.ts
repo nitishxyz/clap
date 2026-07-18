@@ -168,6 +168,47 @@ describe("malformed tool JSON repair", () => {
     expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: "." });
   });
 
+  test("recovers gemma-4 tool_calls lists with misplaced arguments", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit", tools: [
+      { type: "function" as const, function: { name: "glob", parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" } } } } },
+      { type: "function" as const, function: { name: "ls", parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" } } } } },
+    ] };
+    const raw = '<|tool_call>call:tool_calls:[{"arguments":{"path":"."},"name":"glob","pattern":"**/*.md"},{"arguments":{"path":"docs"},"name":"ls","pattern":"**/*"}]<tool_call|>';
+    const parsed = parseAssistantOutput(raw, gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls).toHaveLength(2);
+    expect(parsed.toolCalls?.map((call) => call.function.name)).toEqual(["glob", "ls"]);
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: ".", pattern: "**/*.md" });
+    expect(JSON.parse(parsed.toolCalls?.[1]?.function.arguments ?? "{}")).toEqual({ path: "docs", pattern: "**/*" });
+  });
+
+  test("recovers gemma-4 tool_calls lists with a trailing unmatched brace", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit", tools: [{ type: "function" as const, function: { name: "glob", parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" } } } } }] };
+    const raw = '<|tool_call>call:tool_calls:[{"arguments":{"path":"."},"name":"glob","pattern":"docs/**"},{"arguments":{"path":"."},"name":"glob","pattern":"**/*.md"},{"arguments":{"path":"."},"name":"glob","pattern":"**/*.txt"}]}<tool_call|>';
+    const parsed = parseAssistantOutput(raw, gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls).toHaveLength(3);
+    expect(parsed.toolCalls?.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { path: ".", pattern: "docs/**" },
+      { path: ".", pattern: "**/*.md" },
+      { path: ".", pattern: "**/*.txt" },
+    ]);
+  });
+
+  test("repairs gemma-4 tool_calls lists with quoted-key colons", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit", tools: [{ type: "function" as const, function: { name: "glob", parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" } } } } }] };
+    const raw = '<|tool_call>call:tool_calls:[{args:{path:"."},name:"glob","pattern:"**/*.md""}]<tool_call|>';
+    const parsed = parseAssistantOutput(raw, gemmaRequest);
+    expect(parsed.finishReason).toBe("tool_calls");
+    expect(parsed.toolCalls?.[0]?.function.name).toBe("glob");
+    expect(JSON.parse(parsed.toolCalls?.[0]?.function.arguments ?? "{}")).toEqual({ path: ".", pattern: "**/*.md" });
+  });
+
+  test("fails explicitly instead of returning an empty malformed tool response", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-12B-it-8bit" };
+    expect(() => parseAssistantOutput("<|tool_call>unrecoverable<tool_call|>", gemmaRequest)).toThrow("could not parse");
+  });
+
   test("bare closing channel markers return following tool JSON to content", () => {
     const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit", tools: [{ type: "function" as const, function: { name: "ls", parameters: { type: "object", properties: { path: { type: "string" } } } } }] };
     const raw = '<|channel>thought\nI should list the files.<channel|>{"tool_calls":[{"name":"ls","arguments":{"path":"/tmp"}}]}';

@@ -89,6 +89,9 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
   if (toolCalls.length) {
     return { content: null, reasoning: normalized.reasoning, toolCalls, finishReason: "tool_calls" };
   }
+  if (context.toolMode && hasExplicitParserMarker(input) && !normalized.content.trim()) {
+    throw new Error("model emitted a tool call that Clap could not parse; retry the request");
+  }
 
   const formatted = formatStructuredContent(normalized.content, request);
   return { content: formatted, reasoning: normalized.reasoning, finishReason: "stop" };
@@ -534,6 +537,16 @@ function parseMistralToolCalls(text: string): ChatToolCall[] {
 
 function parseFunctionGemmaCalls(text: string): ChatToolCall[] {
   const calls: ChatToolCall[] = [];
+  const listMarker = text.match(/call:tool_calls:\s*\[/);
+  if (listMarker?.index !== undefined) {
+    const start = text.indexOf("[", listMarker.index);
+    const close = text.indexOf("<tool_call|>", start);
+    const body = text.slice(start, close >= 0 ? close : undefined);
+    const parsed = parseJsonLike(body) ?? parseLooseArgs(body);
+    if (Array.isArray(parsed)) {
+      return parsed.map((call, index) => normalizeToolCall(call, index)).filter((call): call is ChatToolCall => Boolean(call));
+    }
+  }
   const pattern = /call:([\w.-]+)\s*(\{[\s\S]*?\})/g;
   for (const match of text.matchAll(pattern)) {
     const name = match[1];
@@ -609,6 +622,8 @@ function parseLooseArgs(text: string): unknown {
   const normalized = text
     .trim()
     .replace(/<\|'\|>/g, '"')
+    .replace(/"([A-Za-z_$][\w$.-]*):"([^"]*)""(?=\s*[,}\]])/g, '"$1":"$2"')
+    .replace(/"([A-Za-z_$][\w$.-]*):"([^"]*)"/g, '"$1":"$2"')
     .replace(/("[^"]*"|\d|true|false|null)\s+([A-Za-z_$][\w$.-]*\s*:)/g, '$1,$2')
     .replace(/([{,]\s*)([A-Za-z_$][\w$.-]*)(\s*:)/g, '$1"$2"$3')
     .replace(/("[^"]*"|\d|true|false|null)\s+"/g, '$1,"')
@@ -697,7 +712,13 @@ function normalizeToolCall(value: unknown, index: number): ChatToolCall | undefi
     : typeof record.tool_name === "string" ? record.tool_name
     : undefined;
   if (!name) return undefined;
-  const args = fn.arguments ?? record.arguments ?? fn.parameters ?? record.parameters ?? {};
+  let args = fn.arguments ?? record.arguments ?? fn.args ?? record.args ?? fn.parameters ?? record.parameters ?? {};
+  if (fn === record && args && typeof args === "object" && !Array.isArray(args)) {
+    const extras = Object.fromEntries(Object.entries(record).filter(([key]) => ![
+      "id", "type", "name", "tool_name", "function", "arguments", "args", "parameters",
+    ].includes(key)));
+    if (Object.keys(extras).length) args = { ...(args as Record<string, unknown>), ...extras };
+  }
   const parsedArgs = typeof args === "string" ? parseJsonLike(args) ?? args : args;
   return {
     id: typeof record.id === "string" ? record.id : `call_${index}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
