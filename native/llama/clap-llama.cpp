@@ -281,6 +281,21 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   // agent prompts fail to find a memory slot even when the cache is mostly
   // empty. A unified buffer lets any session use the full context.
   ctx_params.kv_unified = env_int("CLAP_LLAMA_KV_UNIFIED", 1) != 0;
+  // Opt-in KV cache quantization (CLAP_LLAMA_KV_TYPE=q8_0|q4_0|f16). Halves
+  // (q8_0) or quarters (q4_0) KV memory per token at a small quality cost;
+  // default stays f16 until enabled by policy.
+  if (const char* kv_type = std::getenv("CLAP_LLAMA_KV_TYPE"); kv_type && *kv_type) {
+    const std::string requested(kv_type);
+    if (requested == "q8_0") {
+      ctx_params.type_k = GGML_TYPE_Q8_0;
+      ctx_params.type_v = GGML_TYPE_Q8_0;
+    } else if (requested == "q4_0") {
+      ctx_params.type_k = GGML_TYPE_Q4_0;
+      ctx_params.type_v = GGML_TYPE_Q4_0;
+    } else if (requested != "f16") {
+      fprintf(stderr, "clap-llama: unknown CLAP_LLAMA_KV_TYPE '%s'; using f16\n", kv_type);
+    }
+  }
   ctx_params.no_perf = true;
   // KV cache allocation grows with n_ctx and can exceed device memory for
   // long-context models. Retry with halved context until it fits (unless the
