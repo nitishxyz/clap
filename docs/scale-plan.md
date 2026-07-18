@@ -226,6 +226,16 @@ rig), per-key usage series, structured JSON logs.
 - Prometheus `/metrics`: queue depth, TTFT/TPS percentiles, KV occupancy,
   evictions, VRAM, crash counts, per-key usage
 - Structured JSON logs with request ids
+
+### 11b. Dashboard live refresh (in progress)
+- GPU usage sampling server-side: nvidia-smi on NVIDIA Linux (util %, VRAM
+  used/total, per-process memory), macOS Apple Silicon best-effort; exposed
+  in the dashboard payload next to CPU/RSS
+- `GET /clap/v1/dashboard/stream`: SSE pushing the dashboard payload on an
+  interval so the UI feels live without polling
+- UI refresh (frontend agent): boxy segmented progress bars for CPU / GPU /
+  VRAM / memory / KV usage, live-updating tiles over SSE, per-request phase
+  indicators
 - Dashboard reads the same series (it is the first consumer, not a fork)
 
 ### 12. Model lifecycle policy

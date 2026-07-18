@@ -32,6 +32,22 @@ describe("clap server", () => {
     expect(Array.isArray(body.requests)).toBe(true);
     expect(Array.isArray(body.loaded)).toBe(true);
     expect(Array.isArray(body.models)).toBe(true);
+    expect(Array.isArray(body.gpus)).toBe(true);
+  });
+
+  test("dashboard SSE stream emits a payload and stops on abort", async () => {
+    const app = createServer();
+    const controller = new AbortController();
+    const response = await app.request("/clap/v1/dashboard/stream?interval=500", { signal: controller.signal });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader();
+    const { value } = await reader.read();
+    const text = new TextDecoder().decode(value);
+    expect(text).toContain("event: dashboard");
+    expect(text).toContain('"totals"');
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
   });
 
   test("serves the embedded dashboard ui", async () => {

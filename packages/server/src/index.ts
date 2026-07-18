@@ -43,6 +43,7 @@ import { limiterFromEnv, QueueFullError } from "./limits";
 import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
+import { sampleGpuUsage } from "./gpu-usage";
 import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
 import { webAsset } from "./web-assets";
 
@@ -252,13 +253,16 @@ export function createServer(
 
   app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({ models: lifecycle.list() })));
 
-  app.get("/clap/v1/dashboard", async (c) => {
+  const dashboardPayload = async () => {
     const loaded = lifecycle.list();
     const workerPids = loaded
       .map((entry) => entry.worker?.pid)
       .filter((pid): pid is number => typeof pid === "number");
-    const usage = await sampleProcessUsage([process.pid, ...workerPids]);
-    return c.json({
+    const [usage, gpus] = await Promise.all([
+      sampleProcessUsage([process.pid, ...workerPids]),
+      sampleGpuUsage(),
+    ]);
+    return {
       server: {
         version: clapVersion,
         uptimeMs: Date.now() - startedAt,
@@ -270,6 +274,7 @@ export function createServer(
         cpuPercent: usage.get(process.pid)?.cpuPercent,
         systemMemoryBytes: systemMemoryBytes(),
       },
+      gpus,
       totals: metrics.totals,
       queue: limiter.stats(),
       active: metrics.activeRequests(),
@@ -278,9 +283,32 @@ export function createServer(
       loaded: loaded.map((entry) => ({
         ...entry,
         usage: entry.worker?.pid ? usage.get(entry.worker.pid) : undefined,
+        gpuMemoryBytes: entry.worker?.pid ? gpus[0]?.processes?.find((proc) => proc.pid === entry.worker?.pid)?.memoryBytes : undefined,
       })),
       models: await listModelsAsync(),
       downloads: [...downloads.values()],
+    };
+  };
+
+  app.get("/clap/v1/dashboard", async (c) => c.json(await dashboardPayload()));
+
+  // Live dashboard feed: pushes the full payload every interval so the UI
+  // updates without polling. Clients reconnect on drop (standard SSE).
+  app.get("/clap/v1/dashboard/stream", (c) => {
+    const intervalMs = Math.max(500, Math.min(10000, Number(c.req.query("interval") ?? 2000) || 2000));
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      stream.onAbort(() => {
+        open = false;
+      });
+      while (open) {
+        try {
+          await stream.writeSSE({ event: "dashboard", data: JSON.stringify(await dashboardPayload()) });
+        } catch {
+          break;
+        }
+        await Bun.sleep(intervalMs);
+      }
     });
   });
 
