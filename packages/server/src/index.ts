@@ -39,6 +39,7 @@ import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKe
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { applyConfigToEnv, loadClapConfig, workerEnvForModel } from "./config";
 export { configPaths, loadClapConfig } from "./config";
+import { limiterFromEnv, QueueFullError } from "./limits";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
@@ -132,6 +133,23 @@ export function createServer(
   // clients must present a valid Bearer key once any active key exists.
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
+  const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
+  // Fairness identity: API key id > remote address > "local".
+  const clientId = (c: { req: { header: (name: string) => string | undefined; raw: Request }; env?: unknown }): string => {
+    const token = bearerToken(c.req.header("authorization")) ?? c.req.header("x-api-key");
+    if (token) {
+      const record = apiKeys.verify(token);
+      if (record) return record.id;
+    }
+    try {
+      const env = c.env as { requestIP?: (request: Request) => { address?: string } | null } | undefined;
+      const address = env?.requestIP?.(c.req.raw)?.address;
+      if (address && !isLoopbackAddress(address)) return address;
+    } catch {
+      // fall through
+    }
+    return "local";
+  };
   app.use("*", async (c, next) => {
     if (c.req.path === "/clap/v1/health") return next();
     const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1"
@@ -213,6 +231,7 @@ export function createServer(
         systemMemoryBytes: systemMemoryBytes(),
       },
       totals: metrics.totals,
+      queue: limiter.stats(),
       active: metrics.activeRequests(),
       requests: metrics.recent(80),
       events: metrics.events(50),
@@ -421,24 +440,66 @@ export function createServer(
     }
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
-      if (routedRequest.stream) {
-        const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded), metrics.start(request.model, "/v1/chat/completions", true));
-      }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(request.model, "/v1/chat/completions", false)));
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, request.model);
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
-      if (routedRequest.stream) {
-        const loaded = lifecycle.beginUsage(resolved.model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => lifecycle.finishUsage(loaded), metrics.start(request.model, "/v1/chat/completions", true));
-      }
-      return lifecycle.withUsage(resolved.model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(request.model, "/v1/chat/completions", false)));
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, request.model);
     }
 
     return c.json(ErrorResponseSchema.parse({
       error: { message: `Model ${request.model} is not cached as a GGUF file or MLX directory. Run: clap pull ${request.model}, or pass a local .gguf file / MLX directory.`, type: "model_error", code: "not_cached" },
     }), 404);
   });
+
+  // Admission gate shared by both backends: bounded in-flight + fair queue.
+  // Saturation answers 429 + Retry-After before any model work happens.
+  function forwardedHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> {
+    // Internal delegation (Responses/Ollama -> chat completions) must carry
+    // the caller's credentials so auth and per-key fairness see the real
+    // client instead of an anonymous embedded request.
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    const authorization = c.req.header("authorization");
+    if (authorization) headers.authorization = authorization;
+    const apiKey = c.req.header("x-api-key");
+    if (apiKey) headers["x-api-key"] = apiKey;
+    return headers;
+  }
+
+  async function dispatchWithLimit(
+    c: Parameters<typeof streamSSE>[0],
+    model: ResolvedModel,
+    routedRequest: ChatCompletionRequest,
+    templateInfo: ParserTemplateInfo | undefined,
+    requestedModel: string,
+  ) {
+    let release: () => void;
+    try {
+      release = await limiter.acquire(clientId(c), c.req.raw.signal);
+    } catch (error) {
+      if (error instanceof QueueFullError) {
+        c.header("Retry-After", String(error.retryAfterSeconds));
+        return c.json(ErrorResponseSchema.parse({
+          error: { message: error.message, type: "rate_limit_error", code: "server_overloaded" },
+        }), 429);
+      }
+      throw error;
+    }
+    try {
+      if (routedRequest.stream) {
+        const loaded = lifecycle.beginUsage(model);
+        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
+          lifecycle.finishUsage(loaded);
+          release();
+        }, metrics.start(requestedModel, "/v1/chat/completions", true));
+      }
+      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(requestedModel, "/v1/chat/completions", false)));
+      release();
+      return response;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
 
   app.post("/v1/responses", async (c) => {
     const request = ResponseRequestSchema.parse(await c.req.json());
@@ -457,7 +518,7 @@ export function createServer(
     }
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: forwardedHeaders(c),
       body: JSON.stringify({ ...chatRequest, stream: false }),
     });
     if (!response.ok) return response;
@@ -524,7 +585,7 @@ export function createServer(
     const stream = request.stream !== false;
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: forwardedHeaders(c),
       body: JSON.stringify({
         model: request.model,
         messages: request.messages,
@@ -554,7 +615,7 @@ export function createServer(
     ];
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: forwardedHeaders(c),
       body: JSON.stringify({
         model: request.model,
         messages,

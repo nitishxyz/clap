@@ -162,6 +162,44 @@ describe("clap server", () => {
     }
   });
 
+  test("saturated queue answers 429 with Retry-After before model work", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const previousInflight = process.env.CLAP_MAX_INFLIGHT;
+    const previousDepth = process.env.CLAP_QUEUE_DEPTH;
+    const dir = await mkdtemp(join(tmpdir(), "clap-limiter-test-"));
+    const modelPath = join(dir, "limits.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(Array.from({ length: 60 }, () => "x"));
+      process.env.CLAP_MAX_INFLIGHT = "1";
+      process.env.CLAP_QUEUE_DEPTH = "1";
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const fire = () => app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+      const [r1, r2, r3] = await Promise.all([fire(), fire(), fire()]);
+      const statuses = [r1.status, r2.status, r3.status].sort();
+      expect(statuses).toEqual([200, 200, 429]);
+
+      const overloaded = [r1, r2, r3].find((response) => response.status === 429);
+      expect(overloaded?.headers.get("retry-after")).toMatch(/^\d+$/);
+      const body = await overloaded?.json() as { error: { code: string; type: string } };
+      expect(body.error.code).toBe("server_overloaded");
+      expect(body.error.type).toBe("rate_limit_error");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      restoreEnv("CLAP_MAX_INFLIGHT", previousInflight);
+      restoreEnv("CLAP_QUEUE_DEPTH", previousDepth);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("model remove endpoint 404s for unknown models", async () => {
     const response = await createServer().request("/clap/v1/models/remove", {
       method: "POST",

@@ -84,6 +84,16 @@ and pool capacity. Reject with a structured 400 (includes actual numbers) or
 trim per policy. No more mid-ingest failures for oversized prompts.
 
 ### 3. Queue fairness + backpressure
+Status: DONE (server-wide FairLimiter gates every inference dispatch:
+`max_inflight` slots + a bounded waiting queue with per-client fair pick —
+fewest-inflight client wins, FIFO within a client. Client identity: API key
+id > remote address > local. Saturation answers 429 `server_overloaded` +
+`Retry-After` before any model work; queued waiters drop on client abort.
+Config `[limits] max_inflight / queue_depth` or CLAP_MAX_INFLIGHT /
+CLAP_QUEUE_DEPTH (defaults 16/64); queue stats in the dashboard payload;
+Responses/Ollama delegation forwards auth headers so fairness sees the real
+client).
+
 Bounded per-model queue with per-client (API key) fair scheduling. When
 saturated: 429 + `Retry-After`. Queue depth and wait time exposed in metrics
 and dashboard.
@@ -230,7 +240,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 3. Watchdog (T1.4) — DONE
 4. API keys (T3.9) — DONE (rate limits/quotas ride on T1.3)
 5. Config file (T3.10) — DONE (read path; write API + dashboard panel pending)
-6. Queue fairness (T1.3) — needs keys for per-client fairness
+6. Queue fairness (T1.3) — DONE
 7. Prometheus metrics (T3.11)
 8. Shared-prefix dedup (T2.5) — DONE
 9. Adaptive capacity + session ctx caps (T2.6)

@@ -27,6 +27,10 @@ export const ClapConfigSchema = z.object({
   auth: z.object({
     require_api_key: z.boolean().optional(),
   }).partial().default({}),
+  limits: z.object({
+    max_inflight: z.number().int().positive().optional(),
+    queue_depth: z.number().int().positive().optional(),
+  }).partial().default({}),
   llama: LlamaSectionSchema.default({}),
   models: z.record(z.string(), LlamaSectionSchema).default({}),
 });
