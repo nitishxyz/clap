@@ -76,6 +76,32 @@ export function createServer(
     }
     return undefined;
   };
+  // Warm-on-boot: models marked pinned (or given keep_alive) in config load
+  // shortly after startup so the first user request never pays a cold load.
+  // Deferred so server construction stays synchronous and tests unaffected.
+  const pinnedModels = Object.entries(config.models)
+    .filter(([, section]) => section.pinned || section.keep_alive)
+    .map(([modelId, section]) => ({ modelId, keepAlive: section.pinned ? "always" : section.keep_alive }));
+  if (pinnedModels.length) {
+    setTimeout(async () => {
+      for (const { modelId, keepAlive } of pinnedModels) {
+        try {
+          const resolved = resolveAvailableModel(modelId);
+          if ("response" in resolved) {
+            metrics.event("error", `warm-on-boot skipped: ${modelId} is not cached locally`, { model: modelId });
+            continue;
+          }
+          await assertResidentModelPath(resolved.model);
+          const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend, resolved.model.modelPath ?? resolved.model.input);
+          const info = await worker.load();
+          const model = lifecycle.load(resolved.model, { keepAlive, worker: info });
+          metrics.event("load", `${model.id} warmed on boot (keep-alive ${model.keepAlive})`, { model: model.id });
+        } catch (error) {
+          metrics.event("error", `warm-on-boot failed for ${modelId}: ${error instanceof Error ? error.message : error}`, { model: modelId });
+        }
+      }
+    }, 50);
+  }
   metrics.event("server", `clap server started (v${clapVersion})`);
   lifecycle.removeListener = (entry, reason) => {
     if (reason === "cleanup") return;

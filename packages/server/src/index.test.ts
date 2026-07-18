@@ -62,6 +62,39 @@ describe("clap server", () => {
     expect([301, 302]).toContain(redirect.status);
   });
 
+  test("warm-on-boot loads pinned models from config", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const home = await mkdtemp(join(tmpdir(), "clap-warm-boot-test-"));
+    const dir = await mkdtemp(join(tmpdir(), "clap-warm-boot-model-"));
+    const modelPath = join(dir, "pinned.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = home;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      await writeFile(modelPath, "gguf bytes");
+      await writeFile(join(home, "clap.toml"), [
+        `[models.${JSON.stringify(modelPath)}]`,
+        "pinned = true",
+      ].join("\n"));
+
+      const app = createServer();
+      // warm-on-boot runs on a deferred timer
+      await Bun.sleep(300);
+      const loaded = await app.request("/clap/v1/runtime/models");
+      const body = await loaded.json() as { models: Array<{ id: string; pinned: boolean; keepAlive: string; worker: { state: string } }> };
+      const entry = body.models.find((model) => model.id === modelPath);
+      expect(entry).toBeDefined();
+      expect(entry?.pinned).toBe(true);
+      expect(entry?.keepAlive).toBe("always");
+      expect(entry?.worker.state).toBe("resident");
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      await rm(home, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("PATCH /clap/v1/config writes valid TOML, round-trips, and live-applies auth", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;

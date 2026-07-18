@@ -17,6 +17,9 @@ const LlamaSectionSchema = z.object({
   ubatch: z.number().int().positive().optional(),
   gpu_layers: z.number().int().nonnegative().optional(),
   kv_type: KvTypeSchema.optional(),
+  // Lifecycle policy (per-model sections; ignored in [llama] globals)
+  pinned: z.boolean().optional(),
+  keep_alive: z.string().regex(/^(always|\d+(ms|s|m|h|d))$/).optional(),
 }).partial();
 
 export const ClapConfigSchema = z.object({

@@ -239,6 +239,12 @@ rig), per-key usage series, structured JSON logs.
 - Dashboard reads the same series (it is the first consumer, not a fork)
 
 ### 12. Model lifecycle policy
+Status: PARTIAL — pin/warm-on-boot shipped: `[models."owner/name"]`
+`pinned = true` (keep-alive `always`) or `keep_alive = "1h"` in clap.toml
+loads the model shortly after server start so the first request never pays
+a cold load; failures surface as dashboard events. Remaining: per-model
+VRAM budgets and multi-model admission control (GPU rig).
+
 Pin models resident, warm on boot, per-model VRAM budgets, admission control
 when multiple models share a GPU. Today's keep-alive becomes one policy among
 several.
