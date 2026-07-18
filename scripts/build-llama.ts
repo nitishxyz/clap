@@ -96,6 +96,12 @@ if (process.platform === "linux") {
       "-lcudart", "-lcublas", "-lcublasLt", "-lcuda",
       `-Wl,-rpath,${join(cudaHome, "lib64")}`,
     );
+    // llama.cpp auto-enables NCCL when the library is installed (common on
+    // GPU cloud images); link it so ggml-cuda's references resolve.
+    const ldconfig = Bun.spawnSync(["ldconfig", "-p"]);
+    if (ldconfig.success && ldconfig.stdout.toString().includes("libnccl.so")) {
+      compile.push("-lnccl");
+    }
   }
   compile.push("-lpthread", "-ldl", "-lm", "-fopenmp");
 }
