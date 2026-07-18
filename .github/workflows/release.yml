@@ -149,3 +149,58 @@ jobs:
           files: |
             dist/clap-${{ github.ref_name }}-linux-x64.tar.gz
             dist/clap-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+
+  build-linux-x64-cuda-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install CUDA toolkit
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 libcublas-dev-12-8 cuda-profiler-api-12-8
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
+      - name: Cache vendored llama.cpp CUDA build
+        id: llama-cache-cuda
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/llama.cpp
+          key: llama-cpp-cuda-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build CUDA llama worker
+        env:
+          CUDA_HOME: /usr/local/cuda
+          CLAP_CUDA_ARCHS: "80;86;89;90;100;120"
+        run: |
+          bun run runtime:llama:vendor
+          bun run runtime:llama:build
+
+      - name: Save llama.cpp CUDA cache
+        if: always() && steps.llama-cache-cuda.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/llama.cpp
+          key: ${{ steps.llama-cache-cuda.outputs.cache-primary-key }}
+
+      - name: Package CUDA worker archive
+        run: |
+          mkdir -p dist
+          tar -czf dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz -C libexec clap-llama
+          cd dist
+          sha256sum clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz > clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz
+            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256

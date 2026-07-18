@@ -41,6 +41,8 @@ const wantCuda = process.platform === "linux"
   && (existsSync(join(cudaHome, "bin", "nvcc")) || Bun.which("nvcc") !== null);
 if (wantCuda) {
   configure.push("-DGGML_CUDA=ON");
+  const cudaArchs = process.env.CLAP_CUDA_ARCHS;
+  if (cudaArchs) configure.push(`-DCMAKE_CUDA_ARCHITECTURES=${cudaArchs}`);
   console.log(`CUDA toolkit detected (${cudaHome}); building GPU-enabled worker`);
 } else if (process.platform === "linux") {
   console.log("no CUDA toolkit detected; building CPU-only worker (set CUDA_HOME if nvcc is elsewhere)");
