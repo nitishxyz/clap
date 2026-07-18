@@ -790,6 +790,18 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
       ". Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history."
     );
   }
+  // Per-session context cap: bounds one session's share of the unified KV
+  // pool so a single conversation cannot promise itself the full window on a
+  // box shared by many sessions. Admin policy, not a physical limit.
+  const int32_t session_cap = env_int("CLAP_LLAMA_MAX_SESSION_CTX", 0);
+  if (session_cap > 0 && static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= session_cap) {
+    throw RequestError("context_length_exceeded",
+      "prompt exceeds the per-session context cap; prompt tokens=" + std::to_string(prompt_tokens.size()) +
+      ", max_session_ctx=" + std::to_string(session_cap) +
+      ", reserved output tokens=" + std::to_string(output_reserve) +
+      ". Reduce the prompt/tool history or raise max_session_ctx / CLAP_LLAMA_MAX_SESSION_CTX."
+    );
+  }
 
   req->prompt_token_count = static_cast<int>(prompt_tokens.size());
   req->full_prompt_tokens = prompt_tokens;

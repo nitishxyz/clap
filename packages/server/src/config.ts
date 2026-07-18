@@ -12,6 +12,7 @@ const KvTypeSchema = z.enum(["f16", "q8_0", "q4_0"]);
 const LlamaSectionSchema = z.object({
   slots: z.number().int().positive().optional(),
   context: z.number().int().positive().optional(),
+  max_session_ctx: z.number().int().positive().optional(),
   batch: z.number().int().positive().optional(),
   ubatch: z.number().int().positive().optional(),
   gpu_layers: z.number().int().nonnegative().optional(),
@@ -86,6 +87,7 @@ export function loadClapConfig(): { config: ClapConfig; sources: Array<{ path: s
 const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> = [
   ["slots", "CLAP_LLAMA_SLOTS"],
   ["context", "CLAP_LLAMA_CONTEXT"],
+  ["max_session_ctx", "CLAP_LLAMA_MAX_SESSION_CTX"],
   ["batch", "CLAP_LLAMA_BATCH"],
   ["ubatch", "CLAP_LLAMA_UBATCH"],
   ["gpu_layers", "CLAP_LLAMA_GPU_LAYERS"],

@@ -137,6 +137,13 @@ prefix entirely.
   most org-shaped optimization we have.
 
 ### 6. Adaptive capacity policy
+Status: PARTIAL — per-session context caps shipped: `[llama] max_session_ctx`
+(global or per-model in config, or CLAP_LLAMA_MAX_SESSION_CTX) rejects
+oversized sessions at admission with a structured 400 naming the cap, so one
+conversation cannot promise itself the whole unified pool. Remaining
+(GPU rig): measure per-token KV cost at load and derive slot count from
+VRAM budget automatically.
+
 Replace fixed `4 slots` with derived values: measure per-token KV cost at
 load, then `slots ≈ f(VRAM budget, per-session ctx cap, expected sessions)`.
 Admin overrides in config. Per-session context caps (`max_session_ctx`)
@@ -251,7 +258,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 6. Queue fairness (T1.3) — DONE
 7. Prometheus metrics (T3.11) — DONE (request/queue series; worker-side series with GPU work)
 8. Shared-prefix dedup (T2.5) — DONE
-9. Adaptive capacity + session ctx caps (T2.6)
+9. Adaptive capacity + session ctx caps (T2.6) — PARTIAL (ctx caps done; slot autoderivation on GPU rig)
 10. Session-aware eviction (T2.8)
 11. Multi-GPU split (T4.13)
 12. Batched decode latency tuning (T1.1b) — fold into 2/7 where natural:
