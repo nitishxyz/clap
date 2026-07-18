@@ -5,15 +5,9 @@ name: Warm native build caches
 # change so tagged release runs restore warm caches instead of compiling
 # llama.cpp (and CUDA kernels) from scratch.
 
+# Manual-only while the native workers are under active iteration; run it
+# once before tagging a release so the release build restores warm caches.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "scripts/vendor-llama.ts"
-      - "scripts/build-llama.ts"
-      - "scripts/build-mlx.ts"
-      - "native/**"
-      - ".github/workflows/warm-native-cache.yml"
   workflow_dispatch:
 
 concurrency:
