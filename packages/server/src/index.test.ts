@@ -2169,6 +2169,47 @@ describe("clap server", () => {
     }
   });
 
+  test("watchdog auto-restarts a crashed worker after backoff and reports crash counters", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousExit = process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-watchdog-test-"));
+    const modelPath = join(dir, "watchdog.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT = "134";
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const crashed = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+      expect(crashed.status).toBe(503);
+
+      const loaded = await app.request("/clap/v1/runtime/models");
+      const entry = (await loaded.json()).models.find((m: { id: string }) => m.id === modelPath);
+      expect(entry.worker.crashes).toBe(1);
+      expect(entry.worker.lastCrashAt).toBeString();
+
+      // Worker no longer crashes; the next request must recover automatically
+      // after the backoff window without any manual restart.
+      delete process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT;
+      const recovered = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+      expect(recovered.status).toBe(200);
+      const body = await recovered.json();
+      expect(body.choices[0].message.content).toBe("ok");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_EXIT_ON_CHAT", previousExit);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("streaming resident worker errors emit an error event instead of empty completion", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousError = process.env.CLAP_FAKE_WORKER_ERROR;

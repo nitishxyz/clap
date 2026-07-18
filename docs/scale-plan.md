@@ -89,6 +89,12 @@ saturated: 429 + `Retry-After`. Queue depth and wait time exposed in metrics
 and dashboard.
 
 ### 4. Worker watchdog
+Status: DONE (crashed workers restart automatically on the next request
+after exponential backoff — 1s/2s/4s... capped at 30s; requests wait out the
+window instead of failing; 5 consecutive crashes fail fast with
+`worker_crash_loop`; per-worker crash counters and last-crash time surface
+in `/clap/v1/runtime/models` and a dashboard event fires on every crash).
+
 Auto-restart crashed workers with exponential backoff; crash counters in
 dashboard; alert threshold. A native fault must never require manual
 `server stop/start`.
@@ -190,8 +196,8 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 ## Execution order
 
 1. Continuous batching (T1.1) — DONE
-2. Admission control (T1.2)
-3. Watchdog (T1.4)
+2. Admission control (T1.2) — DONE
+3. Watchdog (T1.4) — DONE
 4. API keys (T3.9)
 5. Config file (T3.10) — carries KV-type/slot policy surfacing (T2.7)
 6. Queue fairness (T1.3) — needs keys for per-client fairness

@@ -63,6 +63,9 @@ export function createServer(
     if (reason === "cleanup") return;
     metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
   };
+  residents.onCrash = ({ key, backend, exitCode, consecutiveCrashes }) => {
+    metrics.event("error", `${key} ${backend} worker crashed (exit ${exitCode}, ${consecutiveCrashes} consecutive); auto-restarting with backoff`, { model: key });
+  };
 
   app.onError((error, c) => {
     if (error instanceof z.ZodError) {
@@ -859,9 +862,9 @@ export function inferParserFamilies(markerText: string, nameText: string): strin
 }
 
 async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, handle?: RequestHandle) {
+  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
   try {
     handle?.capture(request);
-    const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
     handle?.phase("loading");
     const loadStarted = Date.now();
     entry.worker = await worker.load();
@@ -892,12 +895,14 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     });
     return c.json(body);
   } catch (error) {
+    entry.worker = worker.info();
     handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
 }
 
 function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void, handle?: RequestHandle) {
+  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
   return streamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();
@@ -934,7 +939,6 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
     };
     try {
       handle?.capture(request);
-      const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
       handle?.phase("loading");
       const loadStarted = Date.now();
       entry.worker = await worker.load();
@@ -1005,6 +1009,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         rawOutput: result.content,
       });
     } catch (error) {
+      entry.worker = worker.info();
       await writeQueue.catch(() => undefined);
       handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
       await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) });

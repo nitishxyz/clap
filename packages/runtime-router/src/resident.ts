@@ -10,6 +10,8 @@ export type ResidentWorkerInfo = {
   pid?: number;
   state: LoadedModel["worker"]["state"];
   limitation?: string;
+  crashes?: number;
+  lastCrashAt?: string;
 };
 
 export type ResidentUsage = {
@@ -56,30 +58,45 @@ type Pending = {
   cache?: ResidentCacheInfo;
 };
 
+export type ResidentCrashListener = (info: {
+  key: string;
+  backend: ResidentBackend;
+  exitCode: number;
+  consecutiveCrashes: number;
+}) => void;
+
 export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private proc?: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
   private readonly pending = new Map<string, Pending>();
   private loaded = false;
   private logPath?: string;
+  private crashes = 0;
+  private consecutiveCrashes = 0;
+  private lastCrashAt?: number;
 
   constructor(
     public readonly key: string,
     public readonly backend: ResidentBackend,
     public readonly modelPath: string,
+    private readonly onCrash?: ResidentCrashListener,
   ) {}
 
   info(): ResidentWorkerInfo {
     return {
       pid: this.proc?.pid,
       state: this.proc ? "resident" : "not_started",
+      crashes: this.crashes,
+      lastCrashAt: this.lastCrashAt ? new Date(this.lastCrashAt).toISOString() : undefined,
     };
   }
 
   async load(): Promise<ResidentWorkerInfo> {
+    await this.awaitRestartBackoff();
     this.ensureStarted();
     if (!this.loaded) {
       await this.sendControl("load", { model: this.modelPath });
       this.loaded = true;
+      this.consecutiveCrashes = 0;
     }
     return this.info();
   }
@@ -155,7 +172,32 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     const exitCode = await proc.exited;
     if (this.proc === proc) this.proc = undefined;
-    if (exitCode !== 0) this.rejectAll(this.workerError(`${this.backend} resident worker exited with code ${exitCode}`));
+    this.loaded = false;
+    if (exitCode !== 0) {
+      this.crashes += 1;
+      this.consecutiveCrashes += 1;
+      this.lastCrashAt = Date.now();
+      this.onCrash?.({ key: this.key, backend: this.backend, exitCode, consecutiveCrashes: this.consecutiveCrashes });
+      this.rejectAll(this.workerError(`${this.backend} resident worker exited with code ${exitCode}`));
+    }
+  }
+
+  // Exponential backoff between restarts after crashes (1s, 2s, 4s... capped
+  // at 30s) so a model that dies on load cannot hot-loop expensive reloads.
+  // Requests wait out the window instead of failing; a persistent crash loop
+  // fails fast with an actionable error.
+  private async awaitRestartBackoff(): Promise<void> {
+    if (this.consecutiveCrashes === 0 || !this.lastCrashAt) return;
+    if (this.proc && this.proc.exitCode === null) return;
+    if (this.consecutiveCrashes >= 5) {
+      throw this.workerError(
+        `${this.backend} resident worker crashed ${this.consecutiveCrashes} times in a row; not restarting automatically. Check the worker log, then retry or restart the server.`,
+        "worker_crash_loop",
+      );
+    }
+    const delay = Math.min(1000 * 2 ** (this.consecutiveCrashes - 1), 30000);
+    const remaining = this.lastCrashAt + delay - Date.now();
+    if (remaining > 0) await Bun.sleep(remaining);
   }
 
   private handleLine(line: string): void {
@@ -282,11 +324,12 @@ function enrichWorkerError(message: string, backend: ResidentBackend, logPath?: 
 
 export class ResidentWorkerRegistry {
   private readonly workers = new Map<string, ResidentWorkerHandle>();
+  onCrash?: ResidentCrashListener;
 
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string): ResidentWorkerHandle {
     const existing = this.workers.get(key);
     if (existing) return existing;
-    const worker = new ResidentWorkerProcess(key, backend, modelPath);
+    const worker = new ResidentWorkerProcess(key, backend, modelPath, (info) => this.onCrash?.(info));
     this.workers.set(key, worker);
     return worker;
   }

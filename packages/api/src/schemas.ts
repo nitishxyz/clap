@@ -184,6 +184,8 @@ export const LoadedModelSchema = z.object({
     pid: z.number().int().positive().optional(),
     state: z.enum(["not_started", "one_shot", "resident", "exited"]),
     limitation: z.string().optional(),
+    crashes: z.number().int().nonnegative().optional(),
+    lastCrashAt: z.string().optional(),
   }),
 });
 
