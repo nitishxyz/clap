@@ -4,12 +4,13 @@ import { Downloads, LoadedModels, ModelCache } from "@/components/dashboard/Mode
 import { RequestDetailModal } from "@/components/dashboard/RequestDetail";
 import { ActiveRequests, RecentRequests } from "@/components/dashboard/RequestTables";
 import { Tiles } from "@/components/dashboard/Tiles";
+import { UsagePanel } from "@/components/dashboard/Usage";
 import { useActions } from "@/hooks/useActions";
 import { useDashboard } from "@/hooks/useDashboard";
 import { fmtBytes, fmtClock, fmtDuration } from "@/lib/format";
 
 export function App() {
-  const { data, connected, refreshedAt } = useDashboard();
+  const { data, connected, refreshedAt, mode } = useDashboard();
   const now = refreshedAt ?? Date.now();
   const [selectedRequest, setSelectedRequest] = useState<string>();
   const actions = useActions();
@@ -18,7 +19,7 @@ export function App() {
     <div className="mx-auto grid max-w-[1280px] gap-4 p-4">
       <header className="flex flex-wrap items-baseline gap-3 border border-border bg-panel px-4 py-3">
         <h1 className="m-0 text-[1.05rem] uppercase tracking-[0.08em]">
-          <span className={`mr-2 inline-block h-2 w-2 ${connected ? "bg-ok" : "bg-err"}`} />
+          <span className={`mr-2 inline-block h-2 w-2 ${connected ? "animate-pulse bg-ok" : "bg-err"}`} />
           clap
         </h1>
         {data ? (
@@ -49,14 +50,15 @@ export function App() {
       {data ? (
         <>
           <Tiles data={data} />
-          <LoadedModels models={data.loaded} now={now} actions={actions} />
+          <UsagePanel data={data} />
+          <LoadedModels models={data.loaded} now={now} actions={actions} systemMemoryBytes={data.server.systemMemoryBytes} />
           <ActiveRequests requests={data.active} now={now} onSelect={setSelectedRequest} />
           <RecentRequests requests={data.requests} onSelect={setSelectedRequest} />
           <Events events={data.events ?? []} />
           <Downloads downloads={data.downloads} actions={actions} />
           <ModelCache models={data.models} loaded={data.loaded} actions={actions} />
           <footer className="text-right text-[0.72rem] text-muted">
-            refreshed {refreshedAt ? fmtClock(refreshedAt) : "-"} · polling every 2s
+            refreshed {refreshedAt ? fmtClock(refreshedAt) : "-"} · {mode === "live" ? "live via sse" : "polling every 2s"}
           </footer>
         </>
       ) : null}

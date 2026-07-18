@@ -5,7 +5,7 @@ function Tile({ label, value, sub }: { label: string; value: string | number; su
   return (
     <div className="border border-border bg-panel px-3 py-2.5">
       <div className="text-[0.68rem] uppercase tracking-[0.06em] text-muted">{label}</div>
-      <div className="mt-0.5 text-xl">{value}</div>
+      <div key={String(value)} className="mt-0.5 animate-[value-pulse_0.7s_ease-out] text-xl">{value}</div>
       {sub ? <div className="text-[0.72rem] text-muted">{sub}</div> : null}
     </div>
   );

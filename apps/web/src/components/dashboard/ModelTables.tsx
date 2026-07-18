@@ -3,6 +3,7 @@ import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unload
 import { fmtBytes, fmtDuration, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
+import { BoxBar } from "./Usage";
 
 function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: boolean; danger?: boolean; onClick: () => void }) {
   return (
@@ -24,18 +25,37 @@ function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: 
   );
 }
 
-export function LoadedModels({ models, now, actions }: { models: DashboardLoadedModel[]; now: number; actions: ActionState }) {
+export function LoadedModels({ models, now, actions, systemMemoryBytes }: { models: DashboardLoadedModel[]; now: number; actions: ActionState; systemMemoryBytes?: number }) {
   return (
     <Panel title="loaded models" count={models.length || ""}>
       {models.length ? (
-        <Table headers={["model", "backend", "state", { label: "mem", numeric: true }, { label: "cpu", numeric: true }, { label: "reqs", numeric: true }, "keep-alive", "expires", "last used", { label: "pid", numeric: true }, ""]}>
+        <Table headers={["model", "backend", "state", { label: "mem", numeric: true }, { label: "cpu", numeric: true }, { label: "gpu mem", numeric: true }, { label: "reqs", numeric: true }, "keep-alive", "expires", "last used", { label: "pid", numeric: true }, ""]}>
           {models.map((entry) => (
             <tr key={entry.key}>
               <Td className="max-w-[260px] overflow-hidden text-ellipsis" title={entry.localPath}>{entry.id}</Td>
               <Td>{entry.backend}</Td>
               <Td>{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.state}</Tag>}</Td>
-              <Td numeric>{entry.usage ? fmtBytes(entry.usage.rssBytes) : "-"}</Td>
-              <Td numeric>{entry.usage ? `${entry.usage.cpuPercent.toFixed(0)}%` : "-"}</Td>
+              <Td numeric>
+                {entry.usage ? (
+                  <span className="flex items-center justify-end gap-2">
+                    {systemMemoryBytes ? <BoxBar pct={(entry.usage.rssBytes / systemMemoryBytes) * 100} segments={10} className="w-16" /> : null}
+                    <span>{fmtBytes(entry.usage.rssBytes)}</span>
+                  </span>
+                ) : (
+                  "-"
+                )}
+              </Td>
+              <Td numeric>
+                {entry.usage ? (
+                  <span className="flex items-center justify-end gap-2">
+                    <BoxBar pct={entry.usage.cpuPercent} segments={10} className="w-16" />
+                    <span>{`${entry.usage.cpuPercent.toFixed(0)}%`}</span>
+                  </span>
+                ) : (
+                  "-"
+                )}
+              </Td>
+              <Td numeric>{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</Td>
               <Td numeric>{entry.activeRequests}</Td>
               <Td>{entry.keepAlive}</Td>
               <Td>

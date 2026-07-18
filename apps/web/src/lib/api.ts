@@ -10,6 +10,22 @@ export type DashboardServer = {
   systemMemoryBytes?: number;
 };
 
+export type DashboardGpu = {
+  vendor: "nvidia" | "apple";
+  name: string;
+  utilizationPercent?: number;
+  memoryUsedBytes?: number;
+  memoryTotalBytes?: number;
+  processes?: Array<{ pid: number; memoryBytes: number }>;
+};
+
+export type DashboardQueue = {
+  inflight: number;
+  queued: number;
+  maxInflight: number;
+  queueDepth: number;
+};
+
 export type DashboardTotals = {
   requests: number;
   ok: number;
@@ -102,6 +118,7 @@ export type DashboardLoadedModel = {
   pinned: boolean;
   worker: { pid?: number; state: string };
   usage?: { rssBytes: number; cpuPercent: number };
+  gpuMemoryBytes?: number;
 };
 
 export type DashboardModel = {
@@ -152,7 +169,9 @@ export type ModelResolveResponse = {
 
 export type DashboardData = {
   server: DashboardServer;
+  gpus?: DashboardGpu[];
   totals: DashboardTotals;
+  queue?: DashboardQueue;
   active: DashboardRequest[];
   requests: DashboardRequest[];
   events: ServerEvent[];
