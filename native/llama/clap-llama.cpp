@@ -251,6 +251,11 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   // concurrent sessions keep warm prefixes; slots are LRU-recycled.
   const int32_t n_slots = std::max(1, env_int("CLAP_LLAMA_SLOTS", 4));
   ctx_params.n_seq_max = n_slots;
+  // Without a unified KV buffer, llama.cpp splits n_ctx into n_seq_max
+  // per-sequence streams (32k ctx / 4 slots = only 8k per session), so long
+  // agent prompts fail to find a memory slot even when the cache is mostly
+  // empty. A unified buffer lets any session use the full context.
+  ctx_params.kv_unified = env_int("CLAP_LLAMA_KV_UNIFIED", 1) != 0;
   ctx_params.no_perf = true;
   loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
   if (!loaded.ctx) {
