@@ -44,7 +44,7 @@ import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleGpuUsage } from "./gpu-usage";
-import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
+import { cpuCoreCount, sampleProcessUsage, systemCpuPercent, systemMemoryBytes, systemMemoryUsedBytes } from "./process-usage";
 import { webAsset } from "./web-assets";
 
 const startedAt = Date.now();
@@ -299,6 +299,9 @@ export function createServer(
         rssBytes: usage.get(process.pid)?.rssBytes ?? process.memoryUsage().rss,
         cpuPercent: usage.get(process.pid)?.cpuPercent,
         systemMemoryBytes: systemMemoryBytes(),
+        systemMemoryUsedBytes: systemMemoryUsedBytes(),
+        systemCpuPercent: systemCpuPercent(),
+        cpuCount: cpuCoreCount(),
       },
       gpus,
       totals: metrics.totals,

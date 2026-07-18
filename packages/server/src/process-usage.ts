@@ -1,4 +1,4 @@
-import { totalmem } from "node:os";
+import { cpus, freemem, loadavg, totalmem } from "node:os";
 
 export type ProcessUsage = { rssBytes: number; cpuPercent: number };
 
@@ -37,4 +37,19 @@ export async function sampleProcessUsage(pids: number[]): Promise<Map<number, Pr
 
 export function systemMemoryBytes(): number {
   return totalmem();
+}
+
+export function systemMemoryUsedBytes(): number {
+  return Math.max(0, totalmem() - freemem());
+}
+
+export function cpuCoreCount(): number {
+  return Math.max(1, cpus().length);
+}
+
+// System-wide CPU utilization approximation: 1-minute load average over
+// cores, capped at 100. Good enough for a dashboard pressure bar.
+export function systemCpuPercent(): number {
+  const load = loadavg()[0] ?? 0;
+  return Math.min(100, Math.round((load / cpuCoreCount()) * 100));
 }
