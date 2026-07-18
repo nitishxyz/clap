@@ -4,6 +4,18 @@ Clap is a local model server prototype with an OpenAI-compatible API.
 
 See `docs/clap-local-model-server-plan.md` for the product plan and milestone docs under `docs/` for runnable slices.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nitishxyz/clap/main/install.sh | sh
+```
+
+Downloads the latest release for your platform (macOS arm64 or Linux x64), verifies the sha256 checksum, and installs `clap` to `/usr/local/bin` (falls back to `~/.local/bin`). Set `CLAP_VERSION` to pin a tag or `CLAP_INSTALL_DIR` to choose the destination. Then:
+
+```bash
+clap run llama3.2:3b
+```
+
 ## Quick Start
 
 ```bash
