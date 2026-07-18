@@ -276,8 +276,11 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   ctx_params.n_batch = env_int("CLAP_LLAMA_BATCH", 2048);
   ctx_params.n_ubatch = env_int("CLAP_LLAMA_UBATCH", 512);
   // Multiple KV cache slots (one llama sequence each) so any number of
-  // concurrent sessions keep warm prefixes; slots are LRU-recycled.
-  const int32_t n_slots = std::max(1, env_int("CLAP_LLAMA_SLOTS", 4));
+  // concurrent sessions keep warm prefixes; slots are LRU-recycled. With a
+  // unified KV pool, slots beyond the working set cost only bookkeeping, so
+  // default high enough that N concurrent agent sessions do not thrash
+  // (working set > slots means near-zero prefix reuse).
+  const int32_t n_slots = std::max(1, env_int("CLAP_LLAMA_SLOTS", 16));
   ctx_params.n_seq_max = n_slots;
   // Without a unified KV buffer, llama.cpp splits n_ctx into n_seq_max
   // per-sequence streams (32k ctx / 4 slots = only 8k per session), so long

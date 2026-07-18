@@ -530,9 +530,13 @@ function supportsMlxTarget(): boolean {
   return process.platform === "darwin" && process.arch === "arm64";
 }
 
+function isPrimaryGgufFile(name: string): boolean {
+  return name.toLowerCase().endsWith(".gguf") && !/(?:^|[-_.\/])(mmproj|mtp|imatrix)(?=[-_.]|$)/i.test(name);
+}
+
 function optionsForRepo(model: string, repo: string, siblings: HfSibling[], backend?: BackendOverride, file?: string): ModelResolveOption[] {
   const files = siblings.map((sibling) => sibling.rfilename).filter((name): name is string => Boolean(name));
-  const gguf = siblings.filter((sibling) => sibling.rfilename?.toLowerCase().endsWith(".gguf"));
+  const gguf = siblings.filter((sibling) => sibling.rfilename && isPrimaryGgufFile(sibling.rfilename));
   const hasMlx = files.includes("config.json") && files.some((name) => name === "tokenizer.json" || name === "tokenizer_config.json") && files.some((name) => name.endsWith(".safetensors"));
   const hasSafetensors = files.some((name) => name.endsWith(".safetensors"));
   const result: ModelResolveOption[] = [];

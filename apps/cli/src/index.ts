@@ -545,7 +545,7 @@ async function pull(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const model = rest[0];
   if (!model) {
-    throw new Error("usage: clap pull <owner/model> [--file model.gguf]");
+    throw new Error("usage: clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes]");
   }
 
   await startBackgroundServer({ quiet: true });
@@ -623,6 +623,12 @@ async function executePull(
 
 async function selectPullOption(response: ModelResolveResponse, flags: { backend?: "gguf" | "mlx"; file?: string; quant?: string; yes?: boolean }): Promise<ModelResolveOption | undefined> {
   const options = supportedOptions(response);
+  if (!options.length) {
+    console.log(formatResolveOptions(response));
+    const name = response.model.split("/").pop() ?? response.model;
+    const search = `https://huggingface.co/models?search=${encodeURIComponent(`${name} GGUF`)}`;
+    throw new Error(`no supported runnable options found for ${response.model}; search for a GGUF conversion: ${search}`);
+  }
   if (flags.quant) {
     const match = findOptionByQuant(options, flags.quant);
     if (!match) throw new Error(`no supported GGUF option found for --quant ${flags.quant}`);

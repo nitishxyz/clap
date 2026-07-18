@@ -119,11 +119,35 @@ export type DashboardModel = {
 export type DashboardDownload = {
   id: string;
   model: string;
+  file?: string;
+  backend?: "gguf" | "mlx";
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   bytesReceived: number;
   totalBytes?: number;
   currentFile?: string;
   error?: string;
+};
+
+export type ModelResolveOption = {
+  id: string;
+  model: string;
+  backend: "gguf" | "mlx";
+  format: "gguf" | "mlx" | "safetensors";
+  repo: string;
+  file?: string;
+  sizeBytes?: number;
+  quantization?: string;
+  supported: boolean;
+  unsupportedReason?: string;
+  recommended: boolean;
+  reason: string;
+};
+
+export type ModelResolveResponse = {
+  model: string;
+  repo: string;
+  options: ModelResolveOption[];
+  selected?: ModelResolveOption;
 };
 
 export type DashboardData = {
@@ -174,8 +198,12 @@ export function removeModel(model: string): Promise<unknown> {
   return post("/clap/v1/models/remove", { model });
 }
 
-export function pullModel(model: string): Promise<unknown> {
-  return post("/clap/v1/models/pull", { model });
+export function pullModel(model: string, opts?: { file?: string; backend?: "gguf" | "mlx" }): Promise<unknown> {
+  return post("/clap/v1/models/pull", { model, ...(opts?.file ? { file: opts.file } : {}), ...(opts?.backend ? { backend: opts.backend } : {}) });
+}
+
+export function resolveModel(model: string): Promise<ModelResolveResponse> {
+  return post("/clap/v1/models/resolve", { model }) as Promise<ModelResolveResponse>;
 }
 
 export function cancelDownload(id: string): Promise<unknown> {

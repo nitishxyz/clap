@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { cancelDownload, loadModel, pullModel, removeModel, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel } from "@/lib/api";
+import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel, type ModelResolveOption, type ModelResolveResponse } from "@/lib/api";
 import { fmtBytes, fmtDuration, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
@@ -84,13 +84,31 @@ export function LoadedModels({ models, now, actions }: { models: DashboardLoaded
 
 export function Downloads({ downloads, actions }: { downloads: DashboardDownload[]; actions: ActionState }) {
   const [pullInput, setPullInput] = useState("");
+  const [resolving, setResolving] = useState(false);
+  const [resolved, setResolved] = useState<ModelResolveResponse>();
+  const [resolveError, setResolveError] = useState<string>();
   const active = downloads.filter((download) => download.status === "running" || download.status === "queued");
   const shown = active.length ? active : downloads.slice(-5);
-  const submitPull = () => {
+  const submitResolve = () => {
     const model = pullInput.trim();
-    if (!model) return;
-    actions.run(`pull:${model}`, () => pullModel(model));
-    setPullInput("");
+    if (!model || resolving) return;
+    setResolving(true);
+    setResolveError(undefined);
+    resolveModel(model)
+      .then((response) => {
+        setResolved(response);
+        setPullInput("");
+      })
+      .catch((cause) => {
+        setResolved(undefined);
+        setResolveError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => setResolving(false));
+  };
+  const pullOption = (option: ModelResolveOption) => {
+    actions.run(`pull:${option.id}`, () => pullModel(option.repo, { file: option.file, backend: option.backend }));
+    setResolved(undefined);
+    setResolveError(undefined);
   };
   return (
     <Panel
@@ -101,16 +119,76 @@ export function Downloads({ downloads, actions }: { downloads: DashboardDownload
             value={pullInput}
             onChange={(event) => setPullInput(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") submitPull();
+              if (event.key === "Enter") submitResolve();
             }}
-            placeholder="org/repo to pull…"
+            placeholder="org/repo or alias to pull…"
             className="w-56 border border-soft-border bg-background px-2 py-0.5 text-[0.72rem] text-foreground placeholder:text-muted focus:outline-none"
           />
-          <ActionButton label="pull" onClick={submitPull} />
+          <ActionButton label="pull" busy={resolving} onClick={submitResolve} />
           {active.length ? <span className="text-foreground">{active.length} active</span> : null}
         </span>
       }
     >
+      {resolveError ? (
+        <div className="flex items-start justify-between gap-3 border-b border-soft-border px-3 py-2 text-[0.78rem] text-err">
+          <span className="break-words">{resolveError}</span>
+          <ActionButton label="dismiss" onClick={() => setResolveError(undefined)} />
+        </div>
+      ) : null}
+      {resolved ? (
+        <div className="border-b border-soft-border">
+          <div className="flex items-center justify-between gap-3 px-3 py-1.5 text-[0.72rem] uppercase tracking-[0.06em] text-muted">
+            <span>
+              options for <span className="normal-case text-foreground">{resolved.model}</span>
+            </span>
+            <ActionButton label="clear" onClick={() => setResolved(undefined)} />
+          </div>
+          {resolved.options.length ? (
+            <Table headers={["option", "backend", "quant", "size", "why", ""]}>
+              {resolved.options.map((option) => (
+                <tr key={option.id} className={option.supported ? "" : "text-muted"}>
+                  <Td className="max-w-[280px] overflow-hidden text-ellipsis" title={option.repo}>
+                    <span className="flex items-center gap-2">
+                      <span className="overflow-hidden text-ellipsis">{option.file ?? `${option.repo} (${option.format})`}</span>
+                      {option.recommended ? <Tag tone="ok">recommended</Tag> : null}
+                      {option.supported ? null : <Tag tone="warn">unsupported</Tag>}
+                    </span>
+                  </Td>
+                  <Td>{option.backend}</Td>
+                  <Td>{option.quantization ?? "-"}</Td>
+                  <Td>{option.sizeBytes ? fmtBytes(option.sizeBytes) : "-"}</Td>
+                  <Td className="max-w-[340px] whitespace-normal text-muted">{option.supported ? option.reason : option.unsupportedReason ?? option.reason}</Td>
+                  <Td>
+                    {option.supported ? (
+                      <ActionButton
+                        label="pull"
+                        busy={actions.busy[`pull:${option.id}`]}
+                        onClick={() => pullOption(option)}
+                      />
+                    ) : null}
+                  </Td>
+                </tr>
+              ))}
+            </Table>
+          ) : (
+            <Empty>no runnable artifacts found for {resolved.model}</Empty>
+          )}
+          {resolved.options.some((option) => option.supported) ? null : (
+            <div className="border-t border-soft-border px-3 py-2 text-[0.76rem] text-muted">
+              This repo has no artifact Clap can run on this machine. Search Hugging Face for a{" "}
+              <a
+                className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+                href={`https://huggingface.co/models?search=${encodeURIComponent(`${resolved.model.split("/").pop() ?? resolved.model} GGUF`)}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                GGUF conversion
+              </a>
+              .
+            </div>
+          )}
+        </div>
+      ) : null}
       {shown.length ? (
         <Table headers={["model", "status", "progress", "size", ""]}>
           {shown.map((download) => {
@@ -131,7 +209,9 @@ export function Downloads({ downloads, actions }: { downloads: DashboardDownload
                   )}
                 </Td>
                 <Td>
-                  {pct === null ? (
+                  {download.status === "failed" && download.error ? (
+                    <span className="block max-w-[260px] overflow-hidden text-ellipsis text-err" title={download.error}>{download.error}</span>
+                  ) : pct === null ? (
                     "-"
                   ) : (
                     <span className="flex items-center gap-2">

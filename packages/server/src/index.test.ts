@@ -1465,6 +1465,9 @@ describe("clap server", () => {
         "model-Q8_0.gguf": "large",
         "model-Q4_K_M.gguf": "recommended",
         "model-Q3_K_M.gguf": "small",
+        "mmproj-model-f16.gguf": "vision projector",
+        "model-imatrix.gguf": "quantization data",
+        "mtp-model-Q4_0.gguf": "draft model",
       },
     });
     try {
@@ -1478,6 +1481,11 @@ describe("clap server", () => {
       });
       const resolveBody = await resolve.json();
       expect(resolveBody.selected).toMatchObject({ backend: "gguf", file: "model-Q4_K_M.gguf", quantization: "Q4_K_M" });
+      expect(resolveBody.options.map((option: { file?: string }) => option.file)).toEqual([
+        "model-Q4_K_M.gguf",
+        "model-Q3_K_M.gguf",
+        "model-Q8_0.gguf",
+      ]);
 
       const pull = await createServer().request("/clap/v1/models/pull", {
         method: "POST",
