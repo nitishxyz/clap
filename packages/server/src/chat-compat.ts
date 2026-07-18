@@ -49,7 +49,7 @@ export function prepareChatRequest(request: ChatCompletionRequest, options: Prep
   rejectUnsupportedContentParts(request);
   let messages = request.messages.map((message) => ({
     ...message,
-    content: stringifyMessageContent(message),
+    content: stringifyMessageContent(message, options),
   }));
   const instructions = compatibilityInstructions(request, options);
   if (instructions) {
@@ -154,12 +154,31 @@ export function rejectUnsupportedContentParts(request: ChatCompletionRequest): v
   }
 }
 
-function stringifyMessageContent(message: ChatMessage): string {
+function stringifyMessageContent(message: ChatMessage, options: PrepareChatOptions = {}): string {
   const content = Array.isArray(message.content)
     ? message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")
     : message.content ?? "";
+  // Without native template tool support the transcript must show the
+  // assistant's own tool-call turns; harnesses send them with null content,
+  // and a dropped turn teaches the model that narration ends the job.
+  if (message.role === "assistant" && message.tool_calls?.length && !options.nativeTools) {
+    const calls = message.tool_calls.map((call) => ({
+      name: call.function.name,
+      arguments: parseArgumentsForTranscript(call.function.arguments),
+    }));
+    const rendered = JSON.stringify({ tool_calls: calls });
+    return content ? `${content}\n${rendered}` : rendered;
+  }
   if (message.role !== "tool") return content;
   return `Tool result${message.tool_call_id ? ` (${message.tool_call_id})` : ""}: ${content}`;
+}
+
+function parseArgumentsForTranscript(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 function compatibilityInstructions(request: ChatCompletionRequest, options: PrepareChatOptions = {}): string {
