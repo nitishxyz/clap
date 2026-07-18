@@ -2110,14 +2110,16 @@ describe("clap server", () => {
     }
   });
 
-  test("resident worker context overflow returns actionable prompt guidance", async () => {
+  test("resident worker context overflow returns structured 400 with actionable guidance", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousError = process.env.CLAP_FAKE_WORKER_ERROR;
+    const previousCode = process.env.CLAP_FAKE_WORKER_ERROR_CODE;
     const dir = await mkdtemp(join(tmpdir(), "clap-worker-context-test-"));
     const modelPath = join(dir, "gemma.Q3_K_S.gguf");
     try {
       process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
       process.env.CLAP_FAKE_WORKER_ERROR = "prompt exceeds context window; prompt tokens=11236, context=4096, reserved output tokens=32. Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history.";
+      process.env.CLAP_FAKE_WORKER_ERROR_CODE = "context_length_exceeded";
       await writeFile(modelPath, "gguf bytes");
 
       const response = await createServer().request("/v1/chat/completions", {
@@ -2126,14 +2128,17 @@ describe("clap server", () => {
         body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "long prompt" }] }),
       });
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(400);
       const body = await response.json();
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.code).toBe("context_length_exceeded");
       expect(body.error.message).toContain("prompt exceeds context window");
       expect(body.error.message).toContain("CLAP_LLAMA_CONTEXT");
       expect(JSON.stringify(body)).not.toContain("choices");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_ERROR", previousError);
+      restoreEnv("CLAP_FAKE_WORKER_ERROR_CODE", previousCode);
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -2373,7 +2378,8 @@ for await (const chunk of Bun.stdin.stream()) {
     }
     if (process.env.CLAP_FAKE_WORKER_ERROR) {
       if (process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN) console.log(JSON.stringify({ id: request.id, token: process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN }));
-      console.log(JSON.stringify({ id: request.id, error: process.env.CLAP_FAKE_WORKER_ERROR }));
+      const extra = process.env.CLAP_FAKE_WORKER_ERROR_CODE ? { code: process.env.CLAP_FAKE_WORKER_ERROR_CODE } : {};
+      console.log(JSON.stringify({ id: request.id, error: process.env.CLAP_FAKE_WORKER_ERROR, ...extra }));
       continue;
     }
     if (process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT) {

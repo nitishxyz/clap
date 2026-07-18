@@ -115,6 +115,22 @@ void emit_error(const std::string& id, const std::string& message) {
   emit(id, json{{"error", message}});
 }
 
+void emit_error(const std::string& id, const std::string& message, const std::string& code) {
+  if (code.empty()) {
+    emit_error(id, message);
+  } else {
+    emit(id, json{{"error", message}, {"code", code}});
+  }
+}
+
+// A request rejected at admission (before any ingest) with a machine-readable
+// code the server maps to a client error instead of a backend failure.
+struct RequestError : std::runtime_error {
+  std::string code;
+  RequestError(std::string error_code, const std::string& message)
+      : std::runtime_error(message), code(std::move(error_code)) {}
+};
+
 // Number of trailing bytes forming an incomplete (but so far valid) UTF-8
 // sequence. Byte-level BPE tokens can split a multi-byte character across
 // pieces; those bytes must be held back until the character completes.
@@ -708,7 +724,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
   const int32_t output_reserve = std::max(1, std::min(req->params.max_tokens, 256));
   if (static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= n_ctx) {
-    throw std::runtime_error(
+    throw RequestError("context_length_exceeded",
       "prompt exceeds context window; prompt tokens=" + std::to_string(prompt_tokens.size()) +
       ", context=" + std::to_string(n_ctx) +
       ", reserved output tokens=" + std::to_string(output_reserve) +
@@ -879,6 +895,9 @@ int main() {
         // Anything else is a chat request; it queues until a slot frees up.
         waiting.emplace_back(id, message);
         return true;
+      } catch (const RequestError& error) {
+        emit_error(id, error.what(), error.code);
+        return true;
       } catch (const std::exception& error) {
         emit_error(id, error.what());
         return true;
@@ -925,6 +944,8 @@ int main() {
           auto prepared = prepare_request(loaded, wid, wreq);
           emit(wid, json{{"started", true}});
           active.push_back(std::move(prepared));
+        } catch (const RequestError& error) {
+          emit_error(wid, error.what(), error.code);
         } catch (const std::exception& error) {
           emit_error(wid, error.what());
         }

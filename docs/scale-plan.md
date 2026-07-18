@@ -72,6 +72,13 @@ this item is about protecting interactive latency, not raw throughput.
   deployment shape for high concurrency
 
 ### 2. Admission control
+Status: DONE (worker rejects pre-ingest with code `context_length_exceeded`;
+router propagates the code; server maps it to a structured 400
+`invalid_request_error` with actual token numbers instead of a 503).
+Remaining scope folded into later items: per-session ctx caps arrive with
+adaptive capacity (T2.6); trim-instead-of-reject is a config-file policy
+(T3.10).
+
 Before ingest: check `prompt_tokens + max_tokens` against per-session ctx cap
 and pool capacity. Reject with a structured 400 (includes actual numbers) or
 trim per policy. No more mid-ingest failures for oversized prompts.

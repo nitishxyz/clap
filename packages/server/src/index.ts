@@ -68,6 +68,11 @@ export function createServer(
     if (error instanceof z.ZodError) {
       return c.json({ error: { message: error.message, type: "invalid_request_error", code: "invalid_json" } }, 400);
     }
+    if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) && error.code === "context_length_exceeded") {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: error.message, type: "invalid_request_error", code: "context_length_exceeded" },
+      }), 400);
+    }
     if (error instanceof LlamaWorkerError) {
       const status = error.code === "model_not_found" ? 404 : 503;
       return c.json(ErrorResponseSchema.parse({

@@ -180,7 +180,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     if (message.error) {
       this.pending.delete(id ?? "");
-      pending.reject(this.workerError(String(message.error)));
+      const code = typeof message.code === "string" ? message.code : undefined;
+      pending.reject(this.workerError(String(message.error), code));
       return;
     }
     if (typeof message.token === "string") {
@@ -264,10 +265,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.pending.clear();
   }
 
-  private workerError(message: string): Error {
-    const detail = enrichWorkerError(message, this.backend, this.logPath);
-    if (this.backend === "mlx") return new MlxWorkerError(detail, "resident_worker_error");
-    return new LlamaWorkerError(detail, "resident_worker_error");
+  private workerError(message: string, code = "resident_worker_error"): Error {
+    const detail = code === "resident_worker_error" ? enrichWorkerError(message, this.backend, this.logPath) : message;
+    if (this.backend === "mlx") return new MlxWorkerError(detail, code);
+    return new LlamaWorkerError(detail, code);
   }
 }
 
