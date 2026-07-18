@@ -465,6 +465,14 @@ void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
   // The sequence state must hold exactly the prefix (chunking lands a
   // boundary on anchor_at; anything else means the plan was disrupted).
   if (req.ingested != count || req.cached_prompt_tokens != 0) return;
+  // Skip when an equivalent prefix holder already exists (concurrent prefills
+  // race to plant the same shared boundary; one anchor serves everyone).
+  for (const auto& s : loaded.slots) {
+    if (s.tokens.size() != count) continue;  // only an exact holder can donate this prefix
+    std::size_t p = 0;
+    while (p < count && s.tokens[p] == req.full_prompt_tokens[p]) p += 1;
+    if (p == count) return;
+  }
   std::size_t target = SIZE_MAX;
   for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
     if (!loaded.slots[index].busy && loaded.slots[index].tokens.empty()) {
@@ -833,8 +841,15 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     donor_prefix = 0;
   }
   const bool donor_exact = donor != SIZE_MAX && donor_prefix == loaded.slots[donor].tokens.size();
-  const bool donor_usable_in_place =
-      donor != SIZE_MAX && donor_exact && !loaded.slots[donor].busy && !loaded.slots[donor].is_anchor;
+  const bool donor_idle_session =
+      donor != SIZE_MAX && !loaded.slots[donor].busy && !loaded.slots[donor].is_anchor;
+  // In-place continuation: exact idle donors always (cheapest, no copy); for
+  // hybrid models also non-exact idle donors — llama.cpp recurrent state
+  // checkpoints can often rewind them, and branching mid-stream is impossible
+  // anyway, so trying the rewind beats an unconditional full re-prefill.
+  // Attention models with a non-exact donor branch instead (preserves the
+  // donor's longer suffix for its own session).
+  const bool donor_usable_in_place = donor_idle_session && (donor_exact || loaded.hybrid);
 
   // Fresh slot pick: empty first, then oldest idle session; anchors are
   // recycled last because they serve every future session of their prefix.
