@@ -284,9 +284,10 @@ export function createServer(
     const workerPids = loaded
       .map((entry) => entry.worker?.pid)
       .filter((pid): pid is number => typeof pid === "number");
-    const [usage, gpus] = await Promise.all([
+    const [usage, gpus, memoryUsed] = await Promise.all([
       sampleProcessUsage([process.pid, ...workerPids]),
       sampleGpuUsage(),
+      systemMemoryUsedBytes(),
     ]);
     return {
       server: {
@@ -299,7 +300,7 @@ export function createServer(
         rssBytes: usage.get(process.pid)?.rssBytes ?? process.memoryUsage().rss,
         cpuPercent: usage.get(process.pid)?.cpuPercent,
         systemMemoryBytes: systemMemoryBytes(),
-        systemMemoryUsedBytes: systemMemoryUsedBytes(),
+        systemMemoryUsedBytes: memoryUsed,
         systemCpuPercent: systemCpuPercent(),
         cpuCount: cpuCoreCount(),
       },

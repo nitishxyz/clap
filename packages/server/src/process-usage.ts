@@ -39,8 +39,30 @@ export function systemMemoryBytes(): number {
   return totalmem();
 }
 
-export function systemMemoryUsedBytes(): number {
-  return Math.max(0, totalmem() - freemem());
+let memCache: { at: number; used: number } | undefined;
+
+// macOS keeps RAM filled with file cache, so totalmem-freemem reads ~100%
+// forever. Use vm_stat pressure accounting (anonymous + wired + compressed,
+// Activity Monitor's "Memory Used") on darwin; total-free elsewhere.
+export async function systemMemoryUsedBytes(): Promise<number> {
+  if (memCache && Date.now() - memCache.at < 1000) return memCache.used;
+  let used = Math.max(0, totalmem() - freemem());
+  if (process.platform === "darwin") {
+    try {
+      const proc = Bun.spawn(["vm_stat"], { stdout: "pipe", stderr: "ignore" });
+      const text = await new Response(proc.stdout).text();
+      await proc.exited;
+      const pageSize = Number(text.match(/page size of (\d+) bytes/)?.[1] ?? 16384);
+      const pages = (label: string) => Number(text.match(new RegExp(`${label}:\\s+(\\d+)`))?.[1] ?? 0);
+      const anonymous = pages("Anonymous pages") - pages("Pages purgeable");
+      const computed = (Math.max(0, anonymous) + pages("Pages wired down") + pages("Pages occupied by compressor")) * pageSize;
+      if (computed > 0) used = Math.min(computed, totalmem());
+    } catch {
+      // fall back to total - free
+    }
+  }
+  memCache = { at: Date.now(), used };
+  return used;
 }
 
 export function cpuCoreCount(): number {

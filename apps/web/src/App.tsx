@@ -16,7 +16,7 @@ export function App() {
   const actions = useActions();
 
   return (
-    <div className="mx-auto grid max-w-[1280px] gap-4 p-4">
+    <div className="mx-auto grid w-full max-w-[1280px] grid-cols-1 gap-4 p-4">
       <header className="flex flex-wrap items-baseline gap-3 border border-border bg-panel px-4 py-3">
         <h1 className="m-0 text-[1.05rem] uppercase tracking-[0.08em]">
           <span className={`mr-2 inline-block h-2 w-2 ${connected ? "animate-pulse bg-ok" : "bg-err"}`} />
@@ -51,7 +51,7 @@ export function App() {
         <>
           <Tiles data={data} />
           <UsagePanel data={data} />
-          <LoadedModels models={data.loaded} now={now} actions={actions} systemMemoryBytes={data.server.systemMemoryBytes} cpuCount={data.server.cpuCount} />
+          <LoadedModels models={data.loaded} now={now} actions={actions} platform={data.server.platform} systemMemoryBytes={data.server.systemMemoryBytes} cpuCount={data.server.cpuCount} />
           <ActiveRequests requests={data.active} now={now} onSelect={setSelectedRequest} />
           <RecentRequests requests={data.requests} onSelect={setSelectedRequest} />
           <Events events={data.events ?? []} />

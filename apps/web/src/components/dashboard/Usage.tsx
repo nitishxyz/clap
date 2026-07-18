@@ -1,7 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DashboardData, DashboardGpu, DashboardLoadedModel } from "@/lib/api";
 import { fmtBytes } from "@/lib/format";
-import { Panel } from "./Shared";
+
+const SEGMENTS = 16;
+const SWEEP_MS_PER_SEGMENT = 30;
 
 function toneFor(pct: number): string {
   if (pct >= 85) return "bg-err";
@@ -9,13 +11,47 @@ function toneFor(pct: number): string {
   return "bg-ok";
 }
 
-export function BoxBar({ pct, segments = 20, tone, className }: { pct: number; segments?: number; tone?: string; className?: string }) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  const filled = clamped > 0 ? Math.max(1, Math.round((clamped / 100) * segments)) : 0;
-  const fill = tone ?? toneFor(clamped);
+// VU-meter sweep: step the displayed segment count one at a time toward the
+// target, retargeting from wherever the sweep currently is when a new value
+// arrives mid-animation.
+function useSweep(target: number): { displayed: number; rising: boolean } {
+  const [displayed, setDisplayed] = useState(target);
+  const displayedRef = useRef(target);
+  const risingRef = useRef(false);
+  displayedRef.current = displayed;
+
+  useEffect(() => {
+    if (displayedRef.current === target) {
+      risingRef.current = false;
+      return;
+    }
+    risingRef.current = target > displayedRef.current;
+    const timer = setInterval(() => {
+      setDisplayed((current) => {
+        const next = current + Math.sign(target - current);
+        if (next === target) clearInterval(timer);
+        return next;
+      });
+    }, SWEEP_MS_PER_SEGMENT);
+    return () => clearInterval(timer);
+  }, [target]);
+
+  return { displayed, rising: risingRef.current && displayed !== target };
+}
+
+export function BoxBar({ pct, segments = SEGMENTS, tone, className }: { pct?: number; segments?: number; tone?: string; className?: string }) {
+  const na = pct === undefined;
+  const clamped = Math.max(0, Math.min(100, pct ?? 0));
+  const target = clamped > 0 ? Math.max(1, Math.round((clamped / 100) * segments)) : 0;
+  const { displayed, rising } = useSweep(target);
+  const filled = Math.max(0, Math.min(segments, displayed));
+  // Color thresholds follow the displayed level so the meter passes through
+  // green/amber on its way up, like an analog VU meter.
+  const displayedPct = (filled / segments) * 100;
+  const fill = tone ?? toneFor(displayedPct);
   return (
     <span
-      className={`flex h-2.5 items-stretch gap-px ${className ?? ""}`}
+      className={`flex h-2.5 items-stretch gap-px ${na ? "opacity-35" : ""} ${className ?? ""}`}
       role="meter"
       aria-valuemin={0}
       aria-valuemax={100}
@@ -24,74 +60,116 @@ export function BoxBar({ pct, segments = 20, tone, className }: { pct: number; s
       {Array.from({ length: segments }, (_, index) => (
         <i
           key={index}
-          className={`min-w-0 flex-1 transition-colors duration-500 ${index < filled ? fill : "bg-panel-strong"}`}
+          className={`min-w-0 flex-1 ${index < filled ? `${fill} ${rising && index === filled - 1 ? "brightness-150" : ""}` : "bg-panel-strong"}`}
         />
       ))}
     </span>
   );
 }
 
-// Every row shares this template so all bars start and end on the same
-// columns: fixed label, flexible bar, fixed right-aligned value.
-const ROW = "grid grid-cols-[3.75rem_minmax(0,1fr)_minmax(8rem,auto)] items-center gap-x-3 px-3 py-[3px]";
+// Middle-ellipsis so long model ids keep their distinguishing head and tail;
+// full value stays available via the title tooltip.
+function midTruncate(text: string, max = 40): string {
+  if (text.length <= max) return text;
+  const head = Math.ceil((max - 1) / 2);
+  const tail = max - 1 - head;
+  return `${text.slice(0, head)}\u2026${text.slice(-tail)}`;
+}
 
+// Compact byte value so the fixed-width value slot never overflows: 14.1G, 21M.
+function shortBytes(value: number): string {
+  const gib = value / 2 ** 30;
+  if (gib >= 10) return `${Math.round(gib)}G`;
+  if (gib >= 1) return `${gib.toFixed(1)}G`;
+  return `${Math.round(value / 2 ** 20)}M`;
+}
+
+// One geometry for every metric row: fixed label, flexible bar, fixed
+// right-aligned value slot so nothing shifts as numbers change.
 function Row({ label, pct, value, tone }: { label: string; pct?: number; value?: string; tone?: string }) {
-  const na = pct === undefined && value === undefined;
   return (
-    <div className={ROW}>
-      <span className="truncate text-[0.68rem] uppercase tracking-[0.06em] text-muted">{label}</span>
-      <BoxBar pct={pct ?? 0} tone={tone} className={pct === undefined ? "opacity-35" : ""} />
-      <span className={`truncate text-right text-[0.72rem] tabular-nums ${na || pct === undefined ? "text-muted" : ""}`}>
+    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_5.25rem] items-center gap-x-2 px-3 py-1">
+      <span className="truncate text-[0.68rem] lowercase text-muted">{label}</span>
+      <BoxBar pct={pct} tone={tone} />
+      <span className={`truncate text-right text-[0.72rem] tabular-nums ${pct === undefined ? "text-muted" : ""}`}>
         {value ?? "n/a"}
       </span>
     </div>
   );
 }
 
-function Section({ title, aside, children }: { title: ReactNode; aside?: ReactNode; children: ReactNode }) {
+function Card({ title, meta, footer, children }: { title: string; meta?: ReactNode; footer?: ReactNode; children: ReactNode }) {
   return (
-    <div className="py-1.5">
-      <div className="flex items-baseline justify-between gap-3 px-3 pb-1">
-        <span className="shrink-0 text-[0.66rem] uppercase tracking-[0.08em] text-muted">{title}</span>
-        {aside ? <span className="truncate text-[0.68rem] text-muted">{aside}</span> : null}
+    <section className="flex w-full min-w-0 flex-col border border-border bg-panel">
+      <div className="flex items-baseline justify-between gap-3 border-b border-border px-3 py-2">
+        <span className="shrink-0 text-[0.72rem] uppercase tracking-[0.08em] text-muted">{title}</span>
+        {meta ? <span className="truncate text-[0.68rem] text-muted">{meta}</span> : null}
       </div>
-      {children}
-    </div>
+      <div className="flex-1 py-1.5">{children}</div>
+      {footer ? <div className="truncate px-3 pb-2 text-[0.68rem] text-muted">{footer}</div> : null}
+    </section>
   );
 }
 
-function GpuSection({ gpu }: { gpu: DashboardGpu }) {
+function GpuRows({ gpu }: { gpu: DashboardGpu }) {
   const util = gpu.utilizationPercent;
   const used = gpu.memoryUsedBytes;
   const total = gpu.memoryTotalBytes;
   const hasVram = used !== undefined && total !== undefined && total > 0;
   return (
-    <Section title="gpu" aside={`${gpu.name} (${gpu.vendor})`}>
+    <>
       <Row label="util" pct={util} value={util !== undefined ? `${util.toFixed(0)}%` : undefined} />
       <Row
-        label="vram"
+        label={gpu.vendor === "apple" ? "unified" : "vram"}
         pct={hasVram ? (used / total) * 100 : undefined}
         tone="bg-cache"
-        value={hasVram ? `${fmtBytes(used)} / ${fmtBytes(total)}` : undefined}
+        value={hasVram ? `${shortBytes(used)}/${shortBytes(total)}` : undefined}
       />
-    </Section>
+    </>
   );
 }
 
-function WorkerSection({ entry, systemMemoryBytes, cpuCount, gpuTotalBytes }: { entry: DashboardLoadedModel; systemMemoryBytes?: number; cpuCount?: number; gpuTotalBytes?: number }) {
+const WORKER_GRID = "grid grid-cols-[minmax(8rem,1.4fr)_3.25rem_minmax(6rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)] items-center gap-x-3 px-3";
+
+export function WorkerBarCell({ pct, value, tone, dim, title }: { pct?: number; value?: string; tone?: string; dim?: boolean; title?: string }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2" title={title}>
+      <BoxBar pct={pct} tone={tone} className="min-w-0 flex-1" />
+      <span className={`w-[4.6rem] shrink-0 truncate text-right text-[0.72rem] tabular-nums ${dim || pct === undefined ? "text-muted" : ""}`}>
+        {value ?? "-"}
+      </span>
+    </span>
+  );
+}
+
+export const MLX_UNIFIED_TITLE = "MLX weights live in Metal wired memory, not process RSS";
+
+export function isUnifiedMlx(backend: string, platform?: string): boolean {
+  return backend === "mlx" && platform === "darwin";
+}
+
+function WorkerRow({ entry, platform, systemMemoryBytes, cpuCount, gpuTotalBytes }: { entry: DashboardLoadedModel; platform?: string; systemMemoryBytes?: number; cpuCount?: number; gpuTotalBytes?: number }) {
   const usage = entry.usage;
+  const unifiedMlx = isUnifiedMlx(entry.backend, platform);
   const cpuPct = usage ? (cpuCount ? usage.cpuPercent / cpuCount : Math.min(100, usage.cpuPercent)) : undefined;
   const rssPct = usage && systemMemoryBytes ? (usage.rssBytes / systemMemoryBytes) * 100 : undefined;
   const gpuBytes = entry.gpuMemoryBytes;
   const gpuPct = gpuBytes !== undefined && gpuTotalBytes ? (gpuBytes / gpuTotalBytes) * 100 : undefined;
   return (
-    <Section title="worker" aside={<span title={entry.localPath}>{entry.id} · pid {entry.worker?.pid ?? "-"}</span>}>
-      <Row label="cpu" pct={cpuPct} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : undefined} />
-      <Row label="mem" pct={rssPct} value={usage ? fmtBytes(usage.rssBytes) : undefined} />
-      {gpuBytes !== undefined ? (
-        <Row label="vram" pct={gpuPct} tone="bg-cache" value={fmtBytes(gpuBytes)} />
-      ) : null}
-    </Section>
+    <div className={`${WORKER_GRID} py-1`}>
+      <span className="truncate text-[0.74rem]" title={`${entry.id}\n${entry.localPath}`}>{midTruncate(entry.id)}</span>
+      <span className="truncate text-[0.7rem] tabular-nums text-muted">{entry.worker?.pid ?? "-"}</span>
+      <WorkerBarCell pct={cpuPct} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : undefined} />
+      {unifiedMlx ? (
+        <WorkerBarCell dim value="unified" title={MLX_UNIFIED_TITLE} />
+      ) : (
+        <WorkerBarCell
+          pct={rssPct}
+          value={usage && systemMemoryBytes ? `${shortBytes(usage.rssBytes)}/${shortBytes(systemMemoryBytes)}` : usage ? shortBytes(usage.rssBytes) : undefined}
+        />
+      )}
+      <WorkerBarCell pct={gpuPct} tone="bg-cache" value={gpuBytes !== undefined ? shortBytes(gpuBytes) : undefined} />
+    </div>
   );
 }
 
@@ -104,66 +182,78 @@ export function UsagePanel({ data }: { data: DashboardData }) {
   const memPct = memUsed !== undefined && memTotal ? (memUsed / memTotal) * 100 : undefined;
   const sysCpu = server.systemCpuPercent;
   const gpuTotal = gpus[0]?.memoryTotalBytes;
-  const workers = data.loaded.filter((entry) => entry.usage || entry.gpuMemoryBytes !== undefined);
-  const systemAside = [
+  const systemFooter = [
     server.rssBytes !== undefined ? `server rss ${fmtBytes(server.rssBytes)}` : null,
     server.cpuCount ? `${server.cpuCount} cores` : null,
+    `pid ${server.pid}`,
   ]
     .filter(Boolean)
     .join(" · ");
   return (
-    <Panel title="usage" count={queue ? `${queue.inflight}/${queue.maxInflight} inflight` : ""}>
-      <div className="grid divide-y divide-soft-border lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-        <div className="pb-1">
-          <Section title="system" aside={systemAside}>
-            <Row label="cpu" pct={sysCpu} value={sysCpu !== undefined ? `${sysCpu.toFixed(0)}%` : undefined} />
-            <Row
-              label="mem"
-              pct={memPct}
-              value={memUsed !== undefined && memTotal ? `${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}` : undefined}
-            />
-          </Section>
-          <Section title="queue" aside={queue ? `${queue.inflight + queue.queued} in system` : undefined}>
-            <Row
-              label="inflight"
-              pct={queue && queue.maxInflight ? (queue.inflight / queue.maxInflight) * 100 : undefined}
-              tone="bg-accent"
-              value={queue ? `${queue.inflight} / ${queue.maxInflight}` : undefined}
-            />
-            <Row
-              label="waiting"
-              pct={queue && queue.queueDepth ? (queue.queued / queue.queueDepth) * 100 : undefined}
-              tone={queue?.queued ? "bg-warn" : "bg-accent"}
-              value={queue ? `${queue.queued} / ${queue.queueDepth}` : undefined}
-            />
-          </Section>
-        </div>
-        <div className="pb-1">
+    <>
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-3">
+        <Card title="system" footer={systemFooter}>
+          <Row label="cpu" pct={sysCpu} value={sysCpu !== undefined ? `${sysCpu.toFixed(0)}%` : undefined} />
+          <Row
+            label="mem"
+            pct={memPct}
+            value={memUsed !== undefined && memTotal ? `${shortBytes(memUsed)}/${shortBytes(memTotal)}` : undefined}
+          />
+        </Card>
+        <Card title="gpu" meta={gpus.length ? `${gpus[0].name} (${gpus[0].vendor})` : "no telemetry"}>
           {gpus.length ? (
-            gpus.map((gpu, index) => <GpuSection key={`${gpu.vendor}-${gpu.name}-${index}`} gpu={gpu} />)
+            gpus.map((gpu, index) => <GpuRows key={`${gpu.vendor}-${gpu.name}-${index}`} gpu={gpu} />)
           ) : (
-            <Section title="gpu" aside="no telemetry">
+            <>
               <Row label="util" />
               <Row label="vram" />
-            </Section>
+            </>
           )}
-          {workers.map((entry) => (
-            <WorkerSection
-              key={entry.key}
-              entry={entry}
-              systemMemoryBytes={memTotal}
-              cpuCount={server.cpuCount}
-              gpuTotalBytes={gpuTotal}
-            />
-          ))}
-          {workers.length === 0 ? (
-            <Section title="worker" aside="none resident">
-              <Row label="cpu" />
-              <Row label="mem" />
-            </Section>
-          ) : null}
-        </div>
+        </Card>
+        <Card title="queue" meta={queue ? `${queue.inflight + queue.queued} in system` : undefined}>
+          <Row
+            label="inflight"
+            pct={queue && queue.maxInflight ? (queue.inflight / queue.maxInflight) * 100 : undefined}
+            tone="bg-accent"
+            value={queue ? `${queue.inflight}/${queue.maxInflight}` : undefined}
+          />
+          <Row
+            label="waiting"
+            pct={queue && queue.queueDepth ? (queue.queued / queue.queueDepth) * 100 : undefined}
+            tone={queue?.queued ? "bg-warn" : "bg-accent"}
+            value={queue ? `${queue.queued}/${queue.queueDepth}` : undefined}
+          />
+        </Card>
       </div>
-    </Panel>
+      <Card title="workers" meta={data.loaded.length ? `${data.loaded.length} resident` : undefined}>
+        {data.loaded.length ? (
+          <div className="overflow-x-auto">
+            <div className="min-w-[640px]">
+              <div className={`${WORKER_GRID} pb-1 text-[0.66rem] uppercase tracking-[0.06em] text-muted`}>
+                <span>model</span>
+                <span>pid</span>
+                <span>cpu</span>
+                <span>rss</span>
+                <span>vram</span>
+              </div>
+              <div className="max-h-44 overflow-y-auto">
+                {data.loaded.map((entry) => (
+                  <WorkerRow
+                    key={entry.key}
+                    entry={entry}
+                    platform={server.platform}
+                    systemMemoryBytes={memTotal}
+                    cpuCount={server.cpuCount}
+                    gpuTotalBytes={gpuTotal}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="px-3 py-1 text-[0.72rem] text-muted">no resident workers</div>
+        )}
+      </Card>
+    </>
   );
 }

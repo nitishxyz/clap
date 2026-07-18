@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel, type ModelResolveOption, type ModelResolveResponse } from "@/lib/api";
 import { fmtBytes, fmtDuration, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
-import { BoxBar } from "./Usage";
+import { BoxBar, isUnifiedMlx, MLX_UNIFIED_TITLE } from "./Usage";
 
 function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: boolean; danger?: boolean; onClick: () => void }) {
   return (
@@ -25,76 +25,118 @@ function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: 
   );
 }
 
-export function LoadedModels({ models, now, actions, systemMemoryBytes, cpuCount }: { models: DashboardLoadedModel[]; now: number; actions: ActionState; systemMemoryBytes?: number; cpuCount?: number }) {
+// Fixed geometry: bar and value each occupy a constant width so cells in the
+// same column align across rows no matter how wide the value string is.
+function TableBarCell({ pct, value, tone, dim, title }: { pct?: number; value?: string; tone?: string; dim?: boolean; title?: string }) {
+  return (
+    <span className="inline-flex items-center gap-2" title={title}>
+      <BoxBar pct={pct} tone={tone} className="w-20 shrink-0" />
+      <span className={`w-14 shrink-0 truncate text-right tabular-nums ${dim || pct === undefined ? "text-muted" : ""}`}>{value ?? "-"}</span>
+    </span>
+  );
+}
+
+function DetailItem({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3">
+      <span className="shrink-0 text-[0.66rem] uppercase tracking-[0.06em] text-muted">{label}</span>
+      <span className="min-w-0 truncate text-right text-[0.74rem] tabular-nums">{children}</span>
+    </div>
+  );
+}
+
+function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuCount, open, onToggle }: { entry: DashboardLoadedModel; now: number; actions: ActionState; platform?: string; systemMemoryBytes?: number; cpuCount?: number; open: boolean; onToggle: () => void }) {
+  const unifiedMlx = isUnifiedMlx(entry.backend, platform);
+  return (
+    <div className="border-b border-soft-border last:border-b-0">
+      <div
+        className="flex cursor-pointer items-center gap-2 px-3 py-2 hover:bg-panel-strong"
+        onClick={onToggle}
+        role="button"
+        aria-expanded={open}
+      >
+        <span className={`shrink-0 text-[0.66rem] text-muted transition-transform duration-200 ${open ? "rotate-90" : ""}`}>&#9656;</span>
+        <span className="min-w-0 flex-1 truncate text-[0.78rem]" title={entry.localPath}>{entry.id}</span>
+        <span className="hidden shrink-0 sm:inline"><Tag>{entry.backend}</Tag></span>
+        <span className="shrink-0">{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.state}</Tag>}</span>
+        {entry.pinned ? <span className="hidden shrink-0 sm:inline"><Tag tone="pin">pinned</Tag></span> : null}
+        <span className="flex shrink-0 gap-1">
+          {entry.pinned ? (
+            <ActionButton
+              label="unpin"
+              busy={actions.busy[`pin:${entry.id}`]}
+              onClick={() => actions.run(`pin:${entry.id}`, () => loadModel(entry.id, "5m"))}
+            />
+          ) : (
+            <ActionButton
+              label="pin"
+              busy={actions.busy[`pin:${entry.id}`]}
+              onClick={() => actions.run(`pin:${entry.id}`, () => loadModel(entry.id, "always"))}
+            />
+          )}
+          <ActionButton
+            label="unload"
+            danger
+            busy={actions.busy[`unload:${entry.id}`]}
+            onClick={() => actions.run(`unload:${entry.id}`, () => unloadModel(entry.id))}
+          />
+        </span>
+      </div>
+      <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>
+        <div className="overflow-hidden">
+          <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 border-t border-soft-border px-3 py-2.5 pl-8 sm:grid-cols-2 xl:grid-cols-3">
+            <DetailItem label="mem">
+              {unifiedMlx ? (
+                <TableBarCell dim value="unified" title={MLX_UNIFIED_TITLE} />
+              ) : (
+                <TableBarCell
+                  pct={entry.usage && systemMemoryBytes ? (entry.usage.rssBytes / systemMemoryBytes) * 100 : undefined}
+                  value={entry.usage ? fmtBytes(entry.usage.rssBytes) : undefined}
+                />
+              )}
+            </DetailItem>
+            <DetailItem label="cpu">
+              <TableBarCell
+                pct={entry.usage ? (cpuCount ? entry.usage.cpuPercent / cpuCount : Math.min(100, entry.usage.cpuPercent)) : undefined}
+                value={entry.usage ? `${entry.usage.cpuPercent.toFixed(0)}%` : undefined}
+              />
+            </DetailItem>
+            <DetailItem label="gpu mem">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</DetailItem>
+            <DetailItem label="requests">{entry.activeRequests}</DetailItem>
+            <DetailItem label="keep-alive">{entry.keepAlive}</DetailItem>
+            <DetailItem label="expires">
+              {entry.pinned ? "pinned" : entry.expiresAt ? fmtDuration(new Date(entry.expiresAt).getTime() - now) : "-"}
+            </DetailItem>
+            <DetailItem label="last used">{fmtDuration(now - new Date(entry.lastUsedAt).getTime())} ago</DetailItem>
+            <DetailItem label="pid">{entry.worker?.pid ?? "-"}</DetailItem>
+            <DetailItem label="backend">{entry.backend} · {entry.format}</DetailItem>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function LoadedModels({ models, now, actions, platform, systemMemoryBytes, cpuCount }: { models: DashboardLoadedModel[]; now: number; actions: ActionState; platform?: string; systemMemoryBytes?: number; cpuCount?: number }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   return (
     <Panel title="loaded models" count={models.length || ""}>
       {models.length ? (
-        <Table headers={["model", "backend", "state", { label: "mem", numeric: true }, { label: "cpu", numeric: true }, { label: "gpu mem", numeric: true }, { label: "reqs", numeric: true }, "keep-alive", "expires", "last used", { label: "pid", numeric: true }, ""]}>
+        <div>
           {models.map((entry) => (
-            <tr key={entry.key}>
-              <Td className="max-w-[260px] overflow-hidden text-ellipsis" title={entry.localPath}>{entry.id}</Td>
-              <Td>{entry.backend}</Td>
-              <Td>{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.state}</Tag>}</Td>
-              <Td numeric>
-                {entry.usage ? (
-                  <span className="flex items-center justify-end gap-2">
-                    {systemMemoryBytes ? <BoxBar pct={(entry.usage.rssBytes / systemMemoryBytes) * 100} segments={10} className="w-16" /> : null}
-                    <span>{fmtBytes(entry.usage.rssBytes)}</span>
-                  </span>
-                ) : (
-                  "-"
-                )}
-              </Td>
-              <Td numeric>
-                {entry.usage ? (
-                  <span className="flex items-center justify-end gap-2">
-                    <BoxBar pct={cpuCount ? entry.usage.cpuPercent / cpuCount : Math.min(100, entry.usage.cpuPercent)} segments={10} className="w-16" />
-                    <span>{`${entry.usage.cpuPercent.toFixed(0)}%`}</span>
-                  </span>
-                ) : (
-                  "-"
-                )}
-              </Td>
-              <Td numeric>{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</Td>
-              <Td numeric>{entry.activeRequests}</Td>
-              <Td>{entry.keepAlive}</Td>
-              <Td>
-                {entry.pinned ? (
-                  <Tag tone="pin">pinned</Tag>
-                ) : entry.expiresAt ? (
-                  fmtDuration(new Date(entry.expiresAt).getTime() - now)
-                ) : (
-                  "-"
-                )}
-              </Td>
-              <Td>{fmtDuration(now - new Date(entry.lastUsedAt).getTime())} ago</Td>
-              <Td numeric>{entry.worker?.pid ?? "-"}</Td>
-              <Td>
-                <span className="flex gap-1">
-                  {entry.pinned ? (
-                    <ActionButton
-                      label="unpin"
-                      busy={actions.busy[`pin:${entry.id}`]}
-                      onClick={() => actions.run(`pin:${entry.id}`, () => loadModel(entry.id, "5m"))}
-                    />
-                  ) : (
-                    <ActionButton
-                      label="pin"
-                      busy={actions.busy[`pin:${entry.id}`]}
-                      onClick={() => actions.run(`pin:${entry.id}`, () => loadModel(entry.id, "always"))}
-                    />
-                  )}
-                  <ActionButton
-                    label="unload"
-                    danger
-                    busy={actions.busy[`unload:${entry.id}`]}
-                    onClick={() => actions.run(`unload:${entry.id}`, () => unloadModel(entry.id))}
-                  />
-                </span>
-              </Td>
-            </tr>
+            <LoadedModelRow
+              key={entry.key}
+              entry={entry}
+              now={now}
+              actions={actions}
+              platform={platform}
+              systemMemoryBytes={systemMemoryBytes}
+              cpuCount={cpuCount}
+              open={!!expanded[entry.key]}
+              onToggle={() => setExpanded((previous) => ({ ...previous, [entry.key]: !previous[entry.key] }))}
+            />
           ))}
-        </Table>
+        </div>
       ) : (
         <Empty>no models resident — send a request, `clap load &lt;model&gt;`, or press load below</Empty>
       )}

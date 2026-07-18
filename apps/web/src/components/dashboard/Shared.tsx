@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 export function Panel({ title, count, children }: { title: string; count?: ReactNode; children: ReactNode }) {
   return (
-    <section className="border border-border bg-panel">
+    <section className="w-full min-w-0 border border-border bg-panel">
       <h2 className="m-0 flex items-baseline justify-between border-b border-border px-3 py-2 text-[0.72rem] uppercase tracking-[0.08em] text-muted">
         {title}
         {count !== undefined && count !== "" ? <span className="text-foreground">{count}</span> : null}

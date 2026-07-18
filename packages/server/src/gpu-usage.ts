@@ -1,7 +1,8 @@
 // Best-effort GPU telemetry for the dashboard. NVIDIA via nvidia-smi (Linux
-// and Windows); Apple Silicon has no unprivileged utilization API, so macOS
-// reports availability only when a supported tool exists. Absence of a GPU is
-// normal — consumers must treat the result as optional.
+// and Windows); Apple Silicon via the IORegistry accelerator node. Absence of
+// a GPU is normal — consumers must treat the result as optional.
+
+import { systemMemoryBytes, systemMemoryUsedBytes } from "./process-usage";
 
 export type GpuUsage = {
   vendor: "nvidia" | "apple";
@@ -78,11 +79,25 @@ async function sampleNvidia(): Promise<GpuUsage[]> {
 
 async function sampleAppleGpu(): Promise<GpuUsage[]> {
   if (process.arch !== "arm64") return [];
-  // No unprivileged utilization API on macOS; report the device so the UI can
-  // show unified-memory pressure via system memory instead of GPU util.
-  const profile = await run(["sysctl", "-n", "machdep.cpu.brand_string"]);
+  // Apple exposes GPU load in the IORegistry accelerator node
+  // (PerformanceStatistics -> "Device Utilization %"), readable without
+  // privileges. This is the same signal Activity Monitor's GPU history uses;
+  // btop reads the equivalent data via the private IOReport framework.
+  const [profile, ioreg] = await Promise.all([
+    run(["sysctl", "-n", "machdep.cpu.brand_string"]),
+    run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"]),
+  ]);
   const name = profile?.trim() || "Apple Silicon";
-  return [{ vendor: "apple", name }];
+  const utilization = ioreg?.match(/"Device Utilization %"=(\d+)/)?.[1];
+  const gpu: GpuUsage = { vendor: "apple", name };
+  if (utilization !== undefined) {
+    gpu.utilizationPercent = Math.min(100, Number(utilization));
+    // Unified memory: the GPU shares system RAM, so report system used/total
+    // as the memory pressure signal (what Activity Monitor implies too).
+    gpu.memoryUsedBytes = await systemMemoryUsedBytes();
+    gpu.memoryTotalBytes = systemMemoryBytes();
+  }
+  return [gpu];
 }
 
 function toNumber(raw: string | undefined): number | undefined {
