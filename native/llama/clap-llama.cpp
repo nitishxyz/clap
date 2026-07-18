@@ -433,6 +433,7 @@ struct ActiveRequest {
   int32_t n_pos = 0;
   int prompt_token_count = 0;
   int cached_prompt_tokens = 0;
+  std::string cache_reuse_kind;
 
   enum class Phase { Prefill, Decode };
   Phase phase = Phase::Prefill;
@@ -509,6 +510,7 @@ void finalize(ActiveRequest& req) {
     {"cache", json{
       {"hit", req.cached_prompt_tokens > 0},
       {"reused_tokens", req.cached_prompt_tokens},
+      {"reuse_kind", req.cache_reuse_kind.empty() ? json(nullptr) : json(req.cache_reuse_kind)},
       {"slot", static_cast<int>(req.seq)},
     }},
   });
@@ -653,6 +655,7 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
     req.ingested = 0;
     req.n_pos = 0;
     req.cached_prompt_tokens = 0;
+    req.cache_reuse_kind.clear();
     fprintf(stderr, "clap-llama: ingest failed for request %s; retrying from scratch\n", req.id.c_str());
     return;
   }
@@ -897,6 +900,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
       req->n_pos = static_cast<int32_t>(prefix);
       prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
       req->cached_prompt_tokens = static_cast<int>(prefix);
+      req->cache_reuse_kind = "slot";
     } else {
       llama_memory_seq_rm(mem, req->seq, -1, -1);
       slot->tokens.clear();
@@ -928,12 +932,14 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
         req->n_pos = static_cast<int32_t>(want);
         prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(want));
         req->cached_prompt_tokens = static_cast<int>(want);
+        req->cache_reuse_kind = loaded.slots[donor].is_anchor ? "anchor" : "branch";
       } else if (loaded.hybrid && donor_exact && donor_prefix < prompt_tokens.size()) {
         llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor), req->seq, -1, -1);
         slot->tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
         req->n_pos = static_cast<int32_t>(donor_prefix);
         prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
         req->cached_prompt_tokens = static_cast<int>(donor_prefix);
+        req->cache_reuse_kind = loaded.slots[donor].is_anchor ? "anchor" : "branch";
       } else if (loaded.hybrid && !donor_exact) {
         // Cannot branch mid-stream off hybrid state. Prefill fully, but
         // snapshot an anchor at the shared boundary so every future session

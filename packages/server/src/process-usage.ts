@@ -1,4 +1,4 @@
-import { cpus, freemem, loadavg, totalmem } from "node:os";
+import { cpus, freemem, totalmem } from "node:os";
 
 export type ProcessUsage = { rssBytes: number; cpuPercent: number };
 
@@ -69,9 +69,49 @@ export function cpuCoreCount(): number {
   return Math.max(1, cpus().length);
 }
 
-// System-wide CPU utilization approximation: 1-minute load average over
-// cores, capped at 100. Good enough for a dashboard pressure bar.
-export function systemCpuPercent(): number {
-  const load = loadavg()[0] ?? 0;
-  return Math.min(100, Math.round((load / cpuCoreCount()) * 100));
+export type CpuTimes = { cores: number; idle: number; total: number };
+
+function cpuTimes(): CpuTimes {
+  let idle = 0;
+  let total = 0;
+  const processors = cpus();
+  for (const cpu of processors) {
+    idle += cpu.times.idle;
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq;
+  }
+  return { cores: processors.length, idle, total };
+}
+
+export function cpuPercentBetween(previous: CpuTimes, current: CpuTimes): number | undefined {
+  const total = current.total - previous.total;
+  const idle = current.idle - previous.idle;
+  if (current.cores < 1 || current.cores !== previous.cores || total <= 0 || idle < 0 || idle > total) return undefined;
+  return Math.max(0, Math.min(100, Math.round((1 - idle / total) * 100)));
+}
+
+export function createSystemCpuPercentSampler(read: () => CpuTimes = cpuTimes): () => number | undefined {
+  let previous: CpuTimes | undefined;
+  return () => {
+    const current = read();
+    if (!previous) {
+      previous = current;
+      return undefined;
+    }
+    const percent = cpuPercentBetween(previous, current);
+    previous = current;
+    return percent;
+  };
+}
+
+const sampleSystemCpuPercent = createSystemCpuPercentSampler();
+let cpuCache: { at: number; percent: number | undefined } | undefined;
+
+// Aggregate CPU tick deltas across every core. Unlike load average, this is
+// actual utilization during the dashboard polling interval and does not count
+// runnable or blocked processes as if they were consuming CPU.
+export function systemCpuPercent(): number | undefined {
+  if (cpuCache && Date.now() - cpuCache.at < 500) return cpuCache.percent;
+  const percent = sampleSystemCpuPercent();
+  cpuCache = { at: Date.now(), percent };
+  return percent;
 }

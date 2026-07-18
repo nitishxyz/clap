@@ -280,7 +280,10 @@ export function createServer(
   app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({ models: lifecycle.list() })));
 
   const dashboardPayload = async () => {
-    const loaded = lifecycle.list();
+    const loaded = lifecycle.list().map((entry) => ({
+      ...entry,
+      worker: residents.get(entry.key)?.info() ?? entry.worker,
+    }));
     const workerPids = loaded
       .map((entry) => entry.worker?.pid)
       .filter((pid): pid is number => typeof pid === "number");
@@ -1113,7 +1116,10 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
       completionTokens: result.usage?.completionTokens,
       cacheHit: result.cache?.hit,
       reusedTokens: result.cache?.reusedTokens,
-      sideRequest: result.cache?.sideRequest,      slot: result.cache?.slot,
+      reuseKind: result.cache?.reuseKind,
+      reuseScope: result.cache?.reuseScope,
+      sideRequest: result.cache?.sideRequest,
+      slot: result.cache?.slot,
       finishReason: body.choices[0]?.finish_reason ?? undefined,
       toolCalls: message?.tool_calls?.length,
       response: {
@@ -1200,7 +1206,10 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
           completionTokens: result.usage?.completionTokens,
           cacheHit: result.cache?.hit,
           reusedTokens: result.cache?.reusedTokens,
-          sideRequest: result.cache?.sideRequest,          slot: result.cache?.slot,
+          reuseKind: result.cache?.reuseKind,
+          reuseScope: result.cache?.reuseScope,
+          sideRequest: result.cache?.sideRequest,
+          slot: result.cache?.slot,
           finishReason: "cancel",
         });
         return;
@@ -1228,7 +1237,10 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         completionTokens: result.usage?.completionTokens,
         cacheHit: result.cache?.hit,
         reusedTokens: result.cache?.reusedTokens,
-        sideRequest: result.cache?.sideRequest,        slot: result.cache?.slot,
+        reuseKind: result.cache?.reuseKind,
+        reuseScope: result.cache?.reuseScope,
+        sideRequest: result.cache?.sideRequest,
+        slot: result.cache?.slot,
         finishReason,
         toolCalls: parsed.toolCalls?.length,
         response: {

@@ -51,8 +51,35 @@ map 1:1 to `seq_id`s.
 - Server: resident router must multiplex requests to a busy worker instead of
   awaiting exclusivity.
 - Expected effect: 10-50 concurrent sessions per model on one GPU.
-- MLX: same restructuring later via `BatchedKVCache` (mlx-lm has batched
-  generation); acceptable for MLX to lag one phase behind.
+- MLX: DONE at the scheduling level — the Swift worker runs an interleaved
+  multi-request scheduler (round-robin: one 512-token prefill chunk or 6
+  decode tokens per request per pass; `CLAP_MLX_PARALLEL` limit, busy slots,
+  FIFO overflow, cancel for active+queued, load/unload defers until drained).
+  Verified: 3 concurrent streams interleave, short requests finish while a
+  long one streams. Metal still evaluates one sequence at a time (no fused
+  multi-sequence batch upstream yet), so aggregate throughput is shared —
+  head-of-line blocking is gone, fused batching waits on mlx-swift.
+
+### 1c. MLX feature parity (full-featured MLX worker)
+Status: DONE. The MLX worker now matches the llama worker's contract:
+- Sampling: top_p/top_k/min_p, seed (verified deterministic), repetition/
+  presence/frequency penalties
+- Stop sequences with streaming holdback (never emits a split stop)
+- Admission control: per-model trained context (config.json) or
+  CLAP_MLX_CONTEXT, session cap CLAP_MLX_MAX_SESSION_CTX — structured
+  `context_length_exceeded` mapped to an OpenAI-style 400
+- KV cache quantization: CLAP_MLX_KV_TYPE=q8_0|q4_0 (maps to kvBits)
+- Cross-slot prefix branching: clones a donor slot's cache (busy donors
+  included) and trims to the shared boundary — verified cloning 894/904
+  shared tokens off an in-flight generation. Rotating/sliding-window caches
+  (gemma-4-e4b class) cannot rewind once rotated, so they get prefix
+  anchors instead: when a request misses because a donor cannot rewind to
+  the shared boundary, its fresh prefill snapshots the cache state exactly
+  at the boundary (chunks split at the plant point) into an anchor slot;
+  later sessions whole-copy the anchor (trim 0, valid for any cache class).
+  Verified on gemma-4-e4b: session 3+ reuse 895/904 tokens, prefilling 9.
+- Config: `[mlx]` section (slots/parallel/context/max_session_ctx/kv_type);
+  per-model `[models.…]` sections mirror shared keys to both backends
 
 ### 1b. Batched decode latency tuning
 Observed on the pod: per-stream decode drops to 3-10 tok/s when other

@@ -86,9 +86,9 @@ function shortBytes(value: number): string {
 
 // One geometry for every metric row: fixed label, flexible bar, fixed
 // right-aligned value slot so nothing shifts as numbers change.
-function Row({ label, pct, value, tone }: { label: string; pct?: number; value?: string; tone?: string }) {
+function Row({ label, pct, value, tone, title }: { label: string; pct?: number; value?: string; tone?: string; title?: string }) {
   return (
-    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_5.25rem] items-center gap-x-2 px-3 py-1">
+    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_5.25rem] items-center gap-x-2 px-3 py-1" title={title}>
       <span className="truncate text-[0.68rem] lowercase text-muted">{label}</span>
       <BoxBar pct={pct} tone={tone} />
       <span className={`truncate text-right text-[0.72rem] tabular-nums ${pct === undefined ? "text-muted" : ""}`}>
@@ -119,17 +119,21 @@ function GpuRows({ gpu }: { gpu: DashboardGpu }) {
   return (
     <>
       <Row label="util" pct={util} value={util !== undefined ? `${util.toFixed(0)}%` : undefined} />
-      <Row
-        label={gpu.vendor === "apple" ? "unified" : "vram"}
-        pct={hasVram ? (used / total) * 100 : undefined}
-        tone="bg-cache"
-        value={hasVram ? `${shortBytes(used)}/${shortBytes(total)}` : undefined}
-      />
+      {gpu.vendor === "apple" ? (
+        <Row label="memory" value="shared RAM" title="Apple GPU memory is the same unified system RAM shown in the System card, not additional VRAM" />
+      ) : (
+        <Row
+          label="vram"
+          pct={hasVram ? (used / total) * 100 : undefined}
+          tone="bg-cache"
+          value={hasVram ? `${shortBytes(used)}/${shortBytes(total)}` : undefined}
+        />
+      )}
     </>
   );
 }
 
-const WORKER_GRID = "grid grid-cols-[minmax(8rem,1.4fr)_3.25rem_minmax(6rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)] items-center gap-x-3 px-3";
+const WORKER_GRID = "grid grid-cols-[minmax(8rem,1.4fr)_3.25rem_minmax(6rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)] items-center gap-x-3 px-3";
 
 export function WorkerBarCell({ pct, value, tone, dim, title }: { pct?: number; value?: string; tone?: string; dim?: boolean; title?: string }) {
   return (
@@ -142,7 +146,9 @@ export function WorkerBarCell({ pct, value, tone, dim, title }: { pct?: number; 
   );
 }
 
-export const MLX_UNIFIED_TITLE = "MLX weights live in Metal wired memory, not process RSS";
+export const RSS_TITLE = "Resident Set Size: CPU-visible physical pages currently mapped by the process; Metal allocations can be tracked separately";
+export const MLX_ACTIVE_TITLE = "Current live MLX Metal allocations: model weights, retained KV caches, and prefix anchors";
+export const MLX_CACHE_TITLE = "Recyclable MLX allocator buffers retained for reuse; cleared whenever the scheduler becomes idle";
 
 export function isUnifiedMlx(backend: string, platform?: string): boolean {
   return backend === "mlx" && platform === "darwin";
@@ -151,24 +157,28 @@ export function isUnifiedMlx(backend: string, platform?: string): boolean {
 function WorkerRow({ entry, platform, systemMemoryBytes, cpuCount, gpuTotalBytes }: { entry: DashboardLoadedModel; platform?: string; systemMemoryBytes?: number; cpuCount?: number; gpuTotalBytes?: number }) {
   const usage = entry.usage;
   const unifiedMlx = isUnifiedMlx(entry.backend, platform);
+  const mlxMemory = entry.worker.memory;
   const cpuPct = usage ? (cpuCount ? usage.cpuPercent / cpuCount : Math.min(100, usage.cpuPercent)) : undefined;
   const rssPct = usage && systemMemoryBytes ? (usage.rssBytes / systemMemoryBytes) * 100 : undefined;
   const gpuBytes = entry.gpuMemoryBytes;
   const gpuPct = gpuBytes !== undefined && gpuTotalBytes ? (gpuBytes / gpuTotalBytes) * 100 : undefined;
+  const acceleratorBytes = unifiedMlx ? mlxMemory?.activeBytes : gpuBytes;
+  const acceleratorPct = acceleratorBytes !== undefined && (unifiedMlx ? systemMemoryBytes : gpuTotalBytes)
+    ? (acceleratorBytes / (unifiedMlx ? systemMemoryBytes! : gpuTotalBytes!)) * 100
+    : undefined;
+  const cachePct = mlxMemory && systemMemoryBytes ? (mlxMemory.cacheBytes / systemMemoryBytes) * 100 : undefined;
   return (
     <div className={`${WORKER_GRID} py-1`}>
       <span className="truncate text-[0.74rem]" title={`${entry.id}\n${entry.localPath}`}>{midTruncate(entry.id)}</span>
       <span className="truncate text-[0.7rem] tabular-nums text-muted">{entry.worker?.pid ?? "-"}</span>
       <WorkerBarCell pct={cpuPct} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : undefined} />
-      {unifiedMlx ? (
-        <WorkerBarCell dim value="unified" title={MLX_UNIFIED_TITLE} />
-      ) : (
-        <WorkerBarCell
-          pct={rssPct}
-          value={usage && systemMemoryBytes ? `${shortBytes(usage.rssBytes)}/${shortBytes(systemMemoryBytes)}` : usage ? shortBytes(usage.rssBytes) : undefined}
-        />
-      )}
-      <WorkerBarCell pct={gpuPct} tone="bg-cache" value={gpuBytes !== undefined ? shortBytes(gpuBytes) : undefined} />
+      <WorkerBarCell
+        pct={rssPct}
+        value={usage ? shortBytes(usage.rssBytes) : undefined}
+        title={RSS_TITLE}
+      />
+      <WorkerBarCell pct={acceleratorPct} tone="bg-cache" value={acceleratorBytes !== undefined ? shortBytes(acceleratorBytes) : undefined} title={unifiedMlx ? MLX_ACTIVE_TITLE : "Dedicated GPU memory used by this worker"} />
+      <WorkerBarCell pct={cachePct} tone="bg-warn" value={mlxMemory ? shortBytes(mlxMemory.cacheBytes) : undefined} title={unifiedMlx ? MLX_CACHE_TITLE : undefined} />
     </div>
   );
 }
@@ -234,7 +244,8 @@ export function UsagePanel({ data }: { data: DashboardData }) {
                 <span>pid</span>
                 <span>cpu</span>
                 <span>rss</span>
-                <span>vram</span>
+                <span>accelerator</span>
+                <span>reclaimable</span>
               </div>
               <div className="max-h-44 overflow-y-auto">
                 {data.loaded.map((entry) => (

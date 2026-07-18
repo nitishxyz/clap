@@ -83,6 +83,7 @@ export const ClapModelSchema = z.object({
   architecture: z.string().optional(),
   modelType: z.string().optional(),
   quantization: z.string().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
   alias: z.string().optional(),
   repo: z.string().optional(),
   file: z.string().optional(),
@@ -186,6 +187,11 @@ export const LoadedModelSchema = z.object({
     limitation: z.string().optional(),
     crashes: z.number().int().nonnegative().optional(),
     lastCrashAt: z.string().optional(),
+    memory: z.object({
+      activeBytes: z.number().int().nonnegative(),
+      cacheBytes: z.number().int().nonnegative(),
+      peakActiveBytes: z.number().int().nonnegative(),
+    }).optional(),
   }),
 });
 

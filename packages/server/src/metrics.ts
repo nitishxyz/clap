@@ -51,6 +51,8 @@ export type RequestRecord = {
   tokensPerSecond?: number;
   cacheHit?: boolean;
   reusedTokens?: number;
+  reuseKind?: "slot" | "branch" | "anchor";
+  reuseScope?: "system" | "conversation";
   sideRequest?: boolean;
   slot?: number;
   finishReason?: string;
@@ -87,6 +89,8 @@ export type RequestFinish = {
   completionTokens?: number;
   cacheHit?: boolean;
   reusedTokens?: number;
+  reuseKind?: "slot" | "branch" | "anchor";
+  reuseScope?: "system" | "conversation";
   sideRequest?: boolean;
   slot?: number;
   finishReason?: string;
@@ -293,6 +297,8 @@ export class MetricsCollector {
         record.completionTokens = result.completionTokens;
         record.cacheHit = result.cacheHit;
         record.reusedTokens = result.reusedTokens;
+        record.reuseKind = result.reuseKind;
+        record.reuseScope = result.reuseScope;
         record.sideRequest = result.sideRequest;
         record.slot = result.slot;
         record.finishReason = result.finishReason;

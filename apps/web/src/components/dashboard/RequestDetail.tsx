@@ -119,7 +119,13 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
                 {record.tokensPerSecond ? ` · ${record.tokensPerSecond} tok/s` : ""}
               </Field>
               <Field label="kv cache">
-                {record.sideRequest ? "side request" : record.cacheHit === true ? `hit${record.reusedTokens ? ` · ${fmtTokens(record.reusedTokens)} reused` : ""}` : record.cacheHit === false ? "miss" : "-"}
+                {record.sideRequest
+                  ? "side request"
+                  : record.cacheHit === true
+                    ? `hit${record.reuseKind ? ` · ${record.reuseKind}` : ""}${record.reuseScope ? ` · ${record.reuseScope}` : ""}${record.reusedTokens ? ` · ${fmtTokens(record.reusedTokens)} reused` : ""}`
+                    : record.cacheHit === false
+                      ? "miss"
+                      : "-"}
               </Field>
               <Field label="params">
                 {detail ? [

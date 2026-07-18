@@ -758,6 +758,8 @@ function parseFlags(argv: string[]) {
       flags.active = "true";
     } else if (arg === "--force") {
       flags.force = "true";
+    } else if (arg === "--network") {
+      flags.network = "true";
     } else if (arg === "--yes" || arg === "-y") {
       flags.yes = "true";
     } else if (arg === "--model" || arg === "-m") {

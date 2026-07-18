@@ -2,8 +2,6 @@
 // and Windows); Apple Silicon via the IORegistry accelerator node. Absence of
 // a GPU is normal — consumers must treat the result as optional.
 
-import { systemMemoryBytes, systemMemoryUsedBytes } from "./process-usage";
-
 export type GpuUsage = {
   vendor: "nvidia" | "apple";
   name: string;
@@ -92,10 +90,6 @@ async function sampleAppleGpu(): Promise<GpuUsage[]> {
   const gpu: GpuUsage = { vendor: "apple", name };
   if (utilization !== undefined) {
     gpu.utilizationPercent = Math.min(100, Number(utilization));
-    // Unified memory: the GPU shares system RAM, so report system used/total
-    // as the memory pressure signal (what Activity Monitor implies too).
-    gpu.memoryUsedBytes = await systemMemoryUsedBytes();
-    gpu.memoryTotalBytes = systemMemoryBytes();
   }
   return [gpu];
 }

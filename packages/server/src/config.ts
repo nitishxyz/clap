@@ -22,6 +22,14 @@ const LlamaSectionSchema = z.object({
   keep_alive: z.string().regex(/^(always|\d+(ms|s|m|h|d))$/).optional(),
 }).partial();
 
+const MlxSectionSchema = z.object({
+  slots: z.number().int().positive().optional(),
+  parallel: z.number().int().positive().optional(),
+  context: z.number().int().positive().optional(),
+  max_session_ctx: z.number().int().positive().optional(),
+  kv_type: KvTypeSchema.optional(),
+}).partial();
+
 export const ClapConfigSchema = z.object({
   server: z.object({
     host: z.string().min(1).optional(),
@@ -36,6 +44,7 @@ export const ClapConfigSchema = z.object({
     queue_depth: z.number().int().positive().optional(),
   }).partial().default({}),
   llama: LlamaSectionSchema.default({}),
+  mlx: MlxSectionSchema.default({}),
   models: z.record(z.string(), LlamaSectionSchema).default({}),
 });
 
@@ -138,11 +147,25 @@ const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> =
   ["kv_type", "CLAP_LLAMA_KV_TYPE"],
 ];
 
+const MLX_ENV_MAP: Array<[keyof z.infer<typeof MlxSectionSchema>, string]> = [
+  ["slots", "CLAP_MLX_SLOTS"],
+  ["parallel", "CLAP_MLX_PARALLEL"],
+  ["context", "CLAP_MLX_CONTEXT"],
+  ["max_session_ctx", "CLAP_MLX_MAX_SESSION_CTX"],
+  ["kv_type", "CLAP_MLX_KV_TYPE"],
+];
+
 // Applies [llama] globals to the process environment. Explicit environment
 // variables always win over the config file.
 export function applyConfigToEnv(config: ClapConfig): void {
   for (const [key, envName] of LLAMA_ENV_MAP) {
     const value = config.llama[key];
+    if (value !== undefined && process.env[envName] === undefined) {
+      process.env[envName] = String(value);
+    }
+  }
+  for (const [key, envName] of MLX_ENV_MAP) {
+    const value = config.mlx[key];
     if (value !== undefined && process.env[envName] === undefined) {
       process.env[envName] = String(value);
     }
@@ -158,6 +181,12 @@ export function workerEnvForModel(config: ClapConfig, modelId: string): Record<s
   const env: Record<string, string> = {};
   for (const [key, envName] of LLAMA_ENV_MAP) {
     const value = section[key];
+    if (value !== undefined) env[envName] = String(value);
+  }
+  // Per-model sections apply to whichever backend serves the model; mirror
+  // the shared keys onto the MLX worker env too.
+  for (const [key, envName] of MLX_ENV_MAP) {
+    const value = (section as Record<string, unknown>)[key];
     if (value !== undefined) env[envName] = String(value);
   }
   return Object.keys(env).length ? env : undefined;

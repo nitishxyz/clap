@@ -197,7 +197,12 @@ describe("clap server", () => {
 
       const { workerEnvForModel } = await import("./config");
       const env = workerEnvForModel(config, "owner/big-GGUF");
-      expect(env).toEqual({ CLAP_LLAMA_CONTEXT: "65536", CLAP_LLAMA_KV_TYPE: "q4_0" });
+      expect(env).toEqual({
+        CLAP_LLAMA_CONTEXT: "65536",
+        CLAP_LLAMA_KV_TYPE: "q4_0",
+        CLAP_MLX_CONTEXT: "65536",
+        CLAP_MLX_KV_TYPE: "q4_0",
+      });
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
       restoreEnv("CLAP_LLAMA_SLOTS", previousSlots);

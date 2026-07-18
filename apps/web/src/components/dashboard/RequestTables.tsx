@@ -45,7 +45,8 @@ function CacheTag({ request }: { request: DashboardRequest }) {
   if (request.sideRequest) return <Tag tone="warn">side</Tag>;
   const slot = request.slot !== undefined ? ` s${request.slot}` : "";
   if (request.cacheHit === true) {
-    return <Tag tone="hit">hit{request.reusedTokens ? ` ${fmtTokens(request.reusedTokens)}` : ""}{slot}</Tag>;
+    const kind = request.reuseScope ? ` ${request.reuseScope}` : request.reuseKind ? ` ${request.reuseKind}` : "";
+    return <Tag tone="hit">hit{kind}{request.reusedTokens ? ` ${fmtTokens(request.reusedTokens)}` : ""}{slot}</Tag>;
   }
   if (request.cacheHit === false) return <Tag>miss{slot}</Tag>;
   return <span className="text-muted">-</span>;

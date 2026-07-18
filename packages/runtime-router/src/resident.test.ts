@@ -32,10 +32,12 @@ describe("resident worker registry", () => {
       expect(first.content).toBe("resident response");
       expect(first.usage).toEqual({ promptTokens: 12, completionTokens: 2 });
       expect(first.finishReason).toBe("stop");
+      expect(first.cache).toEqual({ hit: true, reusedTokens: 10, reuseKind: "anchor", reuseScope: "conversation", sideRequest: false, slot: 1 });
       expect(tokens).toEqual(["resident ", "response"]);
       expect(dispatches).toBe(1);
       expect(second.content).toBe("resident response");
       expect(worker.info().pid).toBe(info.pid);
+      expect(worker.info().memory).toEqual({ activeBytes: 1024, cacheBytes: 0, peakActiveBytes: 4096 });
 
       registry.shutdownAll();
       expect(worker.info().state).toBe("not_started");
@@ -101,7 +103,8 @@ for await (const chunk of Bun.stdin.stream()) {
     console.log(JSON.stringify({ id: request.id, started: true }));
     console.log(JSON.stringify({ id: request.id, token: "resident " }));
     console.log(JSON.stringify({ id: request.id, token: "response" }));
-    console.log(JSON.stringify({ id: request.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 12, completion_tokens: 2 } }));
+    console.log(JSON.stringify({ id: request.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 12, completion_tokens: 2 }, cache: { hit: true, reused_tokens: 10, reuse_kind: "anchor", reuse_scope: "conversation", side_request: false, slot: 1 } }));
+    console.log(JSON.stringify({ memory: { active_bytes: 1024, cache_bytes: 0, peak_active_bytes: 4096 } }));
   }
 }
 `);

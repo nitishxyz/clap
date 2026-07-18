@@ -12,6 +12,13 @@ export type ResidentWorkerInfo = {
   limitation?: string;
   crashes?: number;
   lastCrashAt?: string;
+  memory?: ResidentMlxMemory;
+};
+
+export type ResidentMlxMemory = {
+  activeBytes: number;
+  cacheBytes: number;
+  peakActiveBytes: number;
 };
 
 export type ResidentUsage = {
@@ -22,6 +29,8 @@ export type ResidentUsage = {
 export type ResidentCacheInfo = {
   hit?: boolean;
   reusedTokens?: number;
+  reuseKind?: "slot" | "branch" | "anchor";
+  reuseScope?: "system" | "conversation";
   sideRequest?: boolean;
   slot?: number;
 };
@@ -74,6 +83,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private consecutiveCrashes = 0;
   private lastCrashAt?: number;
   private expectedExit = false;
+  private memory?: ResidentMlxMemory;
 
   constructor(
     public readonly key: string,
@@ -89,6 +99,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       state: this.proc ? "resident" : "not_started",
       crashes: this.crashes,
       lastCrashAt: this.lastCrashAt ? new Date(this.lastCrashAt).toISOString() : undefined,
+      memory: this.memory,
     };
   }
 
@@ -135,11 +146,13 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     this.proc = undefined;
     this.loaded = false;
+    this.memory = undefined;
   }
 
   private ensureStarted(): void {
     if (this.proc && this.proc.exitCode === null) return;
     this.expectedExit = false;
+    this.memory = undefined;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
@@ -219,6 +232,16 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       return;
     }
     const id = typeof message.id === "string" ? message.id : undefined;
+    if (message.memory && typeof message.memory === "object") {
+      const memory = message.memory as Record<string, unknown>;
+      if (typeof memory.active_bytes === "number" && typeof memory.cache_bytes === "number" && typeof memory.peak_active_bytes === "number") {
+        this.memory = {
+          activeBytes: memory.active_bytes,
+          cacheBytes: memory.cache_bytes,
+          peakActiveBytes: memory.peak_active_bytes,
+        };
+      }
+    }
     const pending = id ? this.pending.get(id) : this.firstPending();
     if (!pending) return;
     if (message.started === true) {
@@ -258,6 +281,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       pending.cache = {
         hit: typeof cache.hit === "boolean" ? cache.hit : undefined,
         reusedTokens: typeof cache.reused_tokens === "number" ? cache.reused_tokens : undefined,
+        reuseKind: cache.reuse_kind === "slot" || cache.reuse_kind === "branch" || cache.reuse_kind === "anchor" ? cache.reuse_kind : undefined,
+        reuseScope: cache.reuse_scope === "system" || cache.reuse_scope === "conversation" ? cache.reuse_scope : undefined,
         sideRequest: typeof cache.side_request === "boolean" ? cache.side_request : undefined,
         slot: typeof cache.slot === "number" ? cache.slot : undefined,
       };

@@ -1,7 +1,7 @@
 import type { ClapModel } from "@clap/api";
 import { ggufModelDisplayName, isGgufModel } from "@clap/runtime-llama";
 import { isMlxModelDirectorySync, mlxModelDisplayName, mlxModelPaths } from "@clap/runtime-mlx";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { hfAuthGuidance, resolveHfToken } from "./hf-auth";
@@ -178,6 +178,7 @@ function listModelsCacheKey(root: string): string {
 export function invalidateModelListCache(): void {
   listModelsMemo = undefined;
   readJsonCache.clear();
+  modelSizeCache.clear();
 }
 
 export async function listModelsAsync(): Promise<ClapModel[]> {
@@ -676,7 +677,28 @@ function withModelMetadata(
     architecture: firstString(arrayValue(config?.architectures)),
     modelType: stringValue(config?.model_type),
     quantization: inferQuantization(model.format, options.file ?? model.file, config),
+    sizeBytes: model.sizeBytes ?? modelPathSizeBytes(options.path),
   };
+}
+
+const modelSizeCache = new Map<string, { mtimeMs: number; sizeBytes: number }>();
+
+function modelPathSizeBytes(path?: string): number | undefined {
+  if (!path) return undefined;
+  try {
+    const stats = statSync(path);
+    const cached = modelSizeCache.get(path);
+    if (cached?.mtimeMs === stats.mtimeMs) return cached.sizeBytes;
+    const sizeBytes = stats.isFile()
+      ? stats.size
+      : stats.isDirectory()
+        ? readdirSync(path, { withFileTypes: true }).reduce((total, entry) => total + (modelPathSizeBytes(join(path, entry.name)) ?? 0), 0)
+        : 0;
+    modelSizeCache.set(path, { mtimeMs: stats.mtimeMs, sizeBytes });
+    return sizeBytes;
+  } catch {
+    return undefined;
+  }
 }
 
 function servedModalities(): ClapModel["modalities"] {

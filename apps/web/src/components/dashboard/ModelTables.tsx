@@ -3,7 +3,7 @@ import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unload
 import { fmtBytes, fmtDuration, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
-import { BoxBar, isUnifiedMlx, MLX_UNIFIED_TITLE } from "./Usage";
+import { BoxBar, isUnifiedMlx, MLX_ACTIVE_TITLE, MLX_CACHE_TITLE, RSS_TITLE } from "./Usage";
 
 function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: boolean; danger?: boolean; onClick: () => void }) {
   return (
@@ -86,14 +86,11 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
         <div className="overflow-hidden">
           <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 border-t border-soft-border px-3 py-2.5 pl-8 sm:grid-cols-2 xl:grid-cols-3">
             <DetailItem label="mem">
-              {unifiedMlx ? (
-                <TableBarCell dim value="unified" title={MLX_UNIFIED_TITLE} />
-              ) : (
-                <TableBarCell
-                  pct={entry.usage && systemMemoryBytes ? (entry.usage.rssBytes / systemMemoryBytes) * 100 : undefined}
-                  value={entry.usage ? fmtBytes(entry.usage.rssBytes) : undefined}
-                />
-              )}
+              <TableBarCell
+                pct={entry.usage && systemMemoryBytes ? (entry.usage.rssBytes / systemMemoryBytes) * 100 : undefined}
+                value={entry.usage ? fmtBytes(entry.usage.rssBytes) : undefined}
+                title={RSS_TITLE}
+              />
             </DetailItem>
             <DetailItem label="cpu">
               <TableBarCell
@@ -101,7 +98,15 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                 value={entry.usage ? `${entry.usage.cpuPercent.toFixed(0)}%` : undefined}
               />
             </DetailItem>
-            <DetailItem label="gpu mem">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</DetailItem>
+            {unifiedMlx ? (
+              <>
+                <DetailItem label="mlx active"><span title={MLX_ACTIVE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.activeBytes) : "-"}</span></DetailItem>
+                <DetailItem label="mlx cache"><span title={MLX_CACHE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.cacheBytes) : "-"}</span></DetailItem>
+                <DetailItem label="mlx peak">{entry.worker.memory ? fmtBytes(entry.worker.memory.peakActiveBytes) : "-"}</DetailItem>
+              </>
+            ) : (
+              <DetailItem label="vram">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</DetailItem>
+            )}
             <DetailItem label="requests">{entry.activeRequests}</DetailItem>
             <DetailItem label="keep-alive">{entry.keepAlive}</DetailItem>
             <DetailItem label="expires">
@@ -312,10 +317,17 @@ export function ModelCache({ models, loaded, actions }: { models: DashboardModel
   const cached = models.filter((model) => model.status === "available");
   const loadedIds = new Set(loaded.map((entry) => entry.id));
   const [confirmRemove, setConfirmRemove] = useState<string>();
+  const [copiedModel, setCopiedModel] = useState<string>();
+  const copyModelId = (modelId: string) => {
+    navigator.clipboard.writeText(modelId).then(() => {
+      setCopiedModel(modelId);
+      window.setTimeout(() => setCopiedModel((current) => current === modelId ? undefined : current), 1500);
+    }).catch(() => undefined);
+  };
   return (
     <Panel title="model cache" count={`${cached.length} on disk`}>
       {cached.length ? (
-        <Table headers={["model", "backend", "format", "quant", { label: "context", numeric: true }, "capabilities", ""]}>
+        <Table headers={["client model id", "backend", "format", "quant", { label: "size", numeric: true }, { label: "context", numeric: true }, "capabilities", ""]}>
           {cached.map((model) => {
             const caps = [
               model.capabilities?.toolCall ? "tools" : null,
@@ -327,14 +339,19 @@ export function ModelCache({ models, loaded, actions }: { models: DashboardModel
             const isLoaded = loadedIds.has(model.id);
             return (
               <tr key={model.id}>
-                <Td className="max-w-[300px] overflow-hidden text-ellipsis" title={model.id}>{model.displayName ?? model.id}</Td>
+                <Td className="max-w-[360px] overflow-hidden text-ellipsis" title={model.id}>{model.id}</Td>
                 <Td>{model.backend}</Td>
                 <Td>{model.format}</Td>
                 <Td>{model.quantization ?? "-"}</Td>
+                <Td numeric>{model.sizeBytes !== undefined ? fmtBytes(model.sizeBytes) : "-"}</Td>
                 <Td numeric>{model.limit?.context ? fmtTokens(model.limit.context) : "-"}</Td>
                 <Td className="text-muted">{caps || "-"}</Td>
                 <Td>
                   <span className="flex gap-1">
+                    <ActionButton
+                      label={copiedModel === model.id ? "copied" : "copy"}
+                      onClick={() => copyModelId(model.id)}
+                    />
                     {isLoaded ? (
                       <Tag tone="ok">loaded</Tag>
                     ) : (

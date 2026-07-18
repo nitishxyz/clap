@@ -87,6 +87,8 @@ export type DashboardRequest = {
   completionTokens?: number;
   tokensPerSecond?: number;
   cacheHit?: boolean;
+  reuseKind?: "slot" | "branch" | "anchor";
+  reuseScope?: "system" | "conversation";
   reusedTokens?: number;
   sideRequest?: boolean;
   slot?: number;
@@ -119,7 +121,11 @@ export type DashboardLoadedModel = {
   keepAlive: string;
   expiresAt: string | null;
   pinned: boolean;
-  worker: { pid?: number; state: string };
+  worker: {
+    pid?: number;
+    state: string;
+    memory?: { activeBytes: number; cacheBytes: number; peakActiveBytes: number };
+  };
   usage?: { rssBytes: number; cpuPercent: number };
   gpuMemoryBytes?: number;
 };
@@ -131,6 +137,7 @@ export type DashboardModel = {
   format: string;
   status: "available" | "not_downloaded" | "unsupported";
   quantization?: string;
+  sizeBytes?: number;
   limit?: { context?: number };
   capabilities?: { toolCall?: boolean; reasoning?: boolean };
   modalities?: { input?: string[] };
