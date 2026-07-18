@@ -37,7 +37,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
-import { applyConfigToEnv, loadClapConfig, workerEnvForModel } from "./config";
+import { applyConfigToEnv, loadClapConfig, updateUserConfig, workerEnvForModel } from "./config";
 export { configPaths, loadClapConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
 import { renderPrometheus } from "./prometheus";
@@ -182,6 +182,29 @@ export function createServer(
   app.get("/clap/v1/keys", (c) => c.json({ keys: listApiKeys() }));
 
   app.get("/clap/v1/config", (c) => c.json({ config, sources: configSources }));
+
+  app.patch("/clap/v1/config", async (c) => {
+    const patch = z.record(z.string(), z.unknown()).parse(await c.req.json());
+    let updated: ReturnType<typeof updateUserConfig>;
+    try {
+      updated = updateUserConfig(patch);
+    } catch (error) {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "invalid_config" },
+      }), 400);
+    }
+    // Live-apply what can apply live: auth requirement and per-model worker
+    // env (next worker start). [server] and [limits] need a restart.
+    config.auth = updated.config.auth;
+    config.models = updated.config.models;
+    config.llama = updated.config.llama;
+    metrics.event("server", `config updated (${updated.path})`);
+    return c.json({
+      config: updated.config,
+      path: updated.path,
+      note: "auth/models/llama apply to new requests and worker starts; [server] and [limits] apply on restart",
+    });
+  });
 
   app.get("/metrics", (c) => {
     const loaded = lifecycle.list();

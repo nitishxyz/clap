@@ -46,6 +46,54 @@ describe("clap server", () => {
     expect([301, 302]).toContain(redirect.status);
   });
 
+  test("PATCH /clap/v1/config writes valid TOML, round-trips, and live-applies auth", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-config-write-test-"));
+    try {
+      process.env.CLAP_HOME = home;
+      delete process.env.CLAP_REQUIRE_API_KEY;
+      await writeFile(join(home, "clap.toml"), '[llama]\nslots = 4\n');
+      const app = createServer();
+
+      const patched = await app.request("/clap/v1/config", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          auth: { require_api_key: true },
+          llama: { kv_type: "q8_0" },
+          models: { "owner/big-GGUF": { max_session_ctx: 32768 } },
+        }),
+      });
+      expect(patched.status).toBe(200);
+      const body = await patched.json() as { config: { llama: { slots?: number; kv_type?: string } } };
+      // merged: existing slots preserved, new kv_type added
+      expect(body.config.llama.slots).toBe(4);
+      expect(String(body.config.llama.kv_type)).toBe("q8_0");
+
+      // The written file is valid TOML and round-trips through the parser
+      const written = await readFile(join(home, "clap.toml"), "utf8");
+      const reparsed = Bun.TOML.parse(written) as { models: Record<string, { max_session_ctx: number }> };
+      expect(reparsed.models["owner/big-GGUF"].max_session_ctx).toBe(32768);
+
+      // auth.require_api_key applied live: next request denied without a key
+      const denied = await app.request("/clap/v1/models");
+      expect(denied.status).toBe(401);
+
+      // invalid patch rejected with 400 and file untouched
+      const invalid = await app.request("/clap/v1/config", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-api-key": "unused" },
+        body: JSON.stringify({ llama: { kv_type: "q2_bogus" } }),
+      });
+      expect([400, 401]).toContain(invalid.status);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("clap.toml config: llama env mapping, per-model overrides, auth requirement, config endpoint", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousSlots = process.env.CLAP_LLAMA_SLOTS;

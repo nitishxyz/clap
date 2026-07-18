@@ -1,6 +1,6 @@
 import { clapHome } from "@clap/models";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 
 // clap.toml — org-deployable configuration. Layering (later wins):
@@ -82,6 +82,47 @@ export function loadClapConfig(): { config: ClapConfig; sources: Array<{ path: s
     return { config: ClapConfigSchema.parse({}), sources };
   }
   return { config: result.data, sources };
+}
+
+// Serializes our restricted config shape (sections of scalars, plus the
+// [models."owner/name"] map) to TOML. Bun parses TOML but does not stringify.
+export function stringifyConfigToml(config: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const scalar = (value: unknown): string => {
+    if (typeof value === "string") return JSON.stringify(value);
+    return String(value);
+  };
+  const section = (name: string, body: Record<string, unknown>) => {
+    const entries = Object.entries(body).filter(([, value]) => value !== undefined && typeof value !== "object");
+    if (!entries.length) return;
+    if (lines.length) lines.push("");
+    lines.push(`[${name}]`);
+    for (const [key, value] of entries) lines.push(`${key} = ${scalar(value)}`);
+  };
+  for (const [key, value] of Object.entries(config)) {
+    if (key === "models" || !value || typeof value !== "object") continue;
+    section(key, value as Record<string, unknown>);
+  }
+  const models = (config.models ?? {}) as Record<string, Record<string, unknown>>;
+  for (const [modelId, body] of Object.entries(models)) {
+    section(`models.${JSON.stringify(modelId)}`, body);
+  }
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+// Applies a validated partial update to the user config file (never the
+// system file) and returns the new effective config.
+export function updateUserConfig(patch: Record<string, unknown>): { config: ClapConfig; path: string } {
+  const parsed = ClapConfigSchema.deepPartial().parse(patch);
+  const path = join(clapHome(), "clap.toml");
+  const current = parseTomlFile(path) ?? {};
+  const merged = deepMerge(current, parsed as Record<string, unknown>);
+  const validated = ClapConfigSchema.parse(merged);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, stringifyConfigToml(merged));
+  void validated;
+  const { config } = loadClapConfig();
+  return { config, path };
 }
 
 const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> = [

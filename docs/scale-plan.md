@@ -184,8 +184,11 @@ serves it). Wired: `[server]` host/port/idle timeout, `[auth]`
 require_api_key, `[llama]` globals mapped to worker env, and per-model
 `[models."owner/name"]` overrides injected into that model's worker process
 environment on (re)start — this delivers the config half of T2.7 KV-quant
-surfacing. Remaining: write path (PATCH endpoint + dashboard settings
-panel), `[limits]` section once queue fairness exists.
+surfacing. Write path shipped too: `PATCH /clap/v1/config` validates a
+partial update, merges into the user file (never the system file), writes
+TOML that round-trips, and live-applies auth/llama/models sections
+([server]/[limits] apply on restart). `[limits]` section exists (T1.3).
+Remaining: dashboard settings panel.
 
 `clap.toml` (TOML for comments; Bun parses natively). Layering:
 defaults < system file < user file < env < flags. Admin API writes the same
@@ -254,7 +257,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 2. Admission control (T1.2) — DONE
 3. Watchdog (T1.4) — DONE
 4. API keys (T3.9) — DONE (rate limits/quotas ride on T1.3)
-5. Config file (T3.10) — DONE (read path; write API + dashboard panel pending)
+5. Config file (T3.10) — DONE (read + write API; dashboard panel pending)
 6. Queue fairness (T1.3) — DONE
 7. Prometheus metrics (T3.11) — DONE (request/queue series; worker-side series with GPU work)
 8. Shared-prefix dedup (T2.5) — DONE
