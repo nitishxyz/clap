@@ -488,6 +488,31 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
       slot->tokens.clear();
       n_pos = 0;
     }
+
+    // Proactive KV pressure relief: the unified pool holds n_ctx cells shared
+    // by all slots. If resident sessions plus this prompt would overflow it,
+    // evict idle slots (oldest first) instead of failing into the expensive
+    // wipe-everything self-heal during ingest.
+    std::size_t resident = 0;
+    for (const auto& s : loaded.slots) resident += s.tokens.size();
+    const std::size_t incoming = prompt_tokens.size() + static_cast<std::size_t>(output_reserve);
+    const std::size_t capacity = static_cast<std::size_t>(n_ctx);
+    while (resident + incoming > capacity) {
+      std::size_t victim = loaded.slots.size();
+      uint64_t oldest = UINT64_MAX;
+      for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+        if (&loaded.slots[index] == slot || loaded.slots[index].tokens.empty()) continue;
+        if (loaded.slots[index].last_used < oldest) {
+          oldest = loaded.slots[index].last_used;
+          victim = index;
+        }
+      }
+      if (victim >= loaded.slots.size()) break;
+      llama_memory_seq_rm(llama_get_memory(loaded.ctx), static_cast<llama_seq_id>(victim), -1, -1);
+      resident -= loaded.slots[victim].tokens.size();
+      loaded.slots[victim].tokens.clear();
+      fprintf(stderr, "clap-llama: evicted KV slot %zu to fit incoming prompt\n", victim);
+    }
   }
 
   const bool track_cache = slot != nullptr;
