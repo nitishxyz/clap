@@ -64,7 +64,15 @@ export function createServer(
     metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
   };
   residents.onCrash = ({ key, backend, exitCode, consecutiveCrashes }) => {
-    metrics.event("error", `${key} ${backend} worker crashed (exit ${exitCode}, ${consecutiveCrashes} consecutive); auto-restarting with backoff`, { model: key });
+    // Worker keys are JSON tuples ([model, backend, path]); report the model id.
+    let model = key;
+    try {
+      const parsed = JSON.parse(key);
+      if (Array.isArray(parsed) && typeof parsed[0] === "string") model = parsed[0];
+    } catch {
+      // plain key
+    }
+    metrics.event("error", `${model} ${backend} worker crashed (exit ${exitCode}, ${consecutiveCrashes} consecutive); auto-restarting with backoff`, { model });
   };
 
   app.onError((error, c) => {
