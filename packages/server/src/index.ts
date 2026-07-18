@@ -40,6 +40,7 @@ export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { applyConfigToEnv, loadClapConfig, workerEnvForModel } from "./config";
 export { configPaths, loadClapConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
+import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleProcessUsage, systemMemoryBytes } from "./process-usage";
@@ -181,6 +182,22 @@ export function createServer(
   app.get("/clap/v1/keys", (c) => c.json({ keys: listApiKeys() }));
 
   app.get("/clap/v1/config", (c) => c.json({ config, sources: configSources }));
+
+  app.get("/metrics", (c) => {
+    const loaded = lifecycle.list();
+    return c.text(renderPrometheus({
+      totals: metrics.totals,
+      activeRequests: metrics.activeRequests().length,
+      queue: limiter.stats(),
+      loadedModels: loaded.map((entry) => ({
+        id: entry.id,
+        state: entry.worker?.state ?? "not_started",
+        crashes: entry.worker?.crashes,
+      })),
+      uptimeMs: Date.now() - startedAt,
+      histograms: metrics.histograms,
+    }), 200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
+  });
 
   app.delete("/clap/v1/keys/:id", (c) => {
     const revoked = revokeApiKey(c.req.param("id"));

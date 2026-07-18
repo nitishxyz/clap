@@ -205,6 +205,14 @@ slots = 8
 ```
 
 ### 11. Observability
+Status: PARTIAL — `/metrics` shipped (Prometheus text format): request
+counters by status, token counters (prompt/completion/kv_reused), cache
+hit/miss, queue gauges (inflight/waiting/limits), loaded-model and
+per-model crash gauges, uptime, and histograms for TTFT, duration, queue
+wait, and completion tokens — fed by the same collector the dashboard
+reads. Remaining: eviction/VRAM/KV-occupancy series (worker-side, GPU
+rig), per-key usage series, structured JSON logs.
+
 - Prometheus `/metrics`: queue depth, TTFT/TPS percentiles, KV occupancy,
   evictions, VRAM, crash counts, per-key usage
 - Structured JSON logs with request ids
@@ -241,7 +249,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 4. API keys (T3.9) — DONE (rate limits/quotas ride on T1.3)
 5. Config file (T3.10) — DONE (read path; write API + dashboard panel pending)
 6. Queue fairness (T1.3) — DONE
-7. Prometheus metrics (T3.11)
+7. Prometheus metrics (T3.11) — DONE (request/queue series; worker-side series with GPU work)
 8. Shared-prefix dedup (T2.5) — DONE
 9. Adaptive capacity + session ctx caps (T2.6)
 10. Session-aware eviction (T2.8)

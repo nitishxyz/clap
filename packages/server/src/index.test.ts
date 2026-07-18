@@ -162,6 +162,39 @@ describe("clap server", () => {
     }
   });
 
+  test("prometheus /metrics exposes counters, queue gauges, and histograms", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const dir = await mkdtemp(join(tmpdir(), "clap-prom-test-"));
+    const modelPath = join(dir, "prom.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const chat = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+      expect(chat.status).toBe(200);
+
+      const response = await app.request("/metrics");
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/plain");
+      const body = await response.text();
+      expect(body).toContain('clap_requests_total{status="ok"} 1');
+      expect(body).toContain("clap_queue_inflight 0");
+      expect(body).toContain("clap_queue_inflight_limit ");
+      expect(body).toContain("clap_request_duration_ms_count 1");
+      expect(body).toContain('clap_request_duration_ms_bucket{le="+Inf"} 1');
+      expect(body).toContain('clap_tokens_total{kind="completion"}');
+      expect(body).toContain("# TYPE clap_request_ttft_ms histogram");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("saturated queue answers 429 with Retry-After before model work", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;

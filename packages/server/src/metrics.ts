@@ -1,3 +1,5 @@
+import { makeRequestHistograms } from "./prometheus";
+
 export type RequestStatus = "active" | "ok" | "error" | "cancelled";
 
 export type RequestPhase = "queued" | "loading" | "prefill" | "decode" | "done";
@@ -160,6 +162,7 @@ export class MetricsCollector {
   private readonly eventLog: ServerEvent[] = [];
   private sequence = 0;
   private eventSequence = 0;
+  readonly histograms = makeRequestHistograms();
 
   readonly totals: MetricsTotals = {
     requests: 0,
@@ -317,6 +320,10 @@ export class MetricsCollector {
         if (record.status === "ok") this.totals.ok += 1;
         else if (record.status === "error") this.totals.errors += 1;
         else if (record.status === "cancelled") this.totals.cancelled += 1;
+        if (record.ttftMs !== undefined) this.histograms.ttftMs.observe(record.ttftMs);
+        if (record.durationMs !== undefined) this.histograms.durationMs.observe(record.durationMs);
+        this.histograms.queuedMs.observe(record.queuedMs ?? 0);
+        if (record.completionTokens !== undefined) this.histograms.completionTokens.observe(record.completionTokens);
         this.totals.promptTokens += result.promptTokens ?? 0;
         this.totals.completionTokens += result.completionTokens ?? 0;
         if (result.cacheHit === true) {
