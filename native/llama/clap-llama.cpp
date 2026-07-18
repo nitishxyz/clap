@@ -257,16 +257,17 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   if (!loaded.model) throw std::runtime_error("failed to load GGUF model: " + model_path);
 
   llama_context_params ctx_params = llama_context_default_params();
-  // Default to the model's trained context (capped at 32k for memory). Agent
-  // harnesses routinely send 5-15k-token prompts, so a fixed 4096 default
-  // rejects them. CLAP_LLAMA_CONTEXT still overrides explicitly.
-  int32_t n_ctx = env_int("CLAP_LLAMA_CONTEXT", 0);
+  // Use the model's own trained context by default (Qwen3.6 = 262k, gemma =
+  // 32k, ...). CLAP_LLAMA_CONTEXT overrides explicitly; otherwise start from
+  // train_ctx (capped at 262144 to bound KV allocation) and let the fallback
+  // loop below halve it if the KV cache does not fit in memory.
+  const int32_t env_ctx = env_int("CLAP_LLAMA_CONTEXT", 0);
+  int32_t n_ctx = env_ctx;
   if (n_ctx <= 0) {
     const int32_t train_ctx = llama_model_n_ctx_train(loaded.model);
-    n_ctx = std::min(train_ctx > 0 ? train_ctx : 8192, 32768);
+    n_ctx = std::min(train_ctx > 0 ? train_ctx : 8192, 262144);
     n_ctx = std::max(n_ctx, 8192);
   }
-  ctx_params.n_ctx = n_ctx;
   // Match llama.cpp server defaults; small batches make long-prompt prefill
   // several times slower on Metal.
   ctx_params.n_batch = env_int("CLAP_LLAMA_BATCH", 2048);
@@ -281,7 +282,16 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   // empty. A unified buffer lets any session use the full context.
   ctx_params.kv_unified = env_int("CLAP_LLAMA_KV_UNIFIED", 1) != 0;
   ctx_params.no_perf = true;
-  loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
+  // KV cache allocation grows with n_ctx and can exceed device memory for
+  // long-context models. Retry with halved context until it fits (unless the
+  // user pinned CLAP_LLAMA_CONTEXT, which we honor verbatim).
+  while (true) {
+    ctx_params.n_ctx = n_ctx;
+    loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
+    if (loaded.ctx || env_ctx > 0 || n_ctx <= 8192) break;
+    n_ctx = std::max(n_ctx / 2, 8192);
+    fprintf(stderr, "clap-llama: context allocation failed; retrying with n_ctx=%d\n", n_ctx);
+  }
   if (!loaded.ctx) {
     llama_model_free(loaded.model);
     loaded.model = nullptr;
