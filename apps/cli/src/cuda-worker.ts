@@ -72,7 +72,43 @@ function isUsable(path: string): boolean {
 async function download(url: string, destination: string): Promise<void> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`download failed (${response.status}): ${url}`);
-  await Bun.write(destination, response);
+  const total = Number(response.headers.get("content-length") ?? 0);
+  if (!response.body || total <= 0 || !process.stderr.isTTY) {
+    await Bun.write(destination, response);
+    return;
+  }
+
+  const writer = Bun.file(destination).writer();
+  let received = 0;
+  let lastRender = 0;
+  const startedAt = Date.now();
+  for await (const chunk of response.body) {
+    writer.write(chunk);
+    received += chunk.byteLength;
+    const now = Date.now();
+    if (now - lastRender >= 100 || received === total) {
+      lastRender = now;
+      renderProgress(received, total, now - startedAt);
+    }
+  }
+  await writer.end();
+  process.stderr.write("\n");
+}
+
+function renderProgress(received: number, total: number, elapsedMs: number, width = 24): void {
+  const ratio = Math.min(1, received / total);
+  const filled = Math.round(ratio * width);
+  const bar = `${"=".repeat(filled)}${"-".repeat(width - filled)}`;
+  const percent = Math.floor(ratio * 100).toString().padStart(3, " ");
+  const mib = (bytes: number) => (bytes / 1024 / 1024).toFixed(0);
+  let stats = "";
+  if (elapsedMs >= 500) {
+    const rate = received / (elapsedMs / 1000);
+    const etaSeconds = Math.max(0, Math.round((total - received) / rate));
+    const eta = etaSeconds < 60 ? `${etaSeconds}s` : `${Math.floor(etaSeconds / 60)}m${(etaSeconds % 60).toString().padStart(2, "0")}s`;
+    stats = ` ${mib(rate)} MiB/s eta ${eta}`;
+  }
+  process.stderr.write(`\r[${bar}] ${percent}% ${mib(received)}/${mib(total)} MiB${stats}   `);
 }
 
 async function verifySha256(path: string, checksumUrl: string): Promise<void> {

@@ -63,6 +63,7 @@ async function pruneStaleBuilds(libexecDir: string, keep: string): Promise<void>
     const entries = await readdir(libexecDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === keep) continue;
+      if (entry.name.startsWith("cuda-")) continue; // provisioned CUDA workers are versioned separately
       await rm(join(libexecDir, entry.name), { recursive: true, force: true });
     }
   } catch {

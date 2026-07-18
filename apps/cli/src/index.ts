@@ -33,7 +33,10 @@ import {
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
 
-await ensureCudaWorker();
+// Only the serving process needs inference workers; management commands like
+// `server stop` must never block on a CUDA worker download. Commands that
+// start a server provision through startBackgroundServer before spawning.
+if (command === "serve") await ensureCudaWorker();
 await ensureEmbeddedWorkers();
 
 try {
@@ -228,6 +231,10 @@ async function startBackgroundServer({ quiet = false } = {}): Promise<ServerMeta
     }
 
     await mkdir(paths.home, { recursive: true });
+    // Provision the CUDA worker in the foreground (visible progress) so the
+    // spawned daemon hits the warm cache instead of downloading against the
+    // health-check timeout.
+    await ensureCudaWorker();
     const stdout = Bun.file(paths.stdoutLog);
     const stderr = Bun.file(paths.stderrLog);
     const command = [...currentCliCommand(), "serve"];

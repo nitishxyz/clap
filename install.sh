@@ -46,7 +46,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 say "downloading clap $version ($target)..."
-curl -fL --progress-bar -o "$tmp/$archive" "$url" || fail "download failed: $url"
+# curl's default progress meter includes speed and remaining time.
+curl -fL -o "$tmp/$archive" "$url" || fail "download failed: $url"
 
 if command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1; then
   say "verifying checksum..."

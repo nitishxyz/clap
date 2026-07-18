@@ -284,7 +284,6 @@ void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, 
       const std::size_t remaining = tokens.size() - offset;
       const int32_t available = n_ctx - n_pos;
       if (available <= 0) {
-        llama_batch_free(batch);
         throw std::runtime_error("prompt exceeds context window; increase CLAP_LLAMA_CONTEXT or reduce prompt size");
       }
       const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(std::min(n_batch, available))));
@@ -293,7 +292,10 @@ void decode_tokens(LoadedLlama& loaded, const std::vector<llama_token>& tokens, 
         batch_add(batch, tokens[offset + i], n_pos + i, logits, seq);
       }
       if (llama_decode(loaded.ctx, batch)) {
-        llama_batch_free(batch);
+        // A failed decode can leave this sequence's KV slot in a partial
+        // state (hybrid/recurrent models especially); drop the slot so the
+        // next request re-ingests from scratch instead of failing repeatedly.
+        llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, -1, -1);
         throw std::runtime_error("llama_decode failed while ingesting prompt; prompt was chunked to fit n_batch but llama.cpp rejected the batch");
       }
       n_pos += chunk;
@@ -428,8 +430,11 @@ void generate(LoadedLlama& loaded, const std::string& id, const json& request, c
     seq = static_cast<llama_seq_id>(best_slot);
     std::size_t prefix = best_prefix;
     if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token to get logits
-    if (prefix > 0) {
-      llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, static_cast<llama_pos>(prefix), -1);
+    // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
+    // range from their recurrent state; llama_memory_seq_rm returns false.
+    // In that case fall back to clearing the sequence and re-ingesting the
+    // whole prompt instead of decoding against a corrupt slot.
+    if (prefix > 0 && llama_memory_seq_rm(llama_get_memory(loaded.ctx), seq, static_cast<llama_pos>(prefix), -1)) {
       slot->tokens.resize(prefix);
       n_pos = static_cast<int32_t>(prefix);
       prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
