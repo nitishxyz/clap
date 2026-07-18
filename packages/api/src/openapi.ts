@@ -4,6 +4,7 @@ import {
   BackendsResponseSchema,
   ChatCompletionRequestSchema,
   ChatCompletionResponseSchema,
+  clapVersion,
   ClapModelsResponseSchema,
   DownloadsResponseSchema,
   ErrorResponseSchema,
@@ -247,7 +248,7 @@ export function createOpenApiDocument() {
     openapi: "3.0.0",
     info: {
       title: "Clap Local Model Server API",
-      version: "0.1.0",
+      version: clapVersion,
     },
     servers: [{ url: "http://localhost:11435" }],
   });
