@@ -35,6 +35,10 @@ a time; concurrent requests queue behind it.
 ## Tier 1 — Concurrency correctness
 
 ### 1. Continuous batching (llama worker) — the big one
+Status: DONE (verified on pod: 6 concurrent agent sessions, 36 requests,
+80s wall, zero errors; default slots raised to 16 after 4-slot thrash was
+observed to kill prefix reuse under 6-way load).
+
 Restructure the worker generation loop from request-at-a-time to a scheduler
 step: all active sequences advance one token per `llama_decode` batch; prefill
 chunks interleave with decode steps. llama.cpp natively supports multi-
@@ -49,6 +53,23 @@ map 1:1 to `seq_id`s.
 - Expected effect: 10-50 concurrent sessions per model on one GPU.
 - MLX: same restructuring later via `BatchedKVCache` (mlx-lm has batched
   generation); acceptable for MLX to lag one phase behind.
+
+### 1b. Batched decode latency tuning
+Observed on the pod: per-stream decode drops to 3-10 tok/s when other
+sessions run large prefills, because prefill chunks dominate the 2048-token
+batch budget and decode tokens ride at prefill pace. Aggregate throughput is
+correct (batching amortizes weight reads: ~100+ tok/s summed vs ~42 solo);
+this item is about protecting interactive latency, not raw throughput.
+
+- Cap the prefill share per scheduler step (e.g. 512 of 2048) so decode
+  streams keep near-solo pace during heavy ingest; make the cap configurable
+  (`CLAP_LLAMA_PREFILL_BUDGET`, later config file)
+- Tune `CLAP_LLAMA_UBATCH` for the CUDA path
+- Report decode-only tok/s separately in metrics so contention is visible
+- Note: per-stream tok/s below solo speed under concurrency is expected
+  physics (memory-bandwidth-bound decode); MoE models (e.g. Qwen3.6-35B-A3B,
+  3B active) shrink the per-token cost ~8x and are the recommended org
+  deployment shape for high concurrency
 
 ### 2. Admission control
 Before ingest: check `prompt_tokens + max_tokens` against per-session ctx cap
@@ -161,7 +182,7 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 
 ## Execution order
 
-1. Continuous batching (T1.1)
+1. Continuous batching (T1.1) — DONE
 2. Admission control (T1.2)
 3. Watchdog (T1.4)
 4. API keys (T3.9)
@@ -172,6 +193,9 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 9. Adaptive capacity + session ctx caps (T2.6)
 10. Session-aware eviction (T2.8)
 11. Multi-GPU split (T4.13)
+12. Batched decode latency tuning (T1.1b) — fold into 2/7 where natural:
+    prefill budget cap alongside admission control, decode-only tok/s with
+    metrics
 
 Rationale: batching unlocks concurrency; keys+config unlock every per-client
 policy; dedup is the biggest org-shaped memory win but rides on batching's
