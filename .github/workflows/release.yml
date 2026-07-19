@@ -171,7 +171,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-cuda-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
+          key: llama-cpp-cuda-v2-cuda12.8-sm80-86-89-90-100-120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
 
       - run: bun install --frozen-lockfile
 
@@ -184,7 +184,7 @@ jobs:
           bun run runtime:llama:build
 
       - name: Save llama.cpp CUDA cache
-        if: always() && steps.llama-cache-cuda.outputs.cache-hit != 'true'
+        if: success() && steps.llama-cache-cuda.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: vendor/llama.cpp
