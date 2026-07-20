@@ -1,4 +1,7 @@
 #include "llama.h"
+#include "active-concurrency.h"
+#include "cache-adapter.h"
+#include "stable-boundary.h"
 
 #include <nlohmann/json.hpp>
 
@@ -11,11 +14,19 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <sys/sysinfo.h>
+#endif
 
 using json = nlohmann::json;
 
@@ -76,16 +87,35 @@ struct LoadedLlama {
   std::string model_path;
   llama_model* model = nullptr;
   llama_context* ctx = nullptr;
+  int32_t model_context_window = 0;
+  int32_t backend_allocation_cap = 0;
+  int32_t context_override = 0;
+  int32_t max_output_tokens = 0;
+  int32_t max_active = 0;
+  int32_t retained_max = 0;
+  clap::llama_active::Decision active_policy{};
+  uint64_t startup_available_bytes = 0;
+  uint64_t model_file_bytes = 0;
+  std::string last_eviction_reason;
+  int32_t previous_max_active = 0;
+  std::string last_adjustment_reason;
+  std::string last_adjustment_at;
+  uint64_t retained_growth_reserve_bytes = 0;
+  uint64_t global_resident_memory_bytes = 0;
+  std::string pressure_state;
   // KV cache slots: one llama sequence per slot so multiple concurrent
   // sessions (agent loops, chats, side requests) each keep a warm prefix.
   struct CacheSlot {
     std::vector<llama_token> tokens;
     uint64_t last_used = 0;
+    uint64_t coordinator_generation = 0;
     bool busy = false;  // an active request is generating on this slot
     bool is_anchor = false;  // holds a shared prefix snapshot, never generates
   };
   std::vector<CacheSlot> slots;
   uint64_t use_counter = 0;
+  std::unique_ptr<clap::llama_cache::Coordinator> coordinator;
+  std::string cache_domain;
   // Hybrid/recurrent models (e.g. Gated DeltaNet) only support whole-sequence
   // KV state copies; attention-only models support partial-range copies.
   bool hybrid = false;
@@ -97,7 +127,9 @@ struct ChatEntry {
 };
 
 struct SamplingParams {
-  int max_tokens = 4096;
+  // Zero means omitted by the caller; admission derives a safe request-local
+  // default from the loaded model's remaining effective context.
+  int max_tokens = 0;
   double temperature = 0.7;
   double top_p = 0.95;
   int top_k = 0;
@@ -135,6 +167,10 @@ struct RequestError : std::runtime_error {
       : std::runtime_error(message), code(std::move(error_code)) {}
 };
 
+struct CacheBackpressure : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 // Number of trailing bytes forming an incomplete (but so far valid) UTF-8
 // sequence. Byte-level BPE tokens can split a multi-byte character across
 // pieces; those bytes must be held back until the character completes.
@@ -155,6 +191,31 @@ std::size_t utf8_incomplete_suffix(const std::string& text) {
   else return 0;
   const std::size_t have = cont + 1;
   return have < need ? have : 0;
+}
+
+bool env_enabled(const char* name) {
+  const char* raw = std::getenv(name);
+  return raw && *raw && std::string(raw) != "0";
+}
+
+uint64_t available_memory_bytes() {
+#if defined(__APPLE__)
+  vm_statistics64_data_t statistics{};
+  mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+  vm_size_t page_size = 0;
+  if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                        reinterpret_cast<host_info64_t>(&statistics), &count) != KERN_SUCCESS ||
+      host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS) return 0;
+  const uint64_t pages = statistics.free_count + statistics.inactive_count +
+      statistics.purgeable_count;
+  return pages > UINT64_MAX / page_size ? UINT64_MAX : pages * page_size;
+#elif defined(__linux__)
+  struct sysinfo info {};
+  if (sysinfo(&info) != 0) return 0;
+  return static_cast<uint64_t>(info.freeram) * info.mem_unit;
+#else
+  return 0;
+#endif
 }
 
 int env_int(const char* name, int fallback) {
@@ -204,7 +265,6 @@ SamplingParams sampling_from_request(const json& request) {
       }
     }
   }
-  if (params.max_tokens < 1) params.max_tokens = 1;
   return params;
 }
 
@@ -254,6 +314,8 @@ std::string fallback_prompt(const std::vector<ChatEntry>& entries) {
 }
 
 void unload(LoadedLlama& loaded) {
+  if (loaded.coordinator) loaded.coordinator->reset();
+  loaded.coordinator.reset();
   if (loaded.ctx) {
     llama_free(loaded.ctx);
     loaded.ctx = nullptr;
@@ -263,7 +325,18 @@ void unload(LoadedLlama& loaded) {
     loaded.model = nullptr;
   }
   loaded.model_path.clear();
+  loaded.cache_domain.clear();
   loaded.slots.clear();
+  loaded.model_context_window = 0;
+  loaded.backend_allocation_cap = 0;
+  loaded.context_override = 0;
+  loaded.max_output_tokens = 0;
+  loaded.max_active = 0;
+  loaded.retained_max = 0;
+  loaded.active_policy = {};
+  loaded.startup_available_bytes = 0;
+  loaded.model_file_bytes = 0;
+  loaded.last_eviction_reason.clear();
 }
 
 void load_model(LoadedLlama& loaded, const std::string& model_path) {
@@ -273,6 +346,21 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   if (!std::filesystem::exists(model_path)) {
     throw std::runtime_error("GGUF model not found: " + model_path);
   }
+  const uint64_t startup_available = available_memory_bytes();
+  std::error_code file_size_error;
+  const uint64_t model_file_bytes = std::filesystem::file_size(model_path, file_size_error);
+  // The pinned llama.cpp memory API exposes the allocated context-cell count,
+  // but no authoritative used/free cell or KV byte telemetry. A byte budget
+  // therefore cannot be converted to cells without fabricating a bytes/token
+  // ratio (shared branches make logical token sums invalid). Fail explicit
+  // byte policy closed rather than silently overallocating or reporting fake
+  // byte pressure.
+  if (env_enabled("CLAP_LLAMA_KV_BUDGET_BYTES") ||
+      env_enabled("CLAP_LLAMA_KV_BUDGET_PERCENT")) {
+    throw std::runtime_error(
+        "CLAP_LLAMA_KV_BUDGET_BYTES/PERCENT is unsupported by the pinned llama.cpp API: "
+        "authoritative KV used/free cells and bytes are unavailable; use CLAP_LLAMA_CONTEXT");
+  }
 
   llama_model_params model_params = llama_model_default_params();
   model_params.n_gpu_layers = env_int("CLAP_LLAMA_GPU_LAYERS", 999);
@@ -280,28 +368,23 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   if (!loaded.model) throw std::runtime_error("failed to load GGUF model: " + model_path);
 
   llama_context_params ctx_params = llama_context_default_params();
-  // Use the model's own trained context by default (Qwen3.6 = 262k, gemma =
-  // 32k, ...). CLAP_LLAMA_CONTEXT overrides explicitly; otherwise start from
-  // train_ctx (capped at 262144 to bound KV allocation) and let the fallback
-  // loop below halve it if the KV cache does not fit in memory.
+  // Allocate no more than the model declares. An explicit admin override is a
+  // cap, not permission to manufacture a larger model context window.
   const int32_t env_ctx = env_int("CLAP_LLAMA_CONTEXT", 0);
-  int32_t n_ctx = env_ctx;
-  if (n_ctx <= 0) {
-    const int32_t train_ctx = llama_model_n_ctx_train(loaded.model);
-    n_ctx = std::min(train_ctx > 0 ? train_ctx : 8192, 262144);
-    n_ctx = std::max(n_ctx, 8192);
-  }
+  const int32_t train_ctx = llama_model_n_ctx_train(loaded.model);
+  int32_t n_ctx = train_ctx > 0 && env_ctx > 0 ? std::min(train_ctx, env_ctx)
+      : (env_ctx > 0 ? env_ctx : train_ctx);
   // Match llama.cpp server defaults; small batches make long-prompt prefill
   // several times slower on Metal.
   ctx_params.n_batch = env_int("CLAP_LLAMA_BATCH", 2048);
   ctx_params.n_ubatch = env_int("CLAP_LLAMA_UBATCH", 512);
-  // Multiple KV cache slots (one llama sequence each) so any number of
-  // concurrent sessions keep warm prefixes; slots are LRU-recycled. With a
-  // unified KV pool, slots beyond the working set cost only bookkeeping, so
-  // default high enough that N concurrent agent sessions do not thrash
-  // (working set > slots means near-zero prefix reuse).
-  const int32_t n_slots = std::max(1, env_int("CLAP_LLAMA_SLOTS", 16));
-  ctx_params.n_seq_max = n_slots;
+  // Active scheduling and retained sequence identity are independent. Sequence
+  // IDs are cheap labels over the unified KV engine; they do not partition or
+  // multiply the physical context-cell allocation.
+  const int32_t retained_override = env_int("CLAP_LLAMA_RETAINED_MAX", 0);
+  const int32_t derived_retained = std::min(128, std::max(32, std::max(n_ctx, 1) / 256));
+  const int32_t retained_max = retained_override > 0 ? retained_override : derived_retained;
+  ctx_params.n_seq_max = retained_max;
   // Without a unified KV buffer, llama.cpp splits n_ctx into n_seq_max
   // per-sequence streams (32k ctx / 4 slots = only 8k per session), so long
   // agent prompts fail to find a memory slot even when the cache is mostly
@@ -323,25 +406,119 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
     }
   }
   ctx_params.no_perf = true;
-  // KV cache allocation grows with n_ctx and can exceed device memory for
-  // long-context models. Retry with halved context until it fits (unless the
-  // user pinned CLAP_LLAMA_CONTEXT, which we honor verbatim).
-  while (true) {
-    ctx_params.n_ctx = n_ctx;
-    loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
-    if (loaded.ctx || env_ctx > 0 || n_ctx <= 8192) break;
-    n_ctx = std::max(n_ctx / 2, 8192);
-    fprintf(stderr, "clap-llama: context allocation failed; retrying with n_ctx=%d\n", n_ctx);
-  }
+  // A zero n_ctx asks llama.cpp to use its model-derived allocation. The
+  // actual successful allocation below is authoritative for enforcement.
+  ctx_params.n_ctx = std::max(n_ctx, 0);
+  loaded.ctx = llama_init_from_model(loaded.model, ctx_params);
   if (!loaded.ctx) {
     llama_model_free(loaded.model);
     loaded.model = nullptr;
     throw std::runtime_error("failed to create llama context for: " + model_path);
   }
   loaded.model_path = model_path;
-  loaded.slots.assign(static_cast<std::size_t>(n_slots), {});
+  loaded.model_context_window = train_ctx > 0 ? train_ctx : 0;
+  loaded.backend_allocation_cap = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
+  loaded.context_override = env_ctx > 0 ? env_ctx : 0;
+  loaded.max_output_tokens = std::max(0, env_int("CLAP_LLAMA_MAX_OUTPUT", 0));
+  loaded.retained_max = retained_max;
+  n_ctx = loaded.backend_allocation_cap;
+  loaded.slots.assign(static_cast<std::size_t>(retained_max), {});
   loaded.use_counter = 0;
   loaded.hybrid = llama_model_is_recurrent(loaded.model) || llama_model_is_hybrid(loaded.model);
+  loaded.startup_available_bytes = startup_available;
+  loaded.model_file_bytes = file_size_error ? 0 : model_file_bytes;
+  loaded.active_policy = clap::llama_active::select({
+      env_int("CLAP_MAX_ACTIVE", 0), startup_available, loaded.model_file_bytes,
+      static_cast<int>(std::max(1u, std::thread::hardware_concurrency())), n_ctx,
+      retained_max, loaded.hybrid, llama_model_has_encoder(loaded.model)});
+  loaded.max_active = loaded.active_policy.selected_max;
+  const char* kv_type = std::getenv("CLAP_LLAMA_KV_TYPE");
+  loaded.cache_domain = model_path + "|llama|ctx=" + std::to_string(n_ctx) +
+      "|kv=" + (kv_type && *kv_type ? kv_type : "f16") +
+      "|unified=" + (ctx_params.kv_unified ? "1" : "0") +
+      "|layout=1";
+  try {
+    loaded.coordinator = std::make_unique<clap::llama_cache::Coordinator>(
+      1, 16, static_cast<uint64_t>(n_ctx),
+      static_cast<uint32_t>(std::min(8, retained_max)),
+      static_cast<uint32_t>(retained_max));
+    for (int32_t expected = 1; expected < retained_max; ++expected) {
+      const auto registered = loaded.coordinator->register_slot();
+      if (registered.slot != static_cast<uint32_t>(expected) || registered.generation == 0) {
+        throw std::runtime_error("cache coordinator returned unstable slot registration");
+      }
+    }
+  } catch (const std::exception& error) {
+    loaded.coordinator.reset();
+    fprintf(stderr, "clap-llama: cache coordinator unavailable; using no-cache fresh mode: %s\n", error.what());
+  }
+}
+
+json retention_telemetry(const LoadedLlama& loaded, std::size_t active, std::size_t queued = 0) {
+  uint32_t retained_total = 0;
+  uint32_t retained_sessions = 0;
+  uint32_t retained_anchors = 0;
+  uint64_t evictions = 0;
+  if (loaded.coordinator) {
+    const auto retention = loaded.coordinator->retention_telemetry();
+    const auto telemetry = loaded.coordinator->telemetry();
+    retained_total = retention.active_slots;
+    retained_sessions = retention.session_slots;
+    retained_anchors = retention.anchor_slots;
+    evictions = telemetry.evictions;
+  }
+  return json{
+    {"max_active", loaded.max_active},
+    {"queued", queued},
+    {"previous_max_active", loaded.previous_max_active > 0
+        ? json(loaded.previous_max_active) : json(nullptr)},
+    {"last_adjustment_reason", loaded.last_adjustment_reason.empty()
+        ? json(nullptr) : json(loaded.last_adjustment_reason)},
+    {"last_adjustment_at", loaded.last_adjustment_at.empty()
+        ? json(nullptr) : json(loaded.last_adjustment_at)},
+    {"retained_growth_reserve_bytes", loaded.retained_growth_reserve_bytes},
+    {"global_resident_memory_bytes", loaded.global_resident_memory_bytes > 0
+        ? json(loaded.global_resident_memory_bytes) : json(nullptr)},
+    {"pressure_state", loaded.pressure_state.empty()
+        ? json(nullptr) : json(loaded.pressure_state)},
+    {"active_policy", {
+      {"mode", loaded.active_policy.mode},
+      {"selected_max", loaded.active_policy.selected_max},
+      {"backend_ceiling", loaded.active_policy.backend_ceiling},
+      {"hardware_ceiling", loaded.active_policy.hardware_ceiling},
+      {"model_ceiling", loaded.active_policy.model_ceiling},
+      {"memory_ceiling", loaded.active_policy.memory_ceiling},
+      {"reason", loaded.active_policy.reason},
+      {"inputs", {
+        {"startup_available_bytes", loaded.startup_available_bytes > 0
+            ? json(loaded.startup_available_bytes) : json(nullptr)},
+        {"model_file_bytes", loaded.model_file_bytes > 0
+            ? json(loaded.model_file_bytes) : json(nullptr)},
+        {"context_capacity", loaded.backend_allocation_cap},
+        {"context_ceiling", loaded.active_policy.context_ceiling},
+        {"per_active_reserve_cells", loaded.active_policy.per_active_reserve_cells},
+        {"per_active_reserve_bytes", loaded.active_policy.per_active_reserve_bytes},
+        {"processor_count", std::max(1u, std::thread::hardware_concurrency())},
+        {"hybrid_or_recurrent", loaded.hybrid},
+      }},
+    }},
+    {"active", active},
+    {"retained_total", retained_total},
+    {"retained_sessions", retained_sessions},
+    {"retained_anchors", retained_anchors},
+    // Byte pressure is intentionally disabled: pinned llama.cpp has no public
+    // authoritative KV byte or used/free-cell telemetry.
+    {"retained_bytes", 0}, {"session_bytes", 0}, {"anchor_bytes", 0},
+    {"budget_bytes", 0}, {"high_watermark_bytes", 0}, {"low_watermark_bytes", 0},
+    {"under_pressure", false},
+    {"hard_ceiling", loaded.retained_max},
+    {"eviction_reason", loaded.last_eviction_reason.empty()
+        ? json(nullptr) : json(loaded.last_eviction_reason)},
+    {"eviction_count", evictions},
+    {"physical_cell_capacity", loaded.backend_allocation_cap},
+    {"physical_cells_used", nullptr},
+    {"physical_cells_free", nullptr},
+  };
 }
 
 void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits, llama_seq_id seq) {
@@ -426,6 +603,8 @@ struct ActiveRequest {
   llama_sampler* sampler = nullptr;
   llama_seq_id seq = 0;
   LoadedLlama::CacheSlot* slot = nullptr;
+  clap::llama_cache::Coordinator* coordinator = nullptr;
+  clap::llama_cache::Identity cache_identity;
 
   std::vector<llama_token> prompt_tokens;       // un-ingested remainder
   std::vector<llama_token> full_prompt_tokens;  // for the one ingest retry
@@ -434,6 +613,20 @@ struct ActiveRequest {
   int prompt_token_count = 0;
   int cached_prompt_tokens = 0;
   std::string cache_reuse_kind;
+  std::string cache_reuse_scope;
+  std::string cache_namespace;
+  int cache_donor_slot = -1;
+  uint64_t cache_donor_generation = 0;
+  uint64_t cache_target_generation = 0;
+  std::vector<uint32_t> cache_evicted_slots;
+  uint64_t cache_planned_reuse_tokens = 0;
+  uint64_t cache_realized_reuse_tokens = 0;
+  uint64_t cache_decision_us = 0;
+  std::string cache_fallback;
+  std::string prompt_token_hash;
+  clap::llama_boundary::StableBoundary stable_boundary;
+  json cache_candidates = json::array();
+  bool cache_side_request = false;
 
   enum class Phase { Prefill, Decode };
   Phase phase = Phase::Prefill;
@@ -444,52 +637,330 @@ struct ActiveRequest {
   bool cancelled = false;
   bool retried = false;
   bool done = false;
-
-  // When >= 0: during full prefill of a hybrid model, snapshot a shared-prefix
-  // anchor into an empty slot once ingestion reaches exactly this position.
   int32_t anchor_at = -1;
+  bool anchor_planted = false;
 
   // per-step scratch
   int32_t logits_index = -1;
   int32_t step_tokens = 0;
 };
 
-// Snapshots the current (mid-prefill) state of req.seq into an empty slot as
-// a shared-prefix anchor. Hybrid models cannot branch a partial range off a
-// longer sequence, but they can whole-copy a sequence that holds exactly the
-// shared prefix — so future sessions with the same system prompt + tools
-// branch from the anchor and skip that prefill entirely. Never evicts a warm
-// session; anchors only claim currently-empty slots.
-void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
-  const std::size_t count = static_cast<std::size_t>(req.anchor_at);
-  if (count < 16 || count > req.full_prompt_tokens.size()) return;
-  // The sequence state must hold exactly the prefix (chunking lands a
-  // boundary on anchor_at; anything else means the plan was disrupted).
-  if (req.ingested != count || req.cached_prompt_tokens != 0) return;
-  // Skip when an equivalent prefix holder already exists (concurrent prefills
-  // race to plant the same shared boundary; one anchor serves everyone).
-  for (const auto& s : loaded.slots) {
-    if (s.tokens.size() != count) continue;  // only an exact holder can donate this prefix
-    std::size_t p = 0;
-    while (p < count && s.tokens[p] == req.full_prompt_tokens[p]) p += 1;
-    if (p == count) return;
-  }
-  std::size_t target = SIZE_MAX;
-  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-    if (!loaded.slots[index].busy && loaded.slots[index].tokens.empty()) {
-      target = index;
-      break;
+std::string cache_string(const json& cache, const char* key) {
+  if (!cache.is_object() || !cache.contains(key) || !cache[key].is_string()) return "";
+  return cache[key].get<std::string>();
+}
+
+const std::string& telemetry_key() {
+  static const std::string key = [] {
+    if (const char* installed = std::getenv("CLAP_TELEMETRY_HMAC_KEY"); installed && *installed) {
+      return std::string(installed);
     }
+    std::random_device random;
+    std::ostringstream out;
+    for (int index = 0; index < 8; ++index) out << std::hex << random();
+    return out.str();
+  }();
+  return key;
+}
+
+template <typename Token>
+std::string token_fingerprint(const std::vector<Token>& tokens, std::size_t count) {
+  count = std::min(count, tokens.size());
+  std::ostringstream encoded;
+  encoded << telemetry_key() << "|tokens-v1|" << count << '|';
+  for (std::size_t index = 0; index < count; ++index) {
+    const uint32_t token = static_cast<uint32_t>(tokens[index]);
+    encoded.write(reinterpret_cast<const char*>(&token), sizeof(token));
   }
-  if (target == SIZE_MAX) return;
+  const std::string material = encoded.str();
+  std::ostringstream result;
+  for (int domain = 0; domain < 4; ++domain) {
+    result << std::hex << clap::llama_cache::hash(std::to_string(domain) + material);
+  }
+  return result.str();
+}
+
+const char* candidate_state(uint32_t state) {
+  switch (state) {
+    case CLAP_CACHE_SLOT_SESSION: return "session";
+    case CLAP_CACHE_SLOT_PROMPT_BOUNDARY: return "prompt_boundary";
+    case CLAP_CACHE_SLOT_ANCHOR: return "anchor";
+    default: return "empty";
+  }
+}
+
+const char* candidate_rejection(uint32_t rejection) {
+  switch (rejection) {
+    case CLAP_CACHE_REJECTION_NAMESPACE: return "namespace";
+    case CLAP_CACHE_REJECTION_MODEL_DOMAIN: return "model_domain";
+    case CLAP_CACHE_REJECTION_GENERATION: return "generation";
+    case CLAP_CACHE_REJECTION_BUSY_LEASE: return "busy_lease";
+    case CLAP_CACHE_REJECTION_MATERIALIZATION: return "materialization";
+    case CLAP_CACHE_REJECTION_SESSION: return "session";
+    case CLAP_CACHE_REJECTION_NONTRIM: return "nontrim";
+    case CLAP_CACHE_REJECTION_CAPABILITY: return "capability";
+    case CLAP_CACHE_REJECTION_MIN_PREFIX: return "min_prefix";
+    case CLAP_CACHE_REJECTION_CAPACITY: return "capacity";
+    case CLAP_CACHE_REJECTION_ABSENT_ANCHOR: return "absent_anchor";
+    case CLAP_CACHE_REJECTION_LOWER_RANK: return "lower_rank";
+    default: return nullptr;
+  }
+}
+
+clap::llama_cache::Identity cache_identity(const LoadedLlama& loaded,
+                                            const std::string&,
+                                            const json& request) {
+  const json cache = request.contains("cache") && request["cache"].is_object()
+      ? request["cache"] : json::object();
+  const std::string tenant = cache_string(cache, "namespace");
+  const std::string keyed = telemetry_key() + "|";
+  clap::llama_cache::Identity identity;
+  identity.name_space = clap::llama_cache::fingerprint(
+      keyed + loaded.cache_domain + "|tenant=" + (tenant.empty() ? "local" : tenant));
+  identity.tenant = clap::llama_cache::hash(keyed + (tenant.empty() ? "local" : tenant));
+  identity.project = clap::llama_cache::hash(keyed + cache_string(cache, "project"));
+  identity.harness = clap::llama_cache::hash(keyed + cache_string(cache, "harness"));
+  identity.agent = clap::llama_cache::hash(keyed + cache_string(cache, "agent"));
+  const std::string session = cache_string(cache, "session");
+  identity.session = session.empty() ? 0 : clap::llama_cache::hash(keyed + session);
+  identity.side_request = cache.value("side_request", false);
+  const std::string priority = cache_string(cache, "priority");
+  identity.priority = priority == "background" ? CLAP_CACHE_PRIORITY_BACKGROUND
+                                                : CLAP_CACHE_PRIORITY_INTERACTIVE;
+  if (!session.empty()) identity.scope = CLAP_CACHE_SCOPE_SESSION;
+  else if (!cache_string(cache, "agent").empty()) identity.scope = CLAP_CACHE_SCOPE_AGENT;
+  else if (!cache_string(cache, "project").empty()) identity.scope = CLAP_CACHE_SCOPE_PROJECT;
+  else if (!cache_string(cache, "harness").empty()) identity.scope = CLAP_CACHE_SCOPE_HARNESS;
+  else identity.scope = CLAP_CACHE_SCOPE_TENANT;
+  return identity;
+}
+
+const char* cache_scope_name(uint32_t scope) {
+  switch (scope) {
+    case CLAP_CACHE_SCOPE_SESSION: return "session";
+    case CLAP_CACHE_SCOPE_AGENT: return "agent";
+    case CLAP_CACHE_SCOPE_PROJECT: return "project";
+    case CLAP_CACHE_SCOPE_HARNESS: return "harness";
+    case CLAP_CACHE_SCOPE_TENANT: return "tenant";
+    default: return "none";
+  }
+}
+
+uint64_t llama_cache_capabilities(const LoadedLlama& loaded) {
+  uint64_t capabilities = CLAP_CACHE_CAP_WHOLE_STATE_COPY |
+      CLAP_CACHE_CAP_SAFE_BUSY_DONOR | CLAP_CACHE_CAP_RELIABLE_RESIDENT_LENGTH |
+      CLAP_CACHE_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS;
+  if (loaded.hybrid) {
+    capabilities |= CLAP_CACHE_CAP_RECURRENT_OR_HYBRID;
+  } else {
+    capabilities |= CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM |
+        CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH | CLAP_CACHE_CAP_ZERO_COPY_BRANCH |
+        CLAP_CACHE_CAP_UNIFIED_STORAGE;
+  }
+  return capabilities;
+}
+
+bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
+                              std::vector<llama_token>& prompt_tokens,
+                              int32_t output_reserve) {
+  if (!loaded.coordinator) return false;
+  clap::llama_cache::Plan plan;
+  std::vector<uint8_t> slot_capabilities;
+  slot_capabilities.reserve(loaded.slots.size());
+  for (const auto& slot : loaded.slots) {
+    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
+    if (!slot.tokens.empty()) {
+      flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
+      if (!loaded.hybrid) flags |= CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM;
+    }
+    slot_capabilities.push_back(flags);
+  }
+  try {
+    plan = loaded.coordinator->plan(prompt_tokens, req.cache_identity,
+        llama_cache_capabilities(loaded), static_cast<uint64_t>(output_reserve),
+        CLAP_CACHE_SLOT_SESSION, slot_capabilities);
+  } catch (const clap::llama_cache::Error& error) {
+    if (error.status == CLAP_CACHE_NO_CAPACITY || error.status == CLAP_CACHE_SLOT_BUSY) {
+      throw CacheBackpressure(error.what());
+    }
+    req.cache_fallback = "coordinator_plan_failed_closed";
+    fprintf(stderr, "clap-llama: cache coordinator plan failed closed: %s\n", error.what());
+    throw;
+  }
+
+  const auto view = plan.view();
+  req.cache_candidates = json::array();
+  for (const auto& candidate : plan.candidates()) {
+    const char* rejection = candidate_rejection(candidate.rejection);
+    req.cache_candidates.push_back(json{
+      {"slot", candidate.slot}, {"generation", candidate.generation},
+      {"state", candidate_state(candidate.state)},
+      {"shared_prefix_tokens", candidate.shared_prefix_tokens},
+      {"namespace_compatible", candidate.namespace_compatible != 0},
+      {"model_compatible", candidate.model_compatible != 0},
+      {"session_compatible", candidate.session_compatible != 0},
+      {"generation_compatible", candidate.generation_compatible != 0},
+      {"busy_eligible", candidate.busy_eligible != 0},
+      {"lease_eligible", candidate.lease_eligible != 0},
+      {"materialized", candidate.materialized != 0},
+      {"trim_eligible", candidate.trim_eligible != 0},
+      {"copy_eligible", candidate.copy_eligible != 0},
+      {"eligible", candidate.eligible != 0}, {"selected", candidate.selected != 0},
+      {"rejection", rejection ? json(rejection) : json(nullptr)},
+    });
+  }
+  const std::size_t target = view.target.slot;
+  const std::size_t donor = view.has_donor ? view.donor.slot : SIZE_MAX;
+  if (target >= loaded.slots.size() || (donor != SIZE_MAX && donor >= loaded.slots.size())) {
+    plan.abort();
+    throw std::runtime_error("cache coordinator returned an invalid slot");
+  }
+
   llama_memory_t mem = llama_get_memory(loaded.ctx);
-  llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
-  llama_memory_seq_cp(mem, req.seq, static_cast<llama_seq_id>(target), -1, -1);
-  auto& slot = loaded.slots[target];
-  slot.tokens.assign(req.full_prompt_tokens.begin(), req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
-  slot.is_anchor = true;
-  slot.last_used = ++loaded.use_counter;
-  fprintf(stderr, "clap-llama: created prefix anchor (%zu tokens) in slot %zu\n", count, target);
+  try {
+    for (const auto& victim : plan.evictions()) {
+      if (victim.slot >= loaded.slots.size() || victim.slot == target) continue;
+      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(victim.slot), -1, -1);
+      loaded.slots[victim.slot] = {};
+      req.cache_evicted_slots.push_back(victim.slot);
+      loaded.last_eviction_reason = "hard_ceiling";
+    }
+
+    auto& slot = loaded.slots[target];
+    std::size_t resident = 0;
+    if (view.operation != CLAP_CACHE_OPERATION_CONTINUE) {
+      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
+      slot.tokens.clear();
+      slot.is_anchor = false;
+    }
+    if (view.operation == CLAP_CACHE_OPERATION_CONTINUE) {
+      resident = std::min<std::size_t>(view.reuse_tokens, prompt_tokens.size() - 1);
+      if (resident == 0 || !llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target),
+                                                static_cast<llama_pos>(resident), -1)) {
+        throw std::runtime_error("coordinator-selected continuation could not be materialized");
+      }
+    } else if (view.operation == CLAP_CACHE_OPERATION_BRANCH) {
+      resident = std::min<std::size_t>(view.reuse_tokens, prompt_tokens.size() - 1);
+      if (resident > 0) {
+        if (loaded.hybrid && resident == loaded.slots[donor].tokens.size()) {
+          llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
+                              static_cast<llama_seq_id>(target), -1, -1);
+        } else if (!loaded.hybrid) {
+          llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
+                              static_cast<llama_seq_id>(target), 0,
+                              static_cast<llama_pos>(resident));
+        } else {
+          throw std::runtime_error("coordinator-selected branch could not be materialized");
+        }
+      }
+    } else if (view.operation == CLAP_CACHE_OPERATION_RESTORE &&
+               view.reuse_tokens < prompt_tokens.size()) {
+      resident = static_cast<std::size_t>(view.reuse_tokens);
+      llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
+                          static_cast<llama_seq_id>(target), -1, -1);
+    }
+
+    const auto decision = plan.commit(resident, CLAP_CACHE_SLOT_SESSION);
+    const auto info = loaded.coordinator->slot(static_cast<uint32_t>(target));
+    slot.tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() +
+        static_cast<std::ptrdiff_t>(resident));
+    slot.coordinator_generation = info.generation;
+    slot.last_used = ++loaded.use_counter;
+    slot.busy = true;
+    req.coordinator = loaded.coordinator.get();
+    req.slot = &slot;
+    req.seq = static_cast<llama_seq_id>(target);
+    req.n_pos = static_cast<int32_t>(resident);
+    req.cached_prompt_tokens = static_cast<int>(decision.realized_reuse_tokens);
+    req.cache_planned_reuse_tokens = decision.planned_reuse_tokens;
+    req.cache_realized_reuse_tokens = decision.realized_reuse_tokens;
+    req.cache_decision_us = decision.decision_us;
+    req.anchor_at = static_cast<int32_t>(view.anchor_tokens);
+    req.stable_boundary = clap::llama_boundary::exact(
+        req.full_prompt_tokens, static_cast<std::size_t>(view.anchor_tokens), "prompt",
+        [](const auto& tokens, std::size_t count) {
+          return token_fingerprint(tokens, count);
+        });
+    req.cache_donor_slot = decision.has_donor ? static_cast<int>(decision.donor_slot) : -1;
+    req.cache_donor_generation = decision.has_donor
+        ? loaded.coordinator->slot(decision.donor_slot).generation : 0;
+    req.cache_target_generation = info.generation;
+    req.cache_reuse_scope = cache_scope_name(decision.scope);
+    if (decision.operation == CLAP_CACHE_OPERATION_CONTINUE && resident > 0) {
+      req.cache_reuse_kind = "slot";
+    } else if (decision.operation == CLAP_CACHE_OPERATION_RESTORE && resident > 0) {
+      req.cache_reuse_kind = "anchor";
+    } else if (decision.operation == CLAP_CACHE_OPERATION_BRANCH && resident > 0) {
+      req.cache_reuse_kind = "branch";
+    }
+    for (const auto& victim : plan.evictions()) {
+      if (victim.slot == target) req.cache_evicted_slots.push_back(victim.slot);
+      if (victim.slot == target) loaded.last_eviction_reason = "hard_ceiling";
+    }
+    prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() +
+        static_cast<std::ptrdiff_t>(resident));
+    return true;
+  } catch (...) {
+    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
+    loaded.slots[target] = {};
+    throw;
+  }
+}
+
+void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
+  if (req.anchor_planted || req.anchor_at < 0 || !req.coordinator) return;
+  const std::size_t count = static_cast<std::size_t>(req.anchor_at);
+  if (count < 16 || req.ingested != count || req.slot == nullptr) return;
+  req.anchor_planted = true;
+  std::vector<llama_token> boundary(
+      req.full_prompt_tokens.begin(),
+      req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
+  std::vector<uint8_t> slot_capabilities;
+  slot_capabilities.reserve(loaded.slots.size());
+  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+    const auto& slot = loaded.slots[index];
+    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
+    if (!slot.tokens.empty()) flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
+    slot_capabilities.push_back(flags);
+  }
+  try {
+    auto plan = req.coordinator->plan(boundary, req.cache_identity,
+        CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
+            CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT,
+        0, CLAP_CACHE_SLOT_ANCHOR, slot_capabilities);
+    const auto view = plan.view();
+    if (view.operation == CLAP_CACHE_OPERATION_NOOP) {
+      plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
+      return;
+    }
+    if (view.target.slot >= loaded.slots.size()) {
+      plan.abort();
+      return;
+    }
+    llama_memory_t mem = llama_get_memory(loaded.ctx);
+    for (const auto& victim : plan.evictions()) {
+      if (victim.slot >= loaded.slots.size() || victim.slot == view.target.slot) continue;
+      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(victim.slot), -1, -1);
+      loaded.slots[victim.slot] = {};
+      loaded.last_eviction_reason = "hard_ceiling";
+    }
+    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(view.target.slot), -1, -1);
+    llama_memory_seq_cp(mem, req.seq, static_cast<llama_seq_id>(view.target.slot), -1, -1);
+    auto& anchor = loaded.slots[view.target.slot];
+    anchor.tokens = boundary;
+    anchor.is_anchor = true;
+    anchor.last_used = ++loaded.use_counter;
+    try {
+      plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
+      anchor.coordinator_generation = req.coordinator->slot(view.target.slot).generation;
+    } catch (...) {
+      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(view.target.slot), -1, -1);
+      anchor = {};
+      throw;
+    }
+  } catch (const std::exception& error) {
+    fprintf(stderr, "clap-llama: coordinated anchor skipped: %s\n", error.what());
+  }
 }
 
 void finalize(ActiveRequest& req) {
@@ -497,8 +968,45 @@ void finalize(ActiveRequest& req) {
     llama_sampler_free(req.sampler);
     req.sampler = nullptr;
   }
-  if (req.slot) req.slot->busy = false;
+  if (req.slot) {
+    req.slot->busy = false;
+    if (req.coordinator && req.slot->coordinator_generation != 0) {
+      try {
+        req.coordinator->set_busy(
+            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, false);
+      } catch (const std::exception& error) {
+        fprintf(stderr, "clap-llama: cache finalize metadata failed: %s\n", error.what());
+      }
+    }
+  }
   req.done = true;
+  json cache{
+    {"hit", req.cached_prompt_tokens > 0},
+    {"reused_tokens", req.cached_prompt_tokens},
+    {"reuse_kind", req.cache_reuse_kind.empty() ? json(nullptr) : json(req.cache_reuse_kind)},
+    {"reuse_scope", req.cache_reuse_scope.empty() ? json(nullptr) : json(req.cache_reuse_scope)},
+    {"namespace", req.cache_namespace.empty() ? json(nullptr) : json(req.cache_namespace)},
+    {"donor_slot", req.cache_donor_slot < 0 ? json(nullptr) : json(req.cache_donor_slot)},
+    {"donor_generation", req.cache_donor_slot < 0 ? json(nullptr) : json(req.cache_donor_generation)},
+    {"target_slot", static_cast<int>(req.seq)},
+    {"target_generation", req.cache_target_generation},
+    {"miss_reason", req.cached_prompt_tokens > 0 ? json(nullptr) : json("no_shared_prefix")},
+    {"candidates", req.cache_candidates},
+    {"prompt_token_hash", req.prompt_token_hash},
+    {"prompt_token_count", req.prompt_token_count},
+    {"evicted_slots", req.cache_evicted_slots},
+    {"decision_us", req.cache_decision_us},
+    {"planned_reuse_tokens", req.cache_planned_reuse_tokens},
+    {"realized_reuse_tokens", req.cache_realized_reuse_tokens},
+    {"side_request", req.cache_side_request},
+    {"fallback", req.cache_fallback.empty() ? json(nullptr) : json(req.cache_fallback)},
+    {"slot", static_cast<int>(req.seq)},
+  };
+  if (req.stable_boundary.available()) {
+    cache["stable_boundary_token_hash"] = req.stable_boundary.token_hash;
+    cache["stable_boundary_token_count"] = req.stable_boundary.token_count;
+    cache["stable_boundary_kind"] = req.stable_boundary.kind;
+  }
   emit(req.id, json{
     {"done", true},
     {"finish_reason", req.finish_reason},
@@ -507,12 +1015,7 @@ void finalize(ActiveRequest& req) {
       {"prompt_tokens", req.prompt_token_count},
       {"completion_tokens", req.completion_tokens},
     }},
-    {"cache", json{
-      {"hit", req.cached_prompt_tokens > 0},
-      {"reused_tokens", req.cached_prompt_tokens},
-      {"reuse_kind", req.cache_reuse_kind.empty() ? json(nullptr) : json(req.cache_reuse_kind)},
-      {"slot", static_cast<int>(req.seq)},
-    }},
+    {"cache", std::move(cache)},
   });
 }
 
@@ -524,6 +1027,14 @@ void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& me
   if (req.slot) {
     req.slot->busy = false;
     req.slot->tokens.clear();
+    if (req.coordinator && req.slot->coordinator_generation != 0) {
+      try {
+        req.slot->coordinator_generation = req.coordinator->invalidate(
+            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+      } catch (const std::exception& error) {
+        fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n", error.what());
+      }
+    }
   }
   llama_memory_seq_rm(llama_get_memory(loaded.ctx), req.seq, -1, -1);
   req.done = true;
@@ -606,17 +1117,37 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
 void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab) {
   if (req.phase == ActiveRequest::Phase::Prefill) {
     const std::size_t chunk = static_cast<std::size_t>(req.step_tokens);
+    const std::size_t chunk_start = req.ingested;
     if (req.slot) {
       req.slot->tokens.insert(
         req.slot->tokens.end(),
         req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested),
         req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested + chunk));
+      if (req.coordinator && req.slot->coordinator_generation != 0) {
+        try {
+          req.slot->coordinator_generation = req.coordinator->advance(
+              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation},
+              req.prompt_tokens.data() + chunk_start, chunk, CLAP_CACHE_SLOT_SESSION, true);
+        } catch (const std::exception& error) {
+          req.cache_fallback = "coordinator_advance_failed";
+          try {
+            req.slot->coordinator_generation = req.coordinator->invalidate(
+                {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+          } catch (...) {
+            req.slot->coordinator_generation = 0;
+          }
+          emit(req.id, json{{"error", "cache coordinator advance failed closed"},
+                            {"code", "cache_coordinator_error"}});
+          req.done = true;
+          fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
+          return;
+        }
+      }
     }
     req.n_pos += req.step_tokens;
     req.ingested += chunk;
-    if (req.anchor_at >= 0 && req.ingested >= static_cast<std::size_t>(req.anchor_at)) {
+    if (req.anchor_at >= 0 && req.ingested == static_cast<std::size_t>(req.anchor_at)) {
       maybe_create_anchor(loaded, req);
-      req.anchor_at = -1;
     }
     if (req.prompt_tokens.size() > 1024 && req.ingested < req.prompt_tokens.size()) {
       emit(req.id, json{{"prefill", {
@@ -631,7 +1162,29 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
     return;
   }
   req.n_pos += 1;
-  if (req.slot) req.slot->tokens.push_back(req.pending_token);
+  if (req.slot) {
+    req.slot->tokens.push_back(req.pending_token);
+    if (req.coordinator && req.slot->coordinator_generation != 0) {
+      try {
+        req.slot->coordinator_generation = req.coordinator->advance(
+            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation},
+            &req.pending_token, 1, CLAP_CACHE_SLOT_SESSION, true);
+      } catch (const std::exception& error) {
+        req.cache_fallback = "coordinator_advance_failed";
+        try {
+          req.slot->coordinator_generation = req.coordinator->invalidate(
+              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+        } catch (...) {
+          req.slot->coordinator_generation = 0;
+        }
+        emit(req.id, json{{"error", "cache coordinator advance failed closed"},
+                          {"code", "cache_coordinator_error"}});
+        req.done = true;
+        fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
+        return;
+      }
+    }
+  }
   const llama_token token = llama_sampler_sample(req.sampler, loaded.ctx, req.logits_index);
   process_sampled(loaded, req, vocab, token);
 }
@@ -647,15 +1200,32 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
         s.is_anchor = false;
       }
       llama_memory_clear(llama_get_memory(loaded.ctx), true);
+      if (req.coordinator) {
+        req.coordinator->reset();
+        req.slot->coordinator_generation = req.coordinator->slot(
+            static_cast<uint32_t>(req.seq)).generation;
+        req.coordinator->set_busy(
+            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, true);
+      }
     } else {
       llama_memory_seq_rm(llama_get_memory(loaded.ctx), req.seq, -1, -1);
-      if (req.slot) req.slot->tokens.clear();
+      if (req.slot) {
+        req.slot->tokens.clear();
+        if (req.coordinator && req.slot->coordinator_generation != 0) {
+          req.slot->coordinator_generation = req.coordinator->invalidate(
+              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+          req.coordinator->set_busy(
+              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, true);
+        }
+      }
     }
     req.prompt_tokens = req.full_prompt_tokens;
     req.ingested = 0;
     req.n_pos = 0;
     req.cached_prompt_tokens = 0;
+    req.cache_realized_reuse_tokens = 0;
     req.cache_reuse_kind.clear();
+    req.cache_fallback = "decode_retry_full_prefill";
     fprintf(stderr, "clap-llama: ingest failed for request %s; retrying from scratch\n", req.id.c_str());
     return;
   }
@@ -675,8 +1245,6 @@ int32_t add_contribution(llama_batch& batch, ActiveRequest& req, int32_t budget)
     return 1;
   }
   std::size_t remaining = req.prompt_tokens.size() - req.ingested;
-  // Land a chunk boundary exactly on a pending anchor position so the
-  // sequence state can be snapshotted at the shared-prefix boundary.
   if (req.anchor_at >= 0 && static_cast<std::size_t>(req.anchor_at) > req.ingested) {
     remaining = std::min(remaining, static_cast<std::size_t>(req.anchor_at) - req.ingested);
   }
@@ -774,6 +1342,12 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   auto req = std::make_unique<ActiveRequest>();
   req->id = id;
   req->params = sampling_from_request(request);
+  req->cache_identity = cache_identity(loaded, id, request);
+  req->cache_side_request = req->cache_identity.side_request;
+  if (!loaded.coordinator) req->cache_fallback = "coordinator_unavailable";
+  if (request.contains("cache") && request["cache"].is_object()) {
+    req->cache_namespace = cache_string(request["cache"], "namespace");
+  }
 
   const bool add_special = prompt.find("<bos>") == std::string::npos && prompt.find("<|turn>") == std::string::npos;
   const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, add_special, true);
@@ -784,20 +1358,39 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   }
 
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
-  const int32_t output_reserve = std::max(1, std::min(req->params.max_tokens, 256));
-  if (static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= n_ctx) {
+  const int32_t prompt_count = static_cast<int32_t>(prompt_tokens.size());
+  if (prompt_count >= n_ctx) {
     throw RequestError("context_length_exceeded",
-      "prompt exceeds context window; prompt tokens=" + std::to_string(prompt_tokens.size()) +
-      ", context=" + std::to_string(n_ctx) +
-      ", reserved output tokens=" + std::to_string(output_reserve) +
-      ". Increase CLAP_LLAMA_CONTEXT or reduce the prompt/tool history."
+      "prompt is too long for the loaded model; prompt_tokens=" + std::to_string(prompt_count) +
+      ", max_input_tokens=" + std::to_string(n_ctx - 1) +
+      ", effective_context_window=" + std::to_string(n_ctx) + "."
     );
+  }
+  if (req->params.max_tokens > 0 && loaded.max_output_tokens > 0 &&
+      req->params.max_tokens > loaded.max_output_tokens) {
+    throw RequestError("max_output_tokens_exceeded",
+      "requested max_tokens=" + std::to_string(req->params.max_tokens) +
+      " exceeds the loaded model maximum output tokens=" +
+      std::to_string(loaded.max_output_tokens) + ".");
+  }
+  const int32_t available_output = n_ctx - prompt_count;
+  if (req->params.max_tokens == 0) {
+    req->params.max_tokens = loaded.max_output_tokens > 0
+        ? std::min(loaded.max_output_tokens, available_output) : available_output;
+  }
+  const int32_t output_reserve = req->params.max_tokens;
+  if (prompt_count + output_reserve > n_ctx) {
+    throw RequestError("context_length_exceeded",
+      "prompt plus requested output exceeds the loaded model context; prompt_tokens=" +
+      std::to_string(prompt_count) + ", requested_output_tokens=" +
+      std::to_string(output_reserve) + ", effective_context_window=" +
+      std::to_string(n_ctx) + ".");
   }
   // Per-session context cap: bounds one session's share of the unified KV
   // pool so a single conversation cannot promise itself the full window on a
   // box shared by many sessions. Admin policy, not a physical limit.
   const int32_t session_cap = env_int("CLAP_LLAMA_MAX_SESSION_CTX", 0);
-  if (session_cap > 0 && static_cast<int32_t>(prompt_tokens.size()) + output_reserve >= session_cap) {
+  if (session_cap > 0 && prompt_count + output_reserve > session_cap) {
     throw RequestError("context_length_exceeded",
       "prompt exceeds the per-session context cap; prompt tokens=" + std::to_string(prompt_tokens.size()) +
       ", max_session_ctx=" + std::to_string(session_cap) +
@@ -808,6 +1401,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
 
   req->prompt_token_count = static_cast<int>(prompt_tokens.size());
   req->full_prompt_tokens = prompt_tokens;
+  req->prompt_token_hash = token_fingerprint(prompt_tokens, prompt_tokens.size());
 
   if (llama_model_has_encoder(loaded.model)) {
     // Encoder-decoder models run alone (admission guarantees no other active
@@ -817,6 +1411,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
       s.is_anchor = false;
     }
     llama_memory_clear(llama_get_memory(loaded.ctx), true);
+    if (loaded.coordinator) loaded.coordinator->reset();
     llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
     if (llama_encode(loaded.ctx, batch)) throw std::runtime_error("llama_encode failed");
     llama_token decoder_start = llama_model_decoder_start_token(loaded.model);
@@ -831,153 +1426,35 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     return req;
   }
 
+  if (prepare_with_coordinator(loaded, *req, prompt_tokens, output_reserve)) {
+    req->prompt_tokens = std::move(prompt_tokens);
+    req->sampler = make_sampler(req->params);
+    return req;
+  }
+
+  // The only policy fallback is coordinator-unavailable no-cache mode. It may
+  // choose an idle execution sequence, but it never inspects tokens, reuses a
+  // donor, creates an anchor, or performs policy eviction.
   llama_memory_t mem = llama_get_memory(loaded.ctx);
-  auto common_prefix = [&](const std::vector<llama_token>& candidate) {
-    std::size_t p = 0;
-    const std::size_t limit = std::min(candidate.size(), prompt_tokens.size());
-    while (p < limit && candidate[p] == prompt_tokens[p]) p += 1;
-    return p;
-  };
-
-  // Donor scan across ALL slots — busy sessions and anchors included — for
-  // the longest shared prefix. A tiny prefix (e.g. just <bos>) is noise.
-  std::size_t donor = SIZE_MAX;
-  std::size_t donor_prefix = 0;
+  std::size_t target = SIZE_MAX;
   for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-    if (loaded.slots[index].tokens.empty()) continue;
-    const std::size_t p = common_prefix(loaded.slots[index].tokens);
-    if (p > donor_prefix) {
-      donor_prefix = p;
-      donor = index;
+    if (!loaded.slots[index].busy) {
+      target = index;
+      if (loaded.slots[index].tokens.empty()) break;
     }
   }
-  if (donor_prefix < 16) {
-    donor = SIZE_MAX;
-    donor_prefix = 0;
-  }
-  const bool donor_exact = donor != SIZE_MAX && donor_prefix == loaded.slots[donor].tokens.size();
-  const bool donor_idle_session =
-      donor != SIZE_MAX && !loaded.slots[donor].busy && !loaded.slots[donor].is_anchor;
-  // In-place continuation: exact idle donors always (cheapest, no copy); for
-  // hybrid models also non-exact idle donors — llama.cpp recurrent state
-  // checkpoints can often rewind them, and branching mid-stream is impossible
-  // anyway, so trying the rewind beats an unconditional full re-prefill.
-  // Attention models with a non-exact donor branch instead (preserves the
-  // donor's longer suffix for its own session).
-  const bool donor_usable_in_place = donor_idle_session && (donor_exact || loaded.hybrid);
-
-  // Fresh slot pick: empty first, then oldest idle session; anchors are
-  // recycled last because they serve every future session of their prefix.
-  auto pick_fresh_slot = [&]() -> std::size_t {
-    std::size_t best = SIZE_MAX;
-    uint64_t oldest = UINT64_MAX;
-    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-      if (loaded.slots[index].busy || index == donor) continue;
-      const auto& candidate = loaded.slots[index];
-      uint64_t age = candidate.tokens.empty() ? 0 : candidate.last_used;
-      if (candidate.is_anchor && !candidate.tokens.empty()) age = (UINT64_MAX / 2) + candidate.last_used;
-      if (age < oldest) {
-        oldest = age;
-        best = index;
-      }
-    }
-    return best;
-  };
-
-  if (donor_usable_in_place) {
-    // Same-session continuation: extend the donor slot in place (no copy).
-    auto* slot = &loaded.slots[donor];
-    slot->last_used = ++loaded.use_counter;
-    req->slot = slot;
-    req->seq = static_cast<llama_seq_id>(donor);
-    std::size_t prefix = donor_prefix;
-    if (prefix == prompt_tokens.size()) prefix -= 1;  // always re-decode the last token for logits
-    // Hybrid/recurrent models (e.g. Gated DeltaNet) cannot remove a partial
-    // range from their recurrent state; llama_memory_seq_rm returns false. In
-    // that case clear the sequence and re-ingest the whole prompt.
-    if (prefix > 0 && llama_memory_seq_rm(mem, req->seq, static_cast<llama_pos>(prefix), -1)) {
-      slot->tokens.resize(prefix);
-      req->n_pos = static_cast<int32_t>(prefix);
-      prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(prefix));
-      req->cached_prompt_tokens = static_cast<int>(prefix);
-      req->cache_reuse_kind = "slot";
-    } else {
-      llama_memory_seq_rm(mem, req->seq, -1, -1);
-      slot->tokens.clear();
-      req->n_pos = 0;
-    }
-  } else {
-    const std::size_t target = pick_fresh_slot();
-    if (target == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
-    auto* slot = &loaded.slots[target];
-    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
-    slot->tokens.clear();
-    slot->is_anchor = false;
-    slot->last_used = ++loaded.use_counter;
-    req->slot = slot;
-    req->seq = static_cast<llama_seq_id>(target);
-    req->n_pos = 0;
-
-    if (donor != SIZE_MAX) {
-      // Shared-prefix dedup: branch the common prefix off the donor without
-      // disturbing it, so sessions sharing a system prompt + tool schema skip
-      // that prefill entirely. In the unified KV pool a sequence copy shares
-      // cells (no duplicate memory). Attention KV supports partial-range
-      // copies from any donor; hybrid/recurrent state only supports
-      // whole-sequence copies (exact-prefix donors, e.g. anchors).
-      const std::size_t want = std::min(donor_prefix, prompt_tokens.size() - 1);
-      if (!loaded.hybrid && want >= 16) {
-        llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor), req->seq, 0, static_cast<llama_pos>(want));
-        slot->tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(want));
-        req->n_pos = static_cast<int32_t>(want);
-        prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(want));
-        req->cached_prompt_tokens = static_cast<int>(want);
-        req->cache_reuse_kind = loaded.slots[donor].is_anchor ? "anchor" : "branch";
-      } else if (loaded.hybrid && donor_exact && donor_prefix < prompt_tokens.size()) {
-        llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor), req->seq, -1, -1);
-        slot->tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
-        req->n_pos = static_cast<int32_t>(donor_prefix);
-        prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() + static_cast<std::ptrdiff_t>(donor_prefix));
-        req->cached_prompt_tokens = static_cast<int>(donor_prefix);
-        req->cache_reuse_kind = loaded.slots[donor].is_anchor ? "anchor" : "branch";
-      } else if (loaded.hybrid && !donor_exact) {
-        // Cannot branch mid-stream off hybrid state. Prefill fully, but
-        // snapshot an anchor at the shared boundary so every future session
-        // with this prefix branches instantly.
-        req->anchor_at = static_cast<int32_t>(donor_prefix);
-      }
-    }
-  }
-
-  // Proactive KV pressure relief: evict idle slots (oldest first) when the
-  // resident sessions plus this prompt would overflow the unified pool.
-  // Note: in the unified pool, copied prefixes share cells, so this sum
-  // over-counts shared tokens — a conservative (early) eviction trigger.
-  std::size_t resident = 0;
-  for (const auto& s : loaded.slots) resident += s.tokens.size();
-  const std::size_t incoming = prompt_tokens.size() + static_cast<std::size_t>(output_reserve);
-  const std::size_t capacity = static_cast<std::size_t>(n_ctx);
-  while (resident + incoming > capacity) {
-    std::size_t victim = loaded.slots.size();
-    uint64_t oldest = UINT64_MAX;
-    for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-      if (&loaded.slots[index] == req->slot || loaded.slots[index].busy || loaded.slots[index].tokens.empty()) continue;
-      if (loaded.slots[index].last_used < oldest) {
-        oldest = loaded.slots[index].last_used;
-        victim = index;
-      }
-    }
-    if (victim >= loaded.slots.size()) break;
-    llama_memory_seq_rm(llama_get_memory(loaded.ctx), static_cast<llama_seq_id>(victim), -1, -1);
-    resident -= loaded.slots[victim].tokens.size();
-    loaded.slots[victim].tokens.clear();
-    loaded.slots[victim].is_anchor = false;
-    fprintf(stderr, "clap-llama: evicted KV slot %zu to fit incoming prompt\n", victim);
-  }
-
+  if (target == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
+  llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
+  loaded.slots[target] = {};
+  auto* slot = &loaded.slots[target];
+  slot->last_used = ++loaded.use_counter;
+  slot->busy = true;
+  req->slot = slot;
+  req->seq = static_cast<llama_seq_id>(target);
+  req->n_pos = 0;
+  req->cache_fallback = "coordinator_unavailable_no_cache";
   req->prompt_tokens = std::move(prompt_tokens);
   req->sampler = make_sampler(req->params);
-  req->slot->busy = true;
   return req;
 }
 
@@ -1021,6 +1498,24 @@ int main() {
           }
           return true;
         }
+        if (type == "set_max_active") {
+          const int requested = message.value("max_active", 0);
+          if (requested <= 0) throw std::runtime_error("set_max_active.max_active must be positive");
+          const int previous = loaded.max_active;
+          loaded.max_active = std::max(1, std::min({requested,
+              loaded.active_policy.backend_ceiling, loaded.active_policy.hardware_ceiling,
+              loaded.active_policy.model_ceiling, loaded.active_policy.context_ceiling}));
+          loaded.active_policy.selected_max = loaded.max_active;
+          loaded.previous_max_active = message.value("previous_max_active", previous);
+          loaded.active_policy.reason = message.value("limiting_reason", loaded.active_policy.reason);
+          loaded.last_adjustment_reason = message.value("last_adjustment_reason", "");
+          loaded.last_adjustment_at = message.value("last_adjustment_at", "");
+          loaded.retained_growth_reserve_bytes = message.value("retained_growth_reserve_bytes", UINT64_C(0));
+          loaded.global_resident_memory_bytes = message.value("global_resident_memory_bytes", UINT64_C(0));
+          loaded.pressure_state = message.value("pressure_state", "");
+          emit(id, json{{"done", true}, {"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+          return true;
+        }
         if (type == "unload") {
           if (!active.empty()) throw std::runtime_error("cannot unload while requests are active");
           unload(loaded);
@@ -1034,11 +1529,20 @@ int main() {
             throw std::runtime_error("cannot switch models while requests are active");
           }
           load_model(loaded, model);
-          emit(id, json{{"loaded", true}, {"done", true}});
+          const int32_t effective = loaded.backend_allocation_cap;
+          emit(id, json{{"loaded", true}, {"done", true}, {"token_capabilities", {
+            {"model_context_window", loaded.model_context_window > 0 ? json(loaded.model_context_window) : json(nullptr)},
+            {"effective_context_window", effective},
+            {"max_input_tokens", std::max(0, effective - 1)},
+            {"max_output_tokens", loaded.max_output_tokens > 0 ? json(loaded.max_output_tokens) : json(nullptr)},
+            {"backend_allocation_cap", loaded.backend_allocation_cap},
+            {"user_configured_override", loaded.context_override > 0 ? json(loaded.context_override) : json(nullptr)},
+          }}, {"retention", retention_telemetry(loaded, active.size())}});
           return true;
         }
         // Anything else is a chat request; it queues until a slot frees up.
         waiting.emplace_back(id, message);
+        emit("", json{{"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
         return true;
       } catch (const RequestError& error) {
         emit_error(id, error.what(), error.code);
@@ -1080,15 +1584,18 @@ int main() {
           continue;
         }
         if (llama_model_has_encoder(loaded.model) && !active.empty()) break;
-        std::size_t busy = 0;
-        for (const auto& s : loaded.slots) busy += s.busy ? 1 : 0;
-        if (busy >= loaded.slots.size()) break;
+        if (!clap::llama_cache::can_admit(active.size(),
+                                          static_cast<uint32_t>(loaded.max_active))) break;
         auto [wid, wreq] = std::move(waiting.front());
         waiting.pop_front();
         try {
           auto prepared = prepare_request(loaded, wid, wreq);
-          emit(wid, json{{"started", true}});
           active.push_back(std::move(prepared));
+          emit(wid, json{{"started", true},
+                         {"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+        } catch (const CacheBackpressure&) {
+          waiting.emplace_front(std::move(wid), std::move(wreq));
+          break;
         } catch (const RequestError& error) {
           emit_error(wid, error.what(), error.code);
         } catch (const std::exception& error) {
@@ -1098,9 +1605,13 @@ int main() {
 
       if (!active.empty()) {
         step(loaded, active);
+        const std::size_t before_cleanup = active.size();
         active.erase(
           std::remove_if(active.begin(), active.end(), [](const std::unique_ptr<ActiveRequest>& r) { return r->done; }),
           active.end());
+        if (active.size() != before_cleanup) {
+          emit("", json{{"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+        }
       }
     }
 

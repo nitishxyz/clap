@@ -231,6 +231,34 @@ describe("malformed tool JSON repair", () => {
     expect(() => parseAssistantOutput('I will call it.\n\n{"tool_calls":[{"arguments":', gemmaRequest)).toThrow("could not parse");
   });
 
+  test("treats observed marker-only Gemma envelopes as length truncation, not parser failure", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit" };
+    for (const raw of ["<|tool_call>", "<|tool_call>call"]) {
+      const parsed = parseAssistantOutput(raw, gemmaRequest, undefined, { truncated: true });
+      expect(parsed).toEqual({ content: "", reasoning: undefined, finishReason: "stop" });
+    }
+  });
+
+  test("does not accept marker-only or malformed envelopes without a confirmed length stop", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit" };
+    expect(() => parseAssistantOutput("<|tool_call>", gemmaRequest)).toThrow("could not parse");
+    expect(() => parseAssistantOutput("<|tool_call>call", gemmaRequest, undefined, { truncated: false })).toThrow("could not parse");
+    expect(() => parseAssistantOutput("<|tool_call>call:arbitrary", gemmaRequest, undefined, { truncated: true })).toThrow("could not parse");
+  });
+
+  test("confirmed truncation does not alter complete calls or normal text", () => {
+    const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit" };
+    const complete = parseAssistantOutput('<|tool_call>call:{"tool_name":"get_weather","arguments":{"city":"Paris"}}<tool_call|>', gemmaRequest, undefined, { truncated: true });
+    expect(complete.finishReason).toBe("tool_calls");
+    expect(complete.toolCalls?.[0]?.function.name).toBe("get_weather");
+    expect(complete.toolCalls?.[0]?.function.arguments).toBe(JSON.stringify({ city: "Paris" }));
+    expect(parseAssistantOutput("The weather is mild.", gemmaRequest, undefined, { truncated: true })).toEqual({
+      content: "The weather is mild.",
+      reasoning: undefined,
+      finishReason: "stop",
+    });
+  });
+
   test("bare closing channel markers return following tool JSON to content", () => {
     const gemmaRequest = { ...request, model: "mlx-community/gemma-4-e4b-it-4bit", tools: [{ type: "function" as const, function: { name: "ls", parameters: { type: "object", properties: { path: { type: "string" } } } } }] };
     const raw = '<|channel>thought\nI should list the files.<channel|>{"tool_calls":[{"name":"ls","arguments":{"path":"/tmp"}}]}';

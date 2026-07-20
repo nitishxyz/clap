@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, rename, rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { ensureNativeArtifact, type NativeArtifactManifest } from "../../../packages/runtime-router/src/native-bundle";
 // Embedded native workers: when compiled with `bun build --compile` these
 // imports become assets inside the single-file binary (virtual /$bunfs paths).
 // In dev mode they resolve to the real files in <repo>/libexec.
@@ -32,20 +32,21 @@ export async function ensureEmbeddedWorkers(): Promise<void> {
   if (embedded.length === 0) return;
 
   const buildId = process.env.CLAP_EMBED_BUILD ?? "dev";
+  const manifest = JSON.parse(process.env.CLAP_EMBED_MANIFEST ?? "null") as NativeArtifactManifest | null;
+  if (!manifest || manifest.schema !== 1) {
+    throw new Error("embedded native artifact manifest is missing or unsupported");
+  }
   const targetDir = join(clapHome(), "libexec", buildId);
   const extracted: Record<string, string> = {};
 
   for (const asset of embedded) {
     const file = Bun.file(asset.path);
     if (file.size === 0) continue; // placeholder for a worker not built on this platform
+    const expected = manifest.artifacts.find((entry) => entry.name === asset.name);
+    if (!expected) throw new Error(`embedded native artifact missing from manifest: ${asset.name}`);
     const target = join(targetDir, asset.name);
     extracted[asset.name] = target;
-    if (existsSync(target) && Bun.file(target).size === file.size) continue;
-    await mkdir(targetDir, { recursive: true });
-    const temp = `${target}.tmp-${process.pid}`;
-    await Bun.write(temp, file);
-    if (asset.executable) await chmod(temp, 0o755);
-    await rename(temp, target);
+    await ensureNativeArtifact(file, target, expected);
   }
 
   for (const asset of embedded) {

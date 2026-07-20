@@ -26,7 +26,7 @@ import {
   type LoadedModel,
   type ResponseRequest,
 } from "@clap/api";
-import { cachedPullResultForTarget, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
+import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
 import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type ResidentChatResult } from "@clap/runtime-router";
@@ -37,6 +37,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
+import { CacheEventStore } from "./cache-event-store";
 import { applyConfigToEnv, loadClapConfig, updateUserConfig, workerEnvForModel } from "./config";
 export { configPaths, loadClapConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
@@ -64,17 +65,40 @@ export function createServer(
   lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key)),
 ) {
   const app = new Hono();
-  const metrics = new MetricsCollector();
   const { config, sources: configSources } = loadClapConfig();
+  const cacheEvents = new CacheEventStore({
+    directory: join(clapHome(), "telemetry"),
+    enabled: config.telemetry.cache_decisions_enabled,
+    maxBytes: (config.telemetry.cache_decisions_max_mib ?? 32) * 1024 * 1024,
+    maxAgeMs: (config.telemetry.cache_decisions_max_age_days ?? 14) * 24 * 60 * 60 * 1000,
+  });
+  const metrics = new MetricsCollector(cacheEvents);
   applyConfigToEnv(config);
+  residents.memorySnapshot = async (pids) => {
+    const [usedBytes, processUsage] = await Promise.all([
+      systemMemoryUsedBytes(),
+      sampleProcessUsage(pids),
+    ]);
+    const physicalMemoryBytes = systemMemoryBytes();
+    return {
+      physicalMemoryBytes,
+      availableMemoryBytes: Math.max(0, physicalMemoryBytes - usedBytes),
+      residentBytesByPid: new Map([...processUsage].map(([pid, usage]) => [pid, usage.rssBytes])),
+    };
+  };
   residents.workerEnv = (modelPath) => {
+    let modelEnvironment: Record<string, string> = {};
     for (const modelId of Object.keys(config.models)) {
       // HF cache paths embed the repo id as owner--name; match either form.
       if (modelPath === modelId || modelPath.includes(modelId.replace("/", "--"))) {
-        return workerEnvForModel(config, modelId);
+        modelEnvironment = workerEnvForModel(config, modelId) ?? {};
+        break;
       }
     }
-    return undefined;
+    const telemetryKey = cacheEvents.workerLaunchKey();
+    return telemetryKey
+      ? { ...modelEnvironment, CLAP_TELEMETRY_HMAC_KEY: telemetryKey }
+      : modelEnvironment;
   };
   // Warm-on-boot: models marked pinned (or given keep_alive) in config load
   // shortly after startup so the first user request never pays a cold load.
@@ -123,9 +147,10 @@ export function createServer(
     if (error instanceof z.ZodError) {
       return c.json({ error: { message: error.message, type: "invalid_request_error", code: "invalid_json" } }, 400);
     }
-    if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) && error.code === "context_length_exceeded") {
+    if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) &&
+        (error.code === "context_length_exceeded" || error.code === "max_output_tokens_exceeded" || error.code === "token_capability_unknown")) {
       return c.json(ErrorResponseSchema.parse({
-        error: { message: error.message, type: "invalid_request_error", code: "context_length_exceeded" },
+        error: { message: error.message, type: "invalid_request_error", code: error.code },
       }), 400);
     }
     if (error instanceof LlamaWorkerError) {
@@ -234,7 +259,10 @@ export function createServer(
   });
 
   app.get("/metrics", (c) => {
-    const loaded = lifecycle.list();
+    const loaded = lifecycle.list().map((entry) => ({
+      ...entry,
+      worker: residents.get(entry.key)?.info() ?? entry.worker,
+    }));
     return c.text(renderPrometheus({
       totals: metrics.totals,
       activeRequests: metrics.activeRequests().length,
@@ -243,6 +271,8 @@ export function createServer(
         id: entry.id,
         state: entry.worker?.state ?? "not_started",
         crashes: entry.worker?.crashes,
+        retention: entry.worker?.retention,
+        tokenCapabilities: entry.worker?.tokenCapabilities,
       })),
       uptimeMs: Date.now() - startedAt,
       histograms: metrics.histograms,
@@ -277,7 +307,12 @@ export function createServer(
     downloads: [...downloads.values()],
   })));
 
-  app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({ models: lifecycle.list() })));
+  app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({
+    models: lifecycle.list().map((entry) => ({
+      ...entry,
+      worker: residents.get(entry.key)?.info() ?? entry.worker,
+    })),
+  })));
 
   const dashboardPayload = async () => {
     const loaded = lifecycle.list().map((entry) => ({
@@ -292,6 +327,36 @@ export function createServer(
       sampleGpuUsage(),
       systemMemoryUsedBytes(),
     ]);
+    const liveRequests = metrics.recent(80);
+    const liveIds = new Set(liveRequests.map((request) => request.id));
+    const persistedRequests = cacheEvents.list({}, 80).items
+      .filter((event) => !liveIds.has(event.requestId))
+      .map((event) => ({
+        source: "persisted" as const,
+        id: event.requestId,
+        startedAt: event.timestamp - (event.durationMs ?? 0),
+        endedAt: event.timestamp,
+        durationMs: event.durationMs,
+        ttftMs: event.ttftMs,
+        model: event.model,
+        endpoint: event.endpoint ?? "/v1/chat/completions",
+        stream: false,
+        status: event.status,
+        phase: "done" as const,
+        promptTokens: event.promptTokenCount,
+        cacheHit: event.cache?.hit,
+        reusedTokens: event.cache?.reusedTokens,
+        reuseKind: event.cache?.kind,
+        reuseScope: event.cache?.scope,
+        sideRequest: event.side,
+        donorSlot: event.cache?.donorSlot,
+        targetSlot: event.cache?.targetSlot,
+        cacheDecisionUs: event.cache?.decisionUs,
+        plannedReuseTokens: event.cache?.plannedTokens,
+        realizedReuseTokens: event.cache?.realizedTokens,
+        cacheFallback: event.cache?.fallback,
+        finishReason: event.finishReason,
+      }));
     return {
       server: {
         version: clapVersion,
@@ -311,7 +376,9 @@ export function createServer(
       totals: metrics.totals,
       queue: limiter.stats(),
       active: metrics.activeRequests(),
-      requests: metrics.recent(80),
+      requests: [...liveRequests, ...persistedRequests]
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .slice(0, 80),
       events: metrics.events(50),
       loaded: loaded.map((entry) => ({
         ...entry,
@@ -347,8 +414,56 @@ export function createServer(
 
   app.get("/clap/v1/dashboard/requests/:id", (c) => {
     const record = metrics.request(c.req.param("id"));
-    if (!record) return c.json({ error: { message: "request not found", type: "invalid_request_error" } }, 404);
-    return c.json(record);
+    if (record) return c.json(record);
+    const persisted = cacheEvents.get(c.req.param("id"));
+    if (persisted) return c.json({
+      source: "persisted",
+      id: persisted.requestId,
+      startedAt: persisted.timestamp - (persisted.durationMs ?? 0),
+      endedAt: persisted.timestamp,
+      durationMs: persisted.durationMs,
+      ttftMs: persisted.ttftMs,
+      model: persisted.model,
+      endpoint: persisted.endpoint ?? "/v1/chat/completions",
+      stream: false,
+      status: persisted.status,
+      phase: "done",
+      promptTokens: persisted.promptTokenCount,
+      cacheHit: persisted.cache?.hit,
+      reusedTokens: persisted.cache?.reusedTokens,
+      reuseKind: persisted.cache?.kind,
+      reuseScope: persisted.cache?.scope,
+      sideRequest: persisted.side,
+      donorSlot: persisted.cache?.donorSlot,
+      targetSlot: persisted.cache?.targetSlot,
+      cacheDecisionUs: persisted.cache?.decisionUs,
+      plannedReuseTokens: persisted.cache?.plannedTokens,
+      realizedReuseTokens: persisted.cache?.realizedTokens,
+      cacheFallback: persisted.cache?.fallback,
+      finishReason: persisted.finishReason,
+      cacheDiagnostics: persisted,
+    });
+    return c.json({ error: { message: "request not found", type: "invalid_request_error" } }, 404);
+  });
+
+  app.get("/clap/v1/cache-decisions", (c) => {
+    const hit = c.req.query("hit");
+    const status = c.req.query("status");
+    return c.json(cacheEvents.list({
+      requestId: c.req.query("request_id"),
+      model: c.req.query("model"),
+      backend: c.req.query("backend"),
+      status: status === "ok" || status === "error" || status === "cancelled" ? status : undefined,
+      hit: hit === "true" ? true : hit === "false" ? false : undefined,
+      since: c.req.query("since") ? Number(c.req.query("since")) : undefined,
+      until: c.req.query("until") ? Number(c.req.query("until")) : undefined,
+    }, Number(c.req.query("limit") ?? 50), c.req.query("cursor")));
+  });
+
+  app.get("/clap/v1/cache-decisions/:id", (c) => {
+    const event = cacheEvents.get(c.req.param("id"));
+    if (!event) return c.json({ error: { message: "cache decision not found", type: "invalid_request_error" } }, 404);
+    return c.json(event);
   });
 
   const serveWeb = (path: string) => {
@@ -524,8 +639,14 @@ export function createServer(
 
   app.post("/v1/chat/completions", async (c) => {
     const request = ChatCompletionRequestSchema.parse(await c.req.json());
+    const handle = metrics.start(request.model, "/v1/chat/completions", request.stream);
+    handle.capture(request);
     const resolved = resolveAvailableModel(request.model, request.backend);
-    if ("response" in resolved) return resolved.response(c);
+    if ("response" in resolved) {
+      handle.finish({ status: "error", errorCode: "model_not_found" });
+      return resolved.response(c);
+    }
+    handle.capture({ ...request, backend: resolved.model.backend });
 
     const templateInfo = await resolveParserTemplateInfo(resolved.model);
     let routedRequest: ChatCompletionRequest;
@@ -535,18 +656,24 @@ export function createServer(
         { nativeTools: resolved.model.backend === "mlx" && Boolean(templateInfo?.hasToolCalls) },
       );
     } catch (error) {
+      handle.finish({
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: "unsupported_content_part",
+      });
       return c.json(ErrorResponseSchema.parse({
         error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
       }), 400);
     }
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, request.model);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle);
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, request.model);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle);
     }
 
+    handle.finish({ status: "error", errorCode: "not_cached" });
     return c.json(ErrorResponseSchema.parse({
       error: { message: `Model ${request.model} is not cached as a GGUF file or MLX directory. Run: clap pull ${request.model}, or pass a local .gguf file / MLX directory.`, type: "model_error", code: "not_cached" },
     }), 404);
@@ -571,13 +698,14 @@ export function createServer(
     model: ResolvedModel,
     routedRequest: ChatCompletionRequest,
     templateInfo: ParserTemplateInfo | undefined,
-    requestedModel: string,
+    handle: RequestHandle,
   ) {
     let release: () => void;
     try {
       release = await limiter.acquire(clientId(c), c.req.raw.signal);
     } catch (error) {
       if (error instanceof QueueFullError) {
+        handle.finish({ status: "error", error: error.message, errorCode: "server_overloaded" });
         c.header("Retry-After", String(error.retryAfterSeconds));
         return c.json(ErrorResponseSchema.parse({
           error: { message: error.message, type: "rate_limit_error", code: "server_overloaded" },
@@ -591,9 +719,9 @@ export function createServer(
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
           lifecycle.finishUsage(loaded);
           release();
-        }, metrics.start(requestedModel, "/v1/chat/completions", true));
+        }, handle);
       }
-      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, metrics.start(requestedModel, "/v1/chat/completions", false)));
+      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle));
       release();
       return response;
     } catch (error) {
@@ -1096,8 +1224,8 @@ export function inferParserFamilies(markerText: string, nameText: string): strin
 
 async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, handle?: RequestHandle) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+  let result: ResidentChatResult | undefined;
   try {
-    handle?.capture(request);
     handle?.phase("loading");
     const loadStarted = Date.now();
     entry.worker = await worker.load();
@@ -1106,12 +1234,13 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     // queued until worker prefill progress or the first token proves it is
     // actually running.
     handle?.phase("queued");
-    const result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
+    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
     entry.worker = worker.info();
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
     handle?.finish({
       status: result.finishReason === "cancel" ? "cancelled" : "ok",
+      ...workerResultMetrics(result),
       promptTokens: result.usage?.promptTokens,
       completionTokens: result.usage?.completionTokens,
       cacheHit: result.cache?.hit,
@@ -1120,6 +1249,14 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
       reuseScope: result.cache?.reuseScope,
       sideRequest: result.cache?.sideRequest,
       slot: result.cache?.slot,
+      cacheNamespace: result.cache?.namespace,
+      donorSlot: result.cache?.donorSlot,
+      targetSlot: result.cache?.targetSlot,
+      evictedSlots: result.cache?.evictedSlots,
+      cacheDecisionUs: result.cache?.decisionUs,
+      plannedReuseTokens: result.cache?.plannedReuseTokens,
+      realizedReuseTokens: result.cache?.realizedReuseTokens,
+      cacheFallback: result.cache?.fallback,
       finishReason: body.choices[0]?.finish_reason ?? undefined,
       toolCalls: message?.tool_calls?.length,
       response: {
@@ -1132,7 +1269,14 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     return c.json(body);
   } catch (error) {
     entry.worker = worker.info();
-    handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
+    handle?.finish({
+      status: "error",
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error instanceof LlamaWorkerError || error instanceof MlxWorkerError ? error.code : "resident_worker_error",
+      ...workerResultMetrics(result),
+      workerLaunchId: result?.cache?.workerLaunchId ?? worker.info().launchId,
+      rawOutput: result?.content,
+    });
     throw error;
   }
 }
@@ -1236,8 +1380,8 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         : { content: delta.text };
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, payload)) });
     };
+    let result: ResidentChatResult | undefined;
     try {
-      handle?.capture(request);
       handle?.phase("loading");
       const loadStarted = Date.now();
       entry.worker = await worker.load();
@@ -1251,7 +1395,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         startInReasoning: streamExtras.implicitThink,
         extraMarkers: streamExtras.extraMarkers,
       });
-      const result = await worker.chat(request, (token) => {
+      result = await worker.chat(request, (token) => {
         if (!sawOutput) handle?.firstToken();
         sawOutput = true;
         const deltas = filter.feed(token);
@@ -1260,11 +1404,17 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
           for (const delta of deltas) await writeDelta(delta);
         });
       }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
-      await writeQueue;
+      // A disconnected client makes queued SSE writes reject before the
+      // worker's cancellation result arrives. Drain that queue without
+      // propagating its transport error so the final worker cache decision can
+      // still be merged into metrics. worker.chat remains the bounded cleanup:
+      // resident workers must answer cancel or their normal watchdog rejects.
+      await writeQueue.catch(() => undefined);
       entry.worker = worker.info();
       if (result.finishReason === "cancel" || aborter.signal.aborted) {
         handle?.finish({
           status: "cancelled",
+          ...workerResultMetrics(result),
           promptTokens: result.usage?.promptTokens,
           completionTokens: result.usage?.completionTokens,
           cacheHit: result.cache?.hit,
@@ -1273,11 +1423,19 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
           reuseScope: result.cache?.reuseScope,
           sideRequest: result.cache?.sideRequest,
           slot: result.cache?.slot,
+          cacheNamespace: result.cache?.namespace,
+          donorSlot: result.cache?.donorSlot,
+          targetSlot: result.cache?.targetSlot,
+          evictedSlots: result.cache?.evictedSlots,
+          cacheDecisionUs: result.cache?.decisionUs,
+          plannedReuseTokens: result.cache?.plannedReuseTokens,
+          realizedReuseTokens: result.cache?.realizedReuseTokens,
+          cacheFallback: result.cache?.fallback,
           finishReason: "cancel",
         });
         return;
       }
-      const parsed = parseAssistantOutput(result.content, request, templateInfo);
+      const parsed = parseAssistantOutput(result.content, request, templateInfo, { truncated: result.finishReason === "length" });
       await ensureRole();
       const reasoningTail = remainingDelta(parsed.reasoning, filter.emittedReasoning);
       if (reasoningTail) await writeDelta({ type: "reasoning", text: reasoningTail });
@@ -1296,6 +1454,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await stream.writeSSE({ data: "[DONE]" });
       handle?.finish({
         status: "ok",
+        ...workerResultMetrics(result),
         promptTokens: result.usage?.promptTokens,
         completionTokens: result.usage?.completionTokens,
         cacheHit: result.cache?.hit,
@@ -1304,6 +1463,14 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         reuseScope: result.cache?.reuseScope,
         sideRequest: result.cache?.sideRequest,
         slot: result.cache?.slot,
+        cacheNamespace: result.cache?.namespace,
+        donorSlot: result.cache?.donorSlot,
+        targetSlot: result.cache?.targetSlot,
+        evictedSlots: result.cache?.evictedSlots,
+        cacheDecisionUs: result.cache?.decisionUs,
+        plannedReuseTokens: result.cache?.plannedReuseTokens,
+        realizedReuseTokens: result.cache?.realizedReuseTokens,
+        cacheFallback: result.cache?.fallback,
         finishReason,
         toolCalls: parsed.toolCalls?.length,
         response: {
@@ -1317,16 +1484,61 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       entry.worker = worker.info();
       await writeQueue.catch(() => undefined);
       if (aborter.signal.aborted) {
-        handle?.finish({ status: "cancelled", finishReason: "cancel" });
+        handle?.finish({ status: "cancelled", finishReason: "cancel", workerLaunchId: worker.info().launchId });
         return;
       }
-      handle?.finish({ status: "error", error: error instanceof Error ? error.message : String(error) });
+      handle?.finish({
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: error instanceof LlamaWorkerError || error instanceof MlxWorkerError ? error.code : "resident_worker_error",
+        ...workerResultMetrics(result),
+        workerLaunchId: result?.cache?.workerLaunchId ?? worker.info().launchId,
+        rawOutput: result?.content,
+      });
       await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) }).catch(() => undefined);
     } finally {
       clearInterval(heartbeat);
       onDone?.();
     }
   });
+}
+
+function workerResultMetrics(result?: ResidentChatResult) {
+  return {
+    promptTokens: result?.usage?.promptTokens,
+    completionTokens: result?.usage?.completionTokens,
+    cacheHit: result?.cache?.hit,
+    reusedTokens: result?.cache?.reusedTokens,
+    reuseKind: result?.cache?.reuseKind,
+    reuseScope: result?.cache?.reuseScope,
+    sideRequest: result?.cache?.sideRequest,
+    slot: result?.cache?.slot,
+    cacheNamespace: result?.cache?.namespace,
+    donorSlot: result?.cache?.donorSlot,
+    targetSlot: result?.cache?.targetSlot,
+    evictedSlots: result?.cache?.evictedSlots,
+    cacheDecisionUs: result?.cache?.decisionUs,
+    plannedReuseTokens: result?.cache?.plannedReuseTokens,
+    realizedReuseTokens: result?.cache?.realizedReuseTokens,
+    cacheFallback: result?.cache?.fallback,
+    cacheMissReason: result?.cache?.missReason,
+    workerLaunchId: result?.cache?.workerLaunchId,
+    donorGeneration: result?.cache?.donorGeneration,
+    targetGeneration: result?.cache?.targetGeneration,
+    cacheEvictions: result?.cache?.evictions,
+    cacheCandidates: result?.cache?.candidates,
+    systemTokenHash: result?.cache?.systemTokenHash,
+    systemTokenCount: result?.cache?.systemTokenCount,
+    toolsTokenHash: result?.cache?.toolsTokenHash,
+    toolsTokenCount: result?.cache?.toolsTokenCount,
+    stableBoundaryTokenHash: result?.cache?.stableBoundaryTokenHash,
+    stableBoundaryTokenCount: result?.cache?.stableBoundaryTokenCount,
+    stableBoundaryKind: result?.cache?.stableBoundaryKind,
+    promptTokenHash: result?.cache?.promptTokenHash,
+    promptTokenCount: result?.cache?.promptTokenCount,
+    prefillMs: result?.cache?.prefillMs,
+    finishReason: result?.finishReason,
+  };
 }
 
 function backendErrorBody(error: unknown) {
@@ -1411,7 +1623,7 @@ function chatResponse(request: ChatCompletionRequest, result: ResidentChatResult
   if (process.env.CLAP_DEBUG_RAW) {
     console.error(`[clap] raw model output (${result.content.length} chars): ${JSON.stringify(result.content)}`);
   }
-  const parsed = parseAssistantOutput(result.content, request, templateInfo);
+  const parsed = parseAssistantOutput(result.content, request, templateInfo, { truncated: result.finishReason === "length" });
   const message = {
     role: "assistant" as const,
     content: parsed.content,

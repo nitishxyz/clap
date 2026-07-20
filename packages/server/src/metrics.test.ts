@@ -44,4 +44,36 @@ describe("metrics queue accounting", () => {
     handle.finish({ status: "ok", promptTokens: 10, completionTokens: 5 });
     expect(handle.record.queuedMs).toBeUndefined();
   });
+
+  test("preserves normalized cache coordinator telemetry", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("test-model", "/v1/chat/completions", false);
+    handle.finish({
+      status: "ok",
+      cacheHit: true,
+      reusedTokens: 42,
+      reuseKind: "branch",
+      reuseScope: "project",
+      sideRequest: true,
+      slot: 3,
+      cacheNamespace: "tenant-a",
+      donorSlot: 1,
+      targetSlot: 3,
+      evictedSlots: [0, 2],
+      cacheDecisionUs: 17,
+      plannedReuseTokens: 44,
+      realizedReuseTokens: 42,
+      cacheFallback: "copy_retry",
+    });
+    expect(handle.record).toMatchObject({
+      cacheNamespace: "tenant-a",
+      donorSlot: 1,
+      targetSlot: 3,
+      evictedSlots: [0, 2],
+      cacheDecisionUs: 17,
+      plannedReuseTokens: 44,
+      realizedReuseTokens: 42,
+      cacheFallback: "copy_retry",
+    });
+  });
 });

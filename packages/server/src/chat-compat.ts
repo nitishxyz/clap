@@ -56,7 +56,7 @@ export function prepareChatRequest(request: ChatCompletionRequest, options: Prep
     messages.unshift({ role: "system", content: instructions });
   }
   messages = mergeLeadingSystemMessages(messages);
-  return { ...request, messages, max_tokens: request.max_tokens ?? 4096 };
+  return { ...request, messages };
 }
 
 // Clients such as agent harnesses send multiple system messages, and we may
@@ -75,7 +75,7 @@ function mergeLeadingSystemMessages<T extends { role: string; content: string | 
   return [merged, ...messages.slice(count)];
 }
 
-export function parseAssistantOutput(text: string, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo): ParsedAssistantOutput {
+export function parseAssistantOutput(text: string, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, options?: { truncated?: boolean }): ParsedAssistantOutput {
   const stopped = applyStop(text, request.stop);
   const parser = selectParser(request.model, request, templateInfo);
   // Templates such as Qwen3.6 pre-fill the opening <think> tag inside the
@@ -90,6 +90,14 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
     return { content: null, reasoning: normalized.reasoning, toolCalls, finishReason: "tool_calls" };
   }
   if (context.toolMode && (hasExplicitParserMarker(input) || /["']?tool_calls["']?\s*:/.test(normalized.content))) {
+    // A max-token stop can land after Gemma's opening protocol token but
+    // before any function name or arguments. This is not a malformed call to
+    // repair and should not become a 500: suppress only a marker-only prefix
+    // when the backend explicitly confirmed truncation. Complete malformed
+    // envelopes and arbitrary marked prose still fail below.
+    if (options?.truncated && /^<\|tool_call>\s*(?:call)?\s*$/u.test(input.trim())) {
+      return { content: "", reasoning: normalized.reasoning, finishReason: "stop" };
+    }
     throw new Error("model emitted a tool call that Clap could not parse; retry the request");
   }
 

@@ -10,6 +10,9 @@ name: Warm native build caches
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: warm-native-cache
   cancel-in-progress: true
@@ -17,6 +20,7 @@ concurrency:
 jobs:
   warm-macos-arm64:
     runs-on: macos-15
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -24,25 +28,53 @@ jobs:
           bun-version: latest
 
       - name: Select latest Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
+        run: |
+          xcode=$(printf '%s\n' /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$xcode/Contents/Developer"
+
+      - name: Record native toolchains
+        id: toolchain
+        run: |
+          { rustc -vV; xcodebuild -version; swift --version; cmake --version; c++ --version; } > "$RUNNER_TEMP/native-toolchains"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/native-toolchains" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
+          restore-keys: |
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Cargo downloads and build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+          key: cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
 
       - name: Restore llama.cpp cache
         id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
+          key: llama-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
 
-      - name: Restore Swift build cache
-        id: swift-cache
-        uses: actions/cache/restore@v4
+      - name: Cache SwiftPM downloads
+        uses: actions/cache@v4
         with:
-          path: |
-            native/mlx/.build
-            ~/Library/Caches/org.swift.swiftpm
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/mlx/Package.resolved', 'native/mlx/Package.swift') }}
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/mlx/Package.resolved', 'native/mlx/Package.swift') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-
+            swiftpm-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Swift build objects
+        uses: actions/cache@v4
+        with:
+          path: native/mlx/.build
+          key: swiftpm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('native/mlx/Package.resolved', 'native/mlx/Package.swift', 'native/mlx/Sources/**/*', 'native/mlx/Tests/**/*', 'native/cache/include/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
 
       - run: bun install --frozen-lockfile
 
@@ -59,29 +91,44 @@ jobs:
           path: vendor/llama.cpp
           key: ${{ steps.llama-cache.outputs.cache-primary-key }}
 
-      - name: Save Swift build cache
-        if: steps.swift-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            native/mlx/.build
-            ~/Library/Caches/org.swift.swiftpm
-          key: ${{ steps.swift-cache.outputs.cache-primary-key }}
-
   warm-linux-x64:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
+      - name: Record native toolchains
+        id: toolchain
+        run: |
+          { rustc -vV; cmake --version; c++ --version; } > "$RUNNER_TEMP/native-toolchains"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/native-toolchains" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
+          restore-keys: |
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Cargo downloads and build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+          key: cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
+
       - name: Restore llama.cpp cache
         id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
+          key: llama-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
 
       - run: bun install --frozen-lockfile
 
@@ -99,6 +146,7 @@ jobs:
 
   warm-linux-x64-cuda:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -113,12 +161,35 @@ jobs:
           sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 libcublas-dev-12-8 cuda-profiler-api-12-8
           echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
 
+      - name: Record CUDA native toolchains
+        id: toolchain
+        run: |
+          { rustc -vV; cmake --version; c++ --version; /usr/local/cuda/bin/nvcc --version; } > "$RUNNER_TEMP/native-toolchains"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/native-toolchains" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
+          restore-keys: |
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Cargo downloads and build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+          key: cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
+
       - name: Restore llama.cpp CUDA cache
         id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-cuda-v2-cuda12.8-sm80-86-89-90-100-120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
+          key: llama-build-cuda-v3-sm80-86-89-90-100-120-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
 
       - run: bun install --frozen-lockfile
 

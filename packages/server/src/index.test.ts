@@ -102,7 +102,7 @@ describe("clap server", () => {
     try {
       process.env.CLAP_HOME = home;
       delete process.env.CLAP_REQUIRE_API_KEY;
-      await writeFile(join(home, "clap.toml"), '[llama]\nslots = 4\n');
+      await writeFile(join(home, "clap.toml"), '[limits]\nmax_active = 4\n');
       const app = createServer();
 
       const patched = await app.request("/clap/v1/config", {
@@ -115,9 +115,9 @@ describe("clap server", () => {
         }),
       });
       expect(patched.status).toBe(200);
-      const body = await patched.json() as { config: { llama: { slots?: number; kv_type?: string } } };
-      // merged: existing slots preserved, new kv_type added
-      expect(body.config.llama.slots).toBe(4);
+      const body = await patched.json() as { config: { limits: { max_active?: number }; llama: { kv_type?: string } } };
+      // merged: existing global concurrency preserved, new kv_type added
+      expect(body.config.limits.max_active).toBe(4);
       expect(String(body.config.llama.kv_type)).toBe("q8_0");
 
       // The written file is valid TOML and round-trips through the parser
@@ -143,9 +143,10 @@ describe("clap server", () => {
     }
   });
 
-  test("clap.toml config: llama env mapping, per-model overrides, auth requirement, config endpoint", async () => {
+  test("clap.toml config: global active mapping, per-model overrides, auth requirement, config endpoint", async () => {
     const previousHome = process.env.CLAP_HOME;
-    const previousSlots = process.env.CLAP_LLAMA_SLOTS;
+    const previousMaxActive = process.env.CLAP_MAX_ACTIVE;
+    const previousRetainedMax = process.env.CLAP_LLAMA_RETAINED_MAX;
     const previousKvType = process.env.CLAP_LLAMA_KV_TYPE;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
     const home = await mkdtemp(join(tmpdir(), "clap-config-test-"));
@@ -153,15 +154,17 @@ describe("clap server", () => {
       process.env.CLAP_HOME = home;
       delete process.env.CLAP_LLAMA_KV_TYPE;
       delete process.env.CLAP_REQUIRE_API_KEY;
-      process.env.CLAP_LLAMA_SLOTS = "7";
+      process.env.CLAP_MAX_ACTIVE = "7";
       await writeFile(join(home, "clap.toml"), [
         "[server]",
         "port = 12999",
         "[auth]",
         "require_api_key = true",
+        "[limits]",
+        "max_active = 32",
         "[llama]",
         'kv_type = "q8_0"',
-        "slots = 32",
+        "retained_max = 128",
         '[models."owner/big-GGUF"]',
         "context = 65536",
         'kv_type = "q4_0"',
@@ -174,9 +177,10 @@ describe("clap server", () => {
       expect(String(config.llama.kv_type)).toBe("q8_0");
 
       const app = createServer();
-      // config file applied kv_type (env unset), but env wins for slots
+      // Config applied kv_type/retention (env unset), while global max_active env wins.
       expect(process.env.CLAP_LLAMA_KV_TYPE ?? "").toBe("q8_0");
-      expect(process.env.CLAP_LLAMA_SLOTS ?? "").toBe("7");
+      expect(process.env.CLAP_MAX_ACTIVE ?? "").toBe("7");
+      expect(process.env.CLAP_LLAMA_RETAINED_MAX ?? "").toBe("128");
 
       // require_api_key = true denies unauthenticated requests even loopback
       const denied = await app.request("/clap/v1/models");
@@ -205,7 +209,8 @@ describe("clap server", () => {
       });
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
-      restoreEnv("CLAP_LLAMA_SLOTS", previousSlots);
+      restoreEnv("CLAP_MAX_ACTIVE", previousMaxActive);
+      restoreEnv("CLAP_LLAMA_RETAINED_MAX", previousRetainedMax);
       restoreEnv("CLAP_LLAMA_KV_TYPE", previousKvType);
       restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
       await rm(home, { recursive: true, force: true });
@@ -591,7 +596,7 @@ describe("clap server", () => {
     }
   });
 
-  test("defaults omitted max_tokens to 4096 while preserving explicit values", async () => {
+  test("leaves omitted max_tokens for model-derived worker defaults while preserving explicit values", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
     const previousEcho = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS;
@@ -617,7 +622,7 @@ describe("clap server", () => {
 
       expect(defaulted.status).toBe(200);
       expect(explicit.status).toBe(200);
-      expect((await defaulted.json()).choices[0].message.content).toBe("4096");
+      expect((await defaulted.json()).choices[0].message.content).toBe("undefined");
       expect((await explicit.json()).choices[0].message.content).toBe("77");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
@@ -2107,14 +2112,41 @@ describe("clap server", () => {
       process.env.CLAP_HOME = dir;
       await mkdir(repoDir, { recursive: true });
       await writeFile(join(repoDir, "config.json"), JSON.stringify({
-        architectures: ["Gemma4ForConditionalGeneration"],
         model_type: "gemma4",
-        text_config: { max_position_embeddings: 131072 },
-        vision_config: { image_size: 896 },
-        audio_config: { sampling_rate: 16000 },
+        architectures: ["Gemma4ForConditionalGeneration"],
+        text_config: {
+          model_type: "gemma4_text",
+          max_position_embeddings: 131072,
+          sliding_window: 512,
+          vocab_size: 262144,
+          hidden_size: 2560,
+          num_hidden_layers: 42,
+          head_dim: 256,
+          eos_token_id: 1,
+          pad_token_id: 0,
+        },
+        vision_config: {
+          model_type: "gemma4_vision",
+          architectures: null,
+          max_position_embeddings: 131072,
+          hidden_size: 768,
+          num_hidden_layers: 16,
+          head_dim: 64,
+        },
+        audio_config: {
+          model_type: "gemma4_audio",
+          architectures: null,
+          hidden_size: 1024,
+          num_hidden_layers: 12,
+        },
+        generation_config: { eos_token_id: [1, 106, 50], pad_token_id: 0 },
         quantization: { bits: 4, group_size: 64 },
       }));
-      await writeFile(join(repoDir, "tokenizer_config.json"), JSON.stringify({ model_max_length: 131072 }));
+      await writeFile(join(repoDir, "generation_config.json"), JSON.stringify({ eos_token_id: [1, 106, 50], pad_token_id: 0 }));
+      await writeFile(join(repoDir, "tokenizer_config.json"), JSON.stringify({
+        model_max_length: 1e30,
+        tokenizer_class: "GemmaTokenizer",
+      }));
       await writeFile(join(repoDir, "model.safetensors"), "weights");
 
       const clapResponse = await createServer().request("/clap/v1/models");
@@ -2129,6 +2161,7 @@ describe("clap server", () => {
       expect(model.modalities).toEqual({ input: ["text"], output: ["text"] });
       expect(model.capabilities).toMatchObject({ chat: true, streaming: true, attachment: false });
       expect(model.limit).toEqual({ context: 131072, output: null });
+      expect(model.limitSource).toEqual({ context: "config.json:text_config.max_position_embeddings" });
       expect(model.upstream.modalities.input).toEqual(["text", "image", "audio"]);
       expect(model.upstream.capabilities.attachment).toBe(true);
       expect(model.upstream.limit.context).toBe(131072);
@@ -2525,6 +2558,153 @@ describe("clap server", () => {
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_ERROR", previousError);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("post-inference tool parse errors retain worker cache telemetry", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const previousDone = process.env.CLAP_FAKE_WORKER_DONE;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-parse-cache-test-"));
+    const modelPath = join(dir, "parse-cache.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "<|tool_call>unrecoverable<tool_call|>";
+      process.env.CLAP_FAKE_WORKER_DONE = JSON.stringify({
+        finish_reason: "stop",
+        usage: { prompt_tokens: 50, completion_tokens: 4 },
+        cache: {
+          hit: true,
+          reused_tokens: 41,
+          reuse_kind: "branch",
+          reuse_scope: "project",
+          namespace: "parse-error-namespace",
+          donor_slot: 2,
+          target_slot: 3,
+          evicted_slots: [1],
+          decision_us: 17,
+          planned_reuse_tokens: 42,
+          realized_reuse_tokens: 41,
+          fallback: "parser-test",
+        },
+      });
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+      const response = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: modelPath,
+          messages: [{ role: "user", content: "call a tool" }],
+          tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: { query: { type: "string" } } } } }],
+        }),
+      });
+      expect(response.status).toBe(500);
+      const dashboard = await app.request("/clap/v1/dashboard");
+      expect((await dashboard.json()).requests[0]).toMatchObject({
+        status: "error",
+        promptTokens: 50,
+        completionTokens: 4,
+        cacheHit: true,
+        reusedTokens: 41,
+        reuseKind: "branch",
+        reuseScope: "project",
+        cacheNamespace: "parse-error-namespace",
+        donorSlot: 2,
+        targetSlot: 3,
+        evictedSlots: [1],
+        cacheDecisionUs: 17,
+        plannedReuseTokens: 42,
+        realizedReuseTokens: 41,
+        cacheFallback: "parser-test",
+      });
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      restoreEnv("CLAP_FAKE_WORKER_DONE", previousDone);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stream disconnect retains late worker cache telemetry", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const previousDone = process.env.CLAP_FAKE_WORKER_DONE;
+    const dir = await mkdtemp(join(tmpdir(), "clap-worker-cancel-cache-test-"));
+    const modelPath = join(dir, "cancel.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(Array.from({ length: 20 }, () => "token "));
+      process.env.CLAP_FAKE_WORKER_DONE = JSON.stringify({
+        finish_reason: "cancel",
+        usage: { prompt_tokens: 40, completion_tokens: 3 },
+        cache: {
+          hit: true,
+          reused_tokens: 31,
+          reuse_kind: "branch",
+          reuse_scope: "project",
+          side_request: true,
+          slot: 3,
+          namespace: "tenant-cancel",
+          donor_slot: 1,
+          target_slot: 3,
+          evicted_slots: [0],
+          decision_us: 12,
+          planned_reuse_tokens: 33,
+          realized_reuse_tokens: 31,
+          fallback: "cancel_boundary",
+        },
+      });
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+      const response = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: modelPath,
+          stream: true,
+          messages: [{ role: "user", content: "cancel me" }],
+        }),
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      await Bun.sleep(150);
+
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const payload = await dashboard.json();
+      const record = payload.requests[0];
+      expect(record).toMatchObject({
+        status: "cancelled",
+        finishReason: "cancel",
+        cacheHit: true,
+        reusedTokens: 31,
+        reuseKind: "branch",
+        reuseScope: "project",
+        sideRequest: true,
+        slot: 3,
+        cacheNamespace: "tenant-cancel",
+        donorSlot: 1,
+        targetSlot: 3,
+        evictedSlots: [0],
+        cacheDecisionUs: 12,
+        plannedReuseTokens: 33,
+        realizedReuseTokens: 31,
+        cacheFallback: "cancel_boundary",
+      });
+      expect(payload.active).toEqual([]);
+      expect(payload.queue.inflight).toBe(0);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      restoreEnv("CLAP_FAKE_WORKER_DONE", previousDone);
       await rm(dir, { recursive: true, force: true });
     }
   });

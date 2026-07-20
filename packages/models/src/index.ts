@@ -652,11 +652,13 @@ function withModelMetadata(
 ): ClapModel {
   const config = options.path && model.format === "mlx" ? readJson(join(options.path, "config.json")) : undefined;
   const tokenizerConfig = options.path && model.format === "mlx" ? readJson(join(options.path, "tokenizer_config.json")) : undefined;
+  const generationConfig = options.path && model.format === "mlx" ? readJson(join(options.path, "generation_config.json")) : undefined;
   const index = options.path && model.format === "mlx" ? readJson(join(options.path, "model.safetensors.index.json")) : undefined;
   const name = displayNameFromRepo(options.repo) ?? model.displayName;
   const baseRepo = stringValue(config?.base_model) ?? stringValue(config?._name_or_path) ?? stringValue(tokenizerConfig?._name_or_path);
   const upstreamModalities = inferUpstreamModalities(config, tokenizerConfig, index);
-  const limit = inferLimit(config, tokenizerConfig);
+  const declaredLimits = inferLimit(config, tokenizerConfig, generationConfig);
+  const limit = { context: declaredLimits.context.value, output: declaredLimits.output.value };
   return {
     ...model,
     name,
@@ -669,13 +671,17 @@ function withModelMetadata(
     modalities: servedModalities(),
     capabilities: servedCapabilities(),
     limit,
+    limitSource: {
+      context: declaredLimits.context.source,
+      output: declaredLimits.output.source,
+    },
     upstream: {
       modalities: upstreamModalities,
       capabilities: upstreamCapabilities(upstreamModalities, config),
       limit,
     },
-    architecture: firstString(arrayValue(config?.architectures)),
-    modelType: stringValue(config?.model_type),
+    architecture: declaredArchitecture(config),
+    modelType: declaredModelType(config),
     quantization: inferQuantization(model.format, options.file ?? model.file, config),
     sizeBytes: model.sizeBytes ?? modelPathSizeBytes(options.path),
   };
@@ -742,23 +748,68 @@ function inferUpstreamModalities(...records: Array<JsonRecord | undefined>): Cla
   return { input: [...input], output: [...output] };
 }
 
-function inferLimit(config?: JsonRecord, tokenizerConfig?: JsonRecord): ClapModel["limit"] {
+type DeclaredInteger = { value: number | null; source?: string };
+
+const CONTEXT_KEYS = ["max_position_embeddings", "max_sequence_length", "seq_length", "n_positions", "n_ctx", "context_length"] as const;
+const LANGUAGE_CONFIG_KEYS = ["text_config", "language_config", "llm_config"] as const;
+
+function inferLimit(config?: JsonRecord, tokenizerConfig?: JsonRecord, generationConfig?: JsonRecord): {
+  context: DeclaredInteger;
+  output: DeclaredInteger;
+} {
+  const contextCandidates: Array<[number | undefined, string]> = [];
+  // Composite checkpoints (Gemma 4, vision-language models, etc.) declare
+  // language limits under a named language config. Never inspect sibling
+  // vision/audio configs, and never treat a sliding attention window as the
+  // architectural context window.
+  for (const container of LANGUAGE_CONFIG_KEYS) {
+    for (const key of CONTEXT_KEYS) {
+      contextCandidates.push([nestedNumber(config, [container, key]), `config.json:${container}.${key}`]);
+    }
+  }
+  for (const key of CONTEXT_KEYS) {
+    contextCandidates.push([nestedNumber(config, [key]), `config.json:${key}`]);
+  }
+  contextCandidates.push([nestedNumber(tokenizerConfig, ["model_max_length"]), "tokenizer_config.json:model_max_length"]);
+
+  const outputCandidates: Array<[number | undefined, string]> = [
+    [nestedNumber(generationConfig, ["max_new_tokens"]), "generation_config.json:max_new_tokens"],
+    [nestedNumber(config, ["generation_config", "max_new_tokens"]), "config.json:generation_config.max_new_tokens"],
+    [nestedNumber(config, ["max_output_tokens"]), "config.json:max_output_tokens"],
+    [nestedNumber(config, ["max_new_tokens"]), "config.json:max_new_tokens"],
+  ];
+  for (const container of LANGUAGE_CONFIG_KEYS) {
+    outputCandidates.push(
+      [nestedNumber(config, [container, "max_output_tokens"]), `config.json:${container}.max_output_tokens`],
+      [nestedNumber(config, [container, "max_new_tokens"]), `config.json:${container}.max_new_tokens`],
+    );
+  }
   return {
-    context: firstPositiveInteger(
-      nestedNumber(config, ["text_config", "max_position_embeddings"]),
-      nestedNumber(config, ["max_position_embeddings"]),
-      nestedNumber(config, ["max_sequence_length"]),
-      nestedNumber(config, ["seq_length"]),
-      nestedNumber(config, ["n_ctx"]),
-      nestedNumber(config, ["context_length"]),
-      nestedNumber(tokenizerConfig, ["model_max_length"]),
-    ),
-    output: firstPositiveInteger(
-      nestedNumber(config, ["max_output_tokens"]),
-      nestedNumber(config, ["max_new_tokens"]),
-      nestedNumber(config, ["generation_config", "max_new_tokens"]),
-    ),
+    context: firstDeclaredInteger(contextCandidates),
+    output: firstDeclaredInteger(outputCandidates),
   };
+}
+
+function declaredArchitecture(config?: JsonRecord): string | undefined {
+  const root = firstString(arrayValue(config?.architectures));
+  if (root) return root;
+  for (const container of LANGUAGE_CONFIG_KEYS) {
+    const nested = isRecord(config?.[container]) ? config[container] : undefined;
+    const architecture = firstString(arrayValue(nested?.architectures));
+    if (architecture) return architecture;
+  }
+  return undefined;
+}
+
+function declaredModelType(config?: JsonRecord): string | undefined {
+  const root = stringValue(config?.model_type);
+  if (root) return root;
+  for (const container of LANGUAGE_CONFIG_KEYS) {
+    const nested = isRecord(config?.[container]) ? config[container] : undefined;
+    const modelType = stringValue(nested?.model_type);
+    if (modelType) return modelType;
+  }
+  return undefined;
 }
 
 function inferQuantization(format: string, file?: string, config?: JsonRecord): string | undefined {
@@ -819,8 +870,9 @@ function nestedNumber(record: JsonRecord | undefined, path: string[]): number | 
   return numberValue(value);
 }
 
-function firstPositiveInteger(...values: Array<number | undefined>): number | null {
-  return values.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0) ?? null;
+function firstDeclaredInteger(candidates: Array<[number | undefined, string]>): DeclaredInteger {
+  const candidate = candidates.find(([value]) => typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+  return candidate ? { value: candidate[0]!, source: candidate[1] } : { value: null };
 }
 
 function providerFromRepo(repo?: string): string | undefined {

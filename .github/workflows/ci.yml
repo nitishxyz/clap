@@ -5,25 +5,160 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: macos-14
+  rust-cache:
+    name: Rust cache coordinator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native/cache
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Record Rust toolchain
+        id: rust
+        run: echo "key=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cache/Cargo.lock') }}
+          restore-keys: |
+            cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Rust build objects
+        uses: actions/cache@v4
+        with:
+          path: native/cache/target
+          key: cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.key }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*.rs', 'native/cache/crates/**/Cargo.toml') }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build release static library
+        run: cargo build --release --locked -p clap-cache-ffi
+      - name: Compile public C header
+        run: |
+          test -s target/release/libclap_cache_ffi.a
+          printf '#include "clap_cache.h"\nint main(void) { return CLAP_CACHE_ABI_VERSION == 1u ? 0 : 1; }\n' > "$RUNNER_TEMP/clap-cache-header.c"
+          cc -std=c11 -Wall -Wextra -Werror -I include -c "$RUNNER_TEMP/clap-cache-header.c" -o "$RUNNER_TEMP/clap-cache-header.o"
+
+  typescript:
+    name: TypeScript packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Cache Bun dependencies
+      - name: Cache Bun downloads
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
           restore-keys: |
-            bun-${{ runner.os }}-${{ runner.arch }}-
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
+      - name: Build web package
+        run: bun run build:web
+
+  native-macos:
+    name: macOS native integrations
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Select latest Xcode
+        run: |
+          xcode=$(printf '%s\n' /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$xcode/Contents/Developer"
+      - name: Record native toolchains
+        id: toolchain
+        run: |
+          echo "rust=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          { xcodebuild -version; swift --version; cmake --version; c++ --version; } > "$RUNNER_TEMP/native-toolchains"
+          echo "native=$(shasum -a 256 "$RUNNER_TEMP/native-toolchains" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
+          restore-keys: |
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cache/Cargo.lock') }}
+          restore-keys: |
+            cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Rust build objects
+        uses: actions/cache@v4
+        with:
+          path: native/cache/target
+          key: cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rust }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*.rs', 'native/cache/crates/**/Cargo.toml') }}
+      - name: Cache llama.cpp sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/llama.cpp
+            !vendor/llama.cpp/build
+          key: llama-download-v1-${{ runner.os }}-${{ hashFiles('scripts/vendor-llama.ts') }}
+          restore-keys: |
+            llama-download-v1-${{ runner.os }}-
+      - name: Cache llama.cpp build objects
+        uses: actions/cache@v4
+        with:
+          path: vendor/llama.cpp/build
+          key: llama-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.native }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
+      - name: Cache SwiftPM downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/mlx/Package.swift', 'native/mlx/Package.resolved') }}
+          restore-keys: |
+            swiftpm-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Swift build objects
+        uses: actions/cache@v4
+        with:
+          path: native/mlx/.build
+          key: swiftpm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.native }}-${{ hashFiles('native/mlx/Package.swift', 'native/mlx/Package.resolved', 'native/mlx/Sources/**/*', 'native/mlx/Tests/**/*', 'native/cache/include/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
+      - run: bun install --frozen-lockfile
+      - name: Build Rust bridge archive
+        run: cargo build --release --locked -p clap-cache-ffi --manifest-path native/cache/Cargo.toml
+      - name: Test llama cache adapter
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror native/llama/cache-adapter.test.cpp \
+            -I native/cache/include native/cache/target/release/libclap_cache_ffi.a \
+            -framework Security -framework SystemConfiguration -o "$RUNNER_TEMP/cache-adapter-test"
+          "$RUNNER_TEMP/cache-adapter-test"
+      - name: Build llama worker
+        run: |
+          bun run runtime:llama:vendor
+          bun run runtime:llama:build
+      - name: Test Swift cache bridge
+        run: swift test --package-path native/mlx -c release
+      - name: Build Swift MLX worker
+        run: bun run runtime:mlx:build
+      - name: Validate native bundle
+        run: bun run bundle:check

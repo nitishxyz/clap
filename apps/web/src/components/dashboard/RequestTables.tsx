@@ -41,15 +41,42 @@ function ConvTag({ conversation }: { conversation?: string }) {
 
 const phaseOrder: Record<DashboardRequest["phase"], number> = { decode: 0, prefill: 1, loading: 2, queued: 3, done: 4 };
 
-function CacheTag({ request }: { request: DashboardRequest }) {
-  if (request.sideRequest) return <Tag tone="warn">side</Tag>;
-  const slot = request.slot !== undefined ? ` s${request.slot}` : "";
+// Share of the prompt served from the KV cache, clamped to 0-100. Undefined
+// when the prompt size is unknown so the UI never invents a percentage.
+export function cacheReusePercent(request: Pick<DashboardRequest, "reusedTokens" | "promptTokens">): number | undefined {
+  const { reusedTokens, promptTokens } = request;
+  if (reusedTokens === undefined || promptTokens === undefined || promptTokens <= 0) return undefined;
+  return Math.max(0, Math.min(100, Math.round((reusedTokens / promptTokens) * 100)));
+}
+
+// Intent is orthogonal to cache outcome: a side request can hit or miss.
+export function IntentTag({ request }: { request: DashboardRequest }) {
+  if (!request.sideRequest) return null;
+  return (
+    <Tag tone="warn" title="side request: branched from primary work (title generation, background checks); intent is independent of cache hit/miss">
+      side request
+    </Tag>
+  );
+}
+
+export function CacheTag({ request }: { request: DashboardRequest }) {
+  const slot = request.slot !== undefined ? ` · s${request.slot}` : "";
   if (request.cacheHit === true) {
-    const kind = request.reuseScope ? ` ${request.reuseScope}` : request.reuseKind ? ` ${request.reuseKind}` : "";
-    return <Tag tone="hit">hit{kind}{request.reusedTokens ? ` ${fmtTokens(request.reusedTokens)}` : ""}{slot}</Tag>;
+    const pct = cacheReusePercent(request);
+    return (
+      <Tag tone="hit" title="prefix cache hit: reused tokens came from the KV cache instead of being re-prefilled">
+        {`cache hit · ${fmtTokens(request.reusedTokens ?? 0)} tok${pct !== undefined ? ` · ${pct}%` : ""}${slot}`}
+      </Tag>
+    );
   }
-  if (request.cacheHit === false) return <Tag>miss{slot}</Tag>;
-  return <span className="text-muted">-</span>;
+  if (request.cacheHit === false) {
+    return (
+      <Tag title="prefix cache miss: the full prompt was prefilled">
+        {`cache miss · ${fmtTokens(request.reusedTokens ?? 0)} tok${slot}`}
+      </Tag>
+    );
+  }
+  return <Tag title="cache telemetry unavailable for this request">cache n/a</Tag>;
 }
 
 export function ActiveRequests({ requests, now, onSelect }: { requests: DashboardRequest[]; now: number; onSelect: (id: string) => void }) {
@@ -95,7 +122,7 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
             { label: "in", numeric: true },
             { label: "out", numeric: true },
             { label: "tok/s", numeric: true },
-            "cache",
+            "intent / cache",
             "finish",
             { label: "tools", numeric: true },
           ]}
@@ -115,7 +142,12 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
               <Td numeric>{fmtTokens(request.promptTokens)}</Td>
               <Td numeric>{fmtTokens(request.completionTokens)}</Td>
               <Td numeric>{request.tokensPerSecond ?? "-"}</Td>
-              <Td><CacheTag request={request} /></Td>
+              <Td>
+                <div className="flex items-center gap-1">
+                  <IntentTag request={request} />
+                  <CacheTag request={request} />
+                </div>
+              </Td>
               <Td>{request.finishReason ?? "-"}</Td>
               <Td numeric>{request.toolCalls ?? "-"}</Td>
             </tr>

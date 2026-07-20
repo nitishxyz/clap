@@ -53,6 +53,11 @@ export const ClapModelLimitSchema = z.object({
   output: z.number().int().positive().nullable(),
 });
 
+export const ClapModelLimitSourceSchema = z.object({
+  context: z.string().optional(),
+  output: z.string().optional(),
+});
+
 export const ClapModelModalitiesSchema = z.object({
   input: z.array(z.enum(["text", "image", "audio"])),
   output: z.array(z.enum(["text", "image", "audio"])),
@@ -75,6 +80,7 @@ export const ClapModelSchema = z.object({
   modalities: ClapModelModalitiesSchema,
   capabilities: ClapModelCapabilitiesSchema,
   limit: ClapModelLimitSchema,
+  limitSource: ClapModelLimitSourceSchema.optional(),
   upstream: z.object({
     modalities: ClapModelModalitiesSchema.optional(),
     capabilities: ClapModelCapabilitiesSchema.partial().optional(),
@@ -167,6 +173,20 @@ export const UnloadModelRequestSchema = z.object({
   backend: z.enum(["gguf", "mlx"]).optional(),
 });
 
+// Native workers report nullable values when a checkpoint does not declare a
+// capability. Known effective values are bounded by the allocation that
+// actually succeeded; unknown values are never filled with a product default.
+export const ModelTokenCapabilitiesSchema = z.object({
+  modelContextWindow: z.number().int().positive().nullable(),
+  effectiveContextWindow: z.number().int().positive().nullable(),
+  maxInputTokens: z.number().int().nonnegative().nullable(),
+  maxOutputTokens: z.number().int().positive().nullable(),
+  modelContextWindowSource: z.string().nullable().optional(),
+  maxOutputTokensSource: z.string().nullable().optional(),
+  backendAllocationCap: z.number().int().positive().nullable(),
+  userConfiguredOverride: z.number().int().positive().nullable(),
+});
+
 export const LoadedModelSchema = z.object({
   key: z.string(),
   id: z.string(),
@@ -192,6 +212,41 @@ export const LoadedModelSchema = z.object({
       cacheBytes: z.number().int().nonnegative(),
       peakActiveBytes: z.number().int().nonnegative(),
     }).optional(),
+    retention: z.object({
+      maxActive: z.number().int().nonnegative(),
+      queued: z.number().int().nonnegative().optional(),
+      previousMaxActive: z.number().int().nonnegative().optional(),
+      lastAdjustmentReason: z.string().min(1).optional(),
+      lastAdjustmentAt: z.string().min(1).optional(),
+      retainedGrowthReserveBytes: z.number().int().nonnegative().optional(),
+      globalResidentMemoryBytes: z.number().int().nonnegative().optional(),
+      pressureState: z.enum(["normal", "warning", "critical"]).optional(),
+      activePolicy: z.object({
+        mode: z.enum(["auto", "fixed"]),
+        selectedMax: z.number().int().positive(),
+        backendCeiling: z.number().int().positive(),
+        hardwareCeiling: z.number().int().positive(),
+        modelCeiling: z.number().int().positive(),
+        memoryCeiling: z.number().int().positive(),
+        reason: z.string().min(1),
+        inputs: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])),
+      }),
+      active: z.number().int().nonnegative(),
+      retainedTotal: z.number().int().nonnegative(),
+      retainedSessions: z.number().int().nonnegative(),
+      retainedAnchors: z.number().int().nonnegative(),
+      retainedBytes: z.number().int().nonnegative(),
+      sessionBytes: z.number().int().nonnegative(),
+      anchorBytes: z.number().int().nonnegative(),
+      budgetBytes: z.number().int().nonnegative(),
+      highWatermarkBytes: z.number().int().nonnegative(),
+      lowWatermarkBytes: z.number().int().nonnegative(),
+      underPressure: z.boolean(),
+      hardCeiling: z.number().int().nonnegative(),
+      evictionReason: z.string().optional(),
+      evictionCount: z.number().int().nonnegative(),
+    }).optional(),
+    tokenCapabilities: ModelTokenCapabilitiesSchema.optional(),
   }),
 });
 
@@ -272,6 +327,19 @@ export const ResponseFormatSchema = z.union([
   }),
 ]);
 
+export const CacheIntentSchema = z.object({
+  namespace: z.string().min(1).optional(),
+  tenant: z.string().min(1).optional(),
+  project: z.string().min(1).optional(),
+  harness: z.string().min(1).optional(),
+  agent: z.string().min(1).optional(),
+  session: z.string().min(1).optional(),
+  priority: z.enum(["interactive", "background"]).optional(),
+  side_request: z.boolean().optional(),
+}).refine((value) => value.namespace || value.tenant, {
+  message: "cache intent requires namespace or tenant",
+});
+
 export const ChatCompletionRequestSchema = z.object({
   model: z.string().min(1),
   messages: z.array(ChatMessageSchema).min(1),
@@ -288,6 +356,7 @@ export const ChatCompletionRequestSchema = z.object({
   top_p: z.number().min(0).max(1).optional(),
   presence_penalty: z.number().min(-2).max(2).optional(),
   frequency_penalty: z.number().min(-2).max(2).optional(),
+  cache: CacheIntentSchema.optional(),
 });
 
 export const ChatCompletionChoiceSchema = z.object({
@@ -485,6 +554,7 @@ export type PullModelResponse = z.infer<typeof PullModelResponseSchema>;
 export type DownloadsResponse = z.infer<typeof DownloadsResponseSchema>;
 export type LoadModelRequest = z.infer<typeof LoadModelRequestSchema>;
 export type UnloadModelRequest = z.infer<typeof UnloadModelRequestSchema>;
+export type ModelTokenCapabilities = z.infer<typeof ModelTokenCapabilitiesSchema>;
 export type LoadedModel = z.infer<typeof LoadedModelSchema>;
 export type LoadedModelsResponse = z.infer<typeof LoadedModelsResponseSchema>;
 export type LoadModelResponse = z.infer<typeof LoadModelResponseSchema>;

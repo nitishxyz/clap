@@ -13,15 +13,35 @@ let package = Package(
     .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
   ],
   targets: [
+    .target(
+      name: "ClapCacheBridge",
+      cSettings: [
+        .unsafeFlags(["-I", "../cache/include"]),
+      ],
+      linkerSettings: [
+        .unsafeFlags(["../cache/target/release/libclap_cache_ffi.a"]),
+      ]
+    ),
+    .target(name: "ClapCachePolicy"),
     .executableTarget(
       name: "clap-mlx",
       dependencies: [
+        "ClapCacheBridge",
+        "ClapCachePolicy",
         .product(name: "MLXLLM", package: "mlx-swift-lm"),
         .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
         .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
         .product(name: "HuggingFace", package: "swift-huggingface"),
         .product(name: "Tokenizers", package: "swift-transformers"),
       ]
+    ),
+    .testTarget(
+      name: "ClapCacheBridgeTests",
+      dependencies: ["ClapCacheBridge"]
+    ),
+    .testTarget(
+      name: "ClapCachePolicyTests",
+      dependencies: ["ClapCachePolicy"]
     ),
   ]
 )

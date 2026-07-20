@@ -5,15 +5,26 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-macos-arm64:
     runs-on: macos-15
+    timeout-minutes: 150
+    environment: release
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CLAP_RELEASE_VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -22,142 +33,145 @@ jobs:
 
       - name: Select latest Xcode
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
+          xcode=$(printf '%s\n' /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$xcode/Contents/Developer"
           swift --version
+
+      - name: Record native toolchains
+        id: toolchain
+        run: |
+          { rustc -vV; xcodebuild -version; swift --version; cmake --version; c++ --version; } > "$RUNNER_TEMP/native-toolchains"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/native-toolchains" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Bun dependencies
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'apps/*/package.json', 'packages/*/package.json') }}
           restore-keys: |
-            bun-${{ runner.os }}-${{ runner.arch }}-
+            bun-downloads-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Cache vendored llama.cpp build
-        id: llama-cache-macos
+      - name: Cache native build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+            native/mlx/.build
+          key: macos-native-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/**/*.rs', 'native/mlx/Package.resolved', 'native/mlx/Package.swift', 'native/mlx/Sources/**/*') }}
+
+      - name: Restore vendored llama.cpp build
+        id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
-
-      - name: Cache Swift build
-        id: swift-cache-macos
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            native/mlx/.build
-            ~/Library/Caches/org.swift.swiftpm
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/mlx/Package.resolved', 'native/mlx/Package.swift') }}
-          restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-
+          key: llama-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/**/*') }}
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
 
-      - name: Build native workers
+      - name: Build Rust, llama, and MLX
         run: |
+          cargo build --manifest-path native/cache/Cargo.toml --release --locked
           bun run runtime:llama:vendor
           bun run runtime:llama:build
           bun run runtime:mlx:build
 
       - name: Save llama.cpp cache
-        if: always() && steps.llama-cache-macos.outputs.cache-hit != 'true'
+        if: success() && steps.llama-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: vendor/llama.cpp
-          key: ${{ steps.llama-cache-macos.outputs.cache-primary-key }}
+          key: ${{ steps.llama-cache.outputs.cache-primary-key }}
 
-      - name: Save Swift build cache
-        if: always() && steps.swift-cache-macos.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+      - name: Import Developer ID certificate
+        run: bash scripts/macos-keychain.sh import
+
+      - name: Sign workers, notarize DMG, verify CLI, and package artifacts
+        env:
+          CLAP_KEYCHAIN_PATH: ${{ runner.temp }}/clap-signing.keychain-db
+        run: bash scripts/macos-release.sh
+
+      - name: Upload signed macOS artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: release-macos-arm64
           path: |
-            native/mlx/.build
-            ~/Library/Caches/org.swift.swiftpm
-          key: ${{ steps.swift-cache-macos.outputs.cache-primary-key }}
-
-      - name: Build clap binary
-        run: bun run build:binary
-
-      - name: Package archive
-        run: |
-          cd dist
-          tar -czf clap-${{ github.ref_name }}-darwin-arm64.tar.gz clap
-          shasum -a 256 clap-${{ github.ref_name }}-darwin-arm64.tar.gz > clap-${{ github.ref_name }}-darwin-arm64.tar.gz.sha256
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
+            dist/clap-${{ github.ref_name }}-darwin-arm64.dmg
+            dist/clap-${{ github.ref_name }}-darwin-arm64.dmg.sha256
             dist/clap-${{ github.ref_name }}-darwin-arm64.tar.gz
             dist/clap-${{ github.ref_name }}-darwin-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Delete temporary signing keychain
+        if: always()
+        run: bash scripts/macos-keychain.sh cleanup
 
   build-linux-x64:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-
-      - name: Cache Bun dependencies
+      - name: Cache Bun and Cargo dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Cache vendored llama.cpp build
-        id: llama-cache-linux
+          path: |
+            ~/.bun/install/cache
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+          key: linux-native-v2-${{ runner.arch }}-${{ hashFiles('bun.lock', 'native/cache/Cargo.lock', 'native/cache/**/*.rs', 'native/llama/**/*') }}
+      - name: Restore vendored llama.cpp build
+        id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
-
+          key: llama-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/**/*') }}
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
-
-      - name: Build llama worker (CPU)
+      - name: Build Rust and llama worker
         run: |
+          cargo build --manifest-path native/cache/Cargo.toml --release --locked
           bun run runtime:llama:vendor
           bun run runtime:llama:build
-
+          bun run build:binary
       - name: Save llama.cpp cache
-        if: always() && steps.llama-cache-linux.outputs.cache-hit != 'true'
+        if: success() && steps.llama-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: vendor/llama.cpp
-          key: ${{ steps.llama-cache-linux.outputs.cache-primary-key }}
-
-      - name: Build clap binary
-        run: bun run build:binary
-
-      - name: Package archive
+          key: ${{ steps.llama-cache.outputs.cache-primary-key }}
+      - name: Package and checksum
         run: |
+          tar -czf dist/clap-${{ github.ref_name }}-linux-x64.tar.gz -C dist clap
           cd dist
-          tar -czf clap-${{ github.ref_name }}-linux-x64.tar.gz clap
           sha256sum clap-${{ github.ref_name }}-linux-x64.tar.gz > clap-${{ github.ref_name }}-linux-x64.tar.gz.sha256
-
-      - name: Upload to GitHub release
-        uses: softprops/action-gh-release@v2
+          sha256sum -c clap-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
         with:
-          generate_release_notes: true
-          files: |
+          name: release-linux-x64
+          path: |
             dist/clap-${{ github.ref_name }}-linux-x64.tar.gz
             dist/clap-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   build-linux-x64-cuda-worker:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-
       - name: Install CUDA toolkit
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
@@ -165,42 +179,90 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 libcublas-dev-12-8 cuda-profiler-api-12-8
           echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
-
-      - name: Cache vendored llama.cpp CUDA build
-        id: llama-cache-cuda
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/cache/target
+          key: cuda-native-v2-${{ runner.arch }}-${{ hashFiles('native/cache/Cargo.lock', 'native/cache/**/*.rs', 'native/llama/**/*') }}
+      - name: Restore vendored llama.cpp CUDA build
+        id: llama-cache
         uses: actions/cache/restore@v4
         with:
           path: vendor/llama.cpp
-          key: llama-cpp-cuda-v2-cuda12.8-sm80-86-89-90-100-120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts') }}
-
+          key: llama-build-cuda-v4-sm80-86-89-90-100-120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/vendor-llama.ts', 'scripts/build-llama.ts', 'native/llama/**/*', 'native/cache/**/*') }}
       - run: bun install --frozen-lockfile
-
-      - name: Build CUDA llama worker
+      - name: Build Rust and CUDA llama worker
         env:
           CUDA_HOME: /usr/local/cuda
           CLAP_CUDA_ARCHS: "80;86;89;90;100;120"
         run: |
+          cargo build --manifest-path native/cache/Cargo.toml --release --locked
           bun run runtime:llama:vendor
           bun run runtime:llama:build
-
       - name: Save llama.cpp CUDA cache
-        if: success() && steps.llama-cache-cuda.outputs.cache-hit != 'true'
+        if: success() && steps.llama-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: vendor/llama.cpp
-          key: ${{ steps.llama-cache-cuda.outputs.cache-primary-key }}
-
-      - name: Package CUDA worker archive
+          key: ${{ steps.llama-cache.outputs.cache-primary-key }}
+      - name: Package and checksum CUDA worker
         run: |
           mkdir -p dist
           tar -czf dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz -C libexec clap-llama
           cd dist
           sha256sum clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz > clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+          sha256sum -c clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+      - name: Upload CUDA worker artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x64-cuda
+          path: |
+            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz
+            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Upload to GitHub release
+  publish:
+    needs: [build-macos-arm64, build-linux-x64, build-linux-x64-cuda-worker]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Assert artifact set and verify checksums
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          expected=$(mktemp)
+          actual=$(mktemp)
+          printf '%s\n' \
+            "clap-${VERSION}-darwin-arm64.dmg" \
+            "clap-${VERSION}-darwin-arm64.dmg.sha256" \
+            "clap-${VERSION}-darwin-arm64.tar.gz" \
+            "clap-${VERSION}-darwin-arm64.tar.gz.sha256" \
+            "clap-${VERSION}-linux-x64.tar.gz" \
+            "clap-${VERSION}-linux-x64.tar.gz.sha256" \
+            "clap-llama-cuda-${VERSION}-linux-x64.tar.gz" \
+            "clap-llama-cuda-${VERSION}-linux-x64.tar.gz.sha256" | sort > "$expected"
+          find release-assets -type f -maxdepth 1 -exec basename {} \; | sort > "$actual"
+          diff -u "$expected" "$actual"
+          cd release-assets
+          sha256sum -c "clap-${VERSION}-darwin-arm64.dmg.sha256"
+          sha256sum -c "clap-${VERSION}-darwin-arm64.tar.gz.sha256"
+          sha256sum -c "clap-${VERSION}-linux-x64.tar.gz.sha256"
+          sha256sum -c "clap-llama-cuda-${VERSION}-linux-x64.tar.gz.sha256"
+      - name: Publish GitHub release once
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz
-            dist/clap-llama-cuda-${{ github.ref_name }}-linux-x64.tar.gz.sha256
+          fail_on_unmatched_files: true
+          files: release-assets/*

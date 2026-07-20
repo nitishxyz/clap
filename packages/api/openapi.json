@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Clap Local Model Server API",
-    "version": "0.1.0"
+    "version": "0.1.2"
   },
   "servers": [
     {
@@ -296,6 +296,17 @@
                     "output"
                   ]
                 },
+                "limitSource": {
+                  "type": "object",
+                  "properties": {
+                    "context": {
+                      "type": "string"
+                    },
+                    "output": {
+                      "type": "string"
+                    }
+                  }
+                },
                 "upstream": {
                   "type": "object",
                   "properties": {
@@ -393,6 +404,10 @@
                 },
                 "quantization": {
                   "type": "string"
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "minimum": 0
                 },
                 "alias": {
                   "type": "string"
@@ -668,6 +683,276 @@
                     },
                     "limitation": {
                       "type": "string"
+                    },
+                    "crashes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "lastCrashAt": {
+                      "type": "string"
+                    },
+                    "memory": {
+                      "type": "object",
+                      "properties": {
+                        "activeBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "cacheBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "peakActiveBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "activeBytes",
+                        "cacheBytes",
+                        "peakActiveBytes"
+                      ]
+                    },
+                    "retention": {
+                      "type": "object",
+                      "properties": {
+                        "maxActive": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "queued": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "previousMaxActive": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "lastAdjustmentReason": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "lastAdjustmentAt": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retainedGrowthReserveBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "globalResidentMemoryBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "pressureState": {
+                          "type": "string",
+                          "enum": [
+                            "normal",
+                            "warning",
+                            "critical"
+                          ]
+                        },
+                        "activePolicy": {
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "enum": [
+                                "auto",
+                                "fixed"
+                              ]
+                            },
+                            "selectedMax": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "backendCeiling": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "hardwareCeiling": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "modelCeiling": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "memoryCeiling": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "reason": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "inputs": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  },
+                                  {
+                                    "nullable": true
+                                  },
+                                  {
+                                    "nullable": true
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "mode",
+                            "selectedMax",
+                            "backendCeiling",
+                            "hardwareCeiling",
+                            "modelCeiling",
+                            "memoryCeiling",
+                            "reason",
+                            "inputs"
+                          ]
+                        },
+                        "active": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retainedTotal": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retainedSessions": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retainedAnchors": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retainedBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "sessionBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "anchorBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "budgetBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "highWatermarkBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "lowWatermarkBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "underPressure": {
+                          "type": "boolean"
+                        },
+                        "hardCeiling": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "evictionReason": {
+                          "type": "string"
+                        },
+                        "evictionCount": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "maxActive",
+                        "activePolicy",
+                        "active",
+                        "retainedTotal",
+                        "retainedSessions",
+                        "retainedAnchors",
+                        "retainedBytes",
+                        "sessionBytes",
+                        "anchorBytes",
+                        "budgetBytes",
+                        "highWatermarkBytes",
+                        "lowWatermarkBytes",
+                        "underPressure",
+                        "hardCeiling",
+                        "evictionCount"
+                      ]
+                    },
+                    "tokenCapabilities": {
+                      "type": "object",
+                      "properties": {
+                        "modelContextWindow": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "effectiveContextWindow": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "maxInputTokens": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0
+                        },
+                        "maxOutputTokens": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "modelContextWindowSource": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "maxOutputTokensSource": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "backendAllocationCap": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "userConfiguredOverride": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        }
+                      },
+                      "required": [
+                        "modelContextWindow",
+                        "effectiveContextWindow",
+                        "maxInputTokens",
+                        "maxOutputTokens",
+                        "backendAllocationCap",
+                        "userConfiguredOverride"
+                      ]
                     }
                   },
                   "required": [
@@ -810,6 +1095,276 @@
                   },
                   "limitation": {
                     "type": "string"
+                  },
+                  "crashes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lastCrashAt": {
+                    "type": "string"
+                  },
+                  "memory": {
+                    "type": "object",
+                    "properties": {
+                      "activeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "cacheBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "peakActiveBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "activeBytes",
+                      "cacheBytes",
+                      "peakActiveBytes"
+                    ]
+                  },
+                  "retention": {
+                    "type": "object",
+                    "properties": {
+                      "maxActive": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "queued": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "previousMaxActive": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastAdjustmentReason": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "lastAdjustmentAt": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "retainedGrowthReserveBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "globalResidentMemoryBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pressureState": {
+                        "type": "string",
+                        "enum": [
+                          "normal",
+                          "warning",
+                          "critical"
+                        ]
+                      },
+                      "activePolicy": {
+                        "type": "object",
+                        "properties": {
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "auto",
+                              "fixed"
+                            ]
+                          },
+                          "selectedMax": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "backendCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "hardwareCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "modelCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "memoryCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "inputs": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {
+                                  "nullable": true
+                                },
+                                {
+                                  "nullable": true
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "mode",
+                          "selectedMax",
+                          "backendCeiling",
+                          "hardwareCeiling",
+                          "modelCeiling",
+                          "memoryCeiling",
+                          "reason",
+                          "inputs"
+                        ]
+                      },
+                      "active": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedTotal": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedSessions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedAnchors": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "budgetBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "highWatermarkBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lowWatermarkBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "underPressure": {
+                        "type": "boolean"
+                      },
+                      "hardCeiling": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "evictionReason": {
+                        "type": "string"
+                      },
+                      "evictionCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "maxActive",
+                      "activePolicy",
+                      "active",
+                      "retainedTotal",
+                      "retainedSessions",
+                      "retainedAnchors",
+                      "retainedBytes",
+                      "sessionBytes",
+                      "anchorBytes",
+                      "budgetBytes",
+                      "highWatermarkBytes",
+                      "lowWatermarkBytes",
+                      "underPressure",
+                      "hardCeiling",
+                      "evictionCount"
+                    ]
+                  },
+                  "tokenCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "modelContextWindow": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "effectiveContextWindow": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "maxInputTokens": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "maxOutputTokens": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "modelContextWindowSource": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "maxOutputTokensSource": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "backendAllocationCap": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "userConfiguredOverride": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      }
+                    },
+                    "required": [
+                      "modelContextWindow",
+                      "effectiveContextWindow",
+                      "maxInputTokens",
+                      "maxOutputTokens",
+                      "backendAllocationCap",
+                      "userConfiguredOverride"
+                    ]
                   }
                 },
                 "required": [
@@ -940,6 +1495,276 @@
                   },
                   "limitation": {
                     "type": "string"
+                  },
+                  "crashes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lastCrashAt": {
+                    "type": "string"
+                  },
+                  "memory": {
+                    "type": "object",
+                    "properties": {
+                      "activeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "cacheBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "peakActiveBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "activeBytes",
+                      "cacheBytes",
+                      "peakActiveBytes"
+                    ]
+                  },
+                  "retention": {
+                    "type": "object",
+                    "properties": {
+                      "maxActive": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "queued": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "previousMaxActive": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastAdjustmentReason": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "lastAdjustmentAt": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "retainedGrowthReserveBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "globalResidentMemoryBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pressureState": {
+                        "type": "string",
+                        "enum": [
+                          "normal",
+                          "warning",
+                          "critical"
+                        ]
+                      },
+                      "activePolicy": {
+                        "type": "object",
+                        "properties": {
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "auto",
+                              "fixed"
+                            ]
+                          },
+                          "selectedMax": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "backendCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "hardwareCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "modelCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "memoryCeiling": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "inputs": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {
+                                  "nullable": true
+                                },
+                                {
+                                  "nullable": true
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "mode",
+                          "selectedMax",
+                          "backendCeiling",
+                          "hardwareCeiling",
+                          "modelCeiling",
+                          "memoryCeiling",
+                          "reason",
+                          "inputs"
+                        ]
+                      },
+                      "active": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedTotal": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedSessions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedAnchors": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "retainedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "budgetBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "highWatermarkBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lowWatermarkBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "underPressure": {
+                        "type": "boolean"
+                      },
+                      "hardCeiling": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "evictionReason": {
+                        "type": "string"
+                      },
+                      "evictionCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "maxActive",
+                      "activePolicy",
+                      "active",
+                      "retainedTotal",
+                      "retainedSessions",
+                      "retainedAnchors",
+                      "retainedBytes",
+                      "sessionBytes",
+                      "anchorBytes",
+                      "budgetBytes",
+                      "highWatermarkBytes",
+                      "lowWatermarkBytes",
+                      "underPressure",
+                      "hardCeiling",
+                      "evictionCount"
+                    ]
+                  },
+                  "tokenCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "modelContextWindow": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "effectiveContextWindow": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "maxInputTokens": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "maxOutputTokens": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "modelContextWindowSource": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "maxOutputTokensSource": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "backendAllocationCap": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "userConfiguredOverride": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      }
+                    },
+                    "required": [
+                      "modelContextWindow",
+                      "effectiveContextWindow",
+                      "maxInputTokens",
+                      "maxOutputTokens",
+                      "backendAllocationCap",
+                      "userConfiguredOverride"
+                    ]
                   }
                 },
                 "required": [
@@ -1466,6 +2291,17 @@
                         "output"
                       ]
                     },
+                    "limitSource": {
+                      "type": "object",
+                      "properties": {
+                        "context": {
+                          "type": "string"
+                        },
+                        "output": {
+                          "type": "string"
+                        }
+                      }
+                    },
                     "upstream": {
                       "type": "object",
                       "properties": {
@@ -1563,6 +2399,10 @@
                     },
                     "quantization": {
                       "type": "string"
+                    },
+                    "sizeBytes": {
+                      "type": "integer",
+                      "minimum": 0
                     },
                     "alias": {
                       "type": "string"
@@ -1981,6 +2821,45 @@
             "type": "number",
             "minimum": -2,
             "maximum": 2
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tenant": {
+                "type": "string",
+                "minLength": 1
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1
+              },
+              "harness": {
+                "type": "string",
+                "minLength": 1
+              },
+              "agent": {
+                "type": "string",
+                "minLength": 1
+              },
+              "session": {
+                "type": "string",
+                "minLength": 1
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "interactive",
+                  "background"
+                ]
+              },
+              "side_request": {
+                "type": "boolean"
+              }
+            }
           }
         },
         "required": [
@@ -3229,6 +4108,207 @@
         "required": [
           "model"
         ]
+      },
+      "CacheDecision": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "persisted"
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "number"
+          },
+          "serverLaunchId": {
+            "type": "string"
+          },
+          "workerLaunchId": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "cancelled"
+            ]
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "hit": {
+                "type": "boolean"
+              },
+              "missReason": {
+                "type": "string"
+              },
+              "reusedTokens": {
+                "type": "number"
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "slot": {
+                      "type": "integer"
+                    },
+                    "generation": {
+                      "type": "number"
+                    },
+                    "state": {
+                      "type": "string"
+                    },
+                    "sharedPrefixTokens": {
+                      "type": "number"
+                    },
+                    "rejection": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "slot",
+                    "sharedPrefixTokens"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "source",
+          "requestId",
+          "timestamp",
+          "serverLaunchId",
+          "model",
+          "status"
+        ]
+      },
+      "CacheDecisionPage": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "persisted"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "type": "integer"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "persisted"
+                  ]
+                },
+                "requestId": {
+                  "type": "string"
+                },
+                "timestamp": {
+                  "type": "number"
+                },
+                "serverLaunchId": {
+                  "type": "string"
+                },
+                "workerLaunchId": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "error",
+                    "cancelled"
+                  ]
+                },
+                "cache": {
+                  "type": "object",
+                  "properties": {
+                    "hit": {
+                      "type": "boolean"
+                    },
+                    "missReason": {
+                      "type": "string"
+                    },
+                    "reusedTokens": {
+                      "type": "number"
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slot": {
+                            "type": "integer"
+                          },
+                          "generation": {
+                            "type": "number"
+                          },
+                          "state": {
+                            "type": "string"
+                          },
+                          "sharedPrefixTokens": {
+                            "type": "number"
+                          },
+                          "rejection": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "slot",
+                          "sharedPrefixTokens"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "required": [
+                "schemaVersion",
+                "source",
+                "requestId",
+                "timestamp",
+                "serverLaunchId",
+                "model",
+                "status"
+              ]
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "items"
+        ]
       }
     },
     "parameters": {}
@@ -3642,6 +4722,17 @@
                               "output"
                             ]
                           },
+                          "limitSource": {
+                            "type": "object",
+                            "properties": {
+                              "context": {
+                                "type": "string"
+                              },
+                              "output": {
+                                "type": "string"
+                              }
+                            }
+                          },
                           "upstream": {
                             "type": "object",
                             "properties": {
@@ -3739,6 +4830,10 @@
                           },
                           "quantization": {
                             "type": "string"
+                          },
+                          "sizeBytes": {
+                            "type": "integer",
+                            "minimum": 0
                           },
                           "alias": {
                             "type": "string"
@@ -4108,6 +5203,276 @@
                               },
                               "limitation": {
                                 "type": "string"
+                              },
+                              "crashes": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "lastCrashAt": {
+                                "type": "string"
+                              },
+                              "memory": {
+                                "type": "object",
+                                "properties": {
+                                  "activeBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "cacheBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "peakActiveBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "activeBytes",
+                                  "cacheBytes",
+                                  "peakActiveBytes"
+                                ]
+                              },
+                              "retention": {
+                                "type": "object",
+                                "properties": {
+                                  "maxActive": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "queued": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "previousMaxActive": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "lastAdjustmentReason": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "lastAdjustmentAt": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "retainedGrowthReserveBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "globalResidentMemoryBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "pressureState": {
+                                    "type": "string",
+                                    "enum": [
+                                      "normal",
+                                      "warning",
+                                      "critical"
+                                    ]
+                                  },
+                                  "activePolicy": {
+                                    "type": "object",
+                                    "properties": {
+                                      "mode": {
+                                        "type": "string",
+                                        "enum": [
+                                          "auto",
+                                          "fixed"
+                                        ]
+                                      },
+                                      "selectedMax": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "backendCeiling": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "hardwareCeiling": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "modelCeiling": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "memoryCeiling": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      },
+                                      "reason": {
+                                        "type": "string",
+                                        "minLength": 1
+                                      },
+                                      "inputs": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                          "anyOf": [
+                                            {
+                                              "type": "string"
+                                            },
+                                            {
+                                              "type": "number"
+                                            },
+                                            {
+                                              "type": "boolean"
+                                            },
+                                            {
+                                              "nullable": true
+                                            },
+                                            {
+                                              "nullable": true
+                                            }
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    "required": [
+                                      "mode",
+                                      "selectedMax",
+                                      "backendCeiling",
+                                      "hardwareCeiling",
+                                      "modelCeiling",
+                                      "memoryCeiling",
+                                      "reason",
+                                      "inputs"
+                                    ]
+                                  },
+                                  "active": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "retainedTotal": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "retainedSessions": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "retainedAnchors": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "retainedBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "sessionBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "anchorBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "budgetBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "highWatermarkBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "lowWatermarkBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "underPressure": {
+                                    "type": "boolean"
+                                  },
+                                  "hardCeiling": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "evictionReason": {
+                                    "type": "string"
+                                  },
+                                  "evictionCount": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "maxActive",
+                                  "activePolicy",
+                                  "active",
+                                  "retainedTotal",
+                                  "retainedSessions",
+                                  "retainedAnchors",
+                                  "retainedBytes",
+                                  "sessionBytes",
+                                  "anchorBytes",
+                                  "budgetBytes",
+                                  "highWatermarkBytes",
+                                  "lowWatermarkBytes",
+                                  "underPressure",
+                                  "hardCeiling",
+                                  "evictionCount"
+                                ]
+                              },
+                              "tokenCapabilities": {
+                                "type": "object",
+                                "properties": {
+                                  "modelContextWindow": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "effectiveContextWindow": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "maxInputTokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0
+                                  },
+                                  "maxOutputTokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "modelContextWindowSource": {
+                                    "type": "string",
+                                    "nullable": true
+                                  },
+                                  "maxOutputTokensSource": {
+                                    "type": "string",
+                                    "nullable": true
+                                  },
+                                  "backendAllocationCap": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "userConfiguredOverride": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  }
+                                },
+                                "required": [
+                                  "modelContextWindow",
+                                  "effectiveContextWindow",
+                                  "maxInputTokens",
+                                  "maxOutputTokens",
+                                  "backendAllocationCap",
+                                  "userConfiguredOverride"
+                                ]
                               }
                             },
                             "required": [
@@ -4136,6 +5501,398 @@
                   },
                   "required": [
                     "models"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/cache-decisions": {
+      "get": {
+        "summary": "Paginated privacy-safe historical cache decisions",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "request_id",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "model",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "backend",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "error",
+                "cancelled"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "hit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "number",
+              "nullable": true
+            },
+            "required": false,
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "number",
+              "nullable": true
+            },
+            "required": false,
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "persisted"
+                      ]
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "schemaVersion": {
+                            "type": "integer"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "persisted"
+                            ]
+                          },
+                          "requestId": {
+                            "type": "string"
+                          },
+                          "timestamp": {
+                            "type": "number"
+                          },
+                          "serverLaunchId": {
+                            "type": "string"
+                          },
+                          "workerLaunchId": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "ok",
+                              "error",
+                              "cancelled"
+                            ]
+                          },
+                          "cache": {
+                            "type": "object",
+                            "properties": {
+                              "hit": {
+                                "type": "boolean"
+                              },
+                              "missReason": {
+                                "type": "string"
+                              },
+                              "reusedTokens": {
+                                "type": "number"
+                              },
+                              "candidates": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "slot": {
+                                      "type": "integer"
+                                    },
+                                    "generation": {
+                                      "type": "number"
+                                    },
+                                    "state": {
+                                      "type": "string"
+                                    },
+                                    "sharedPrefixTokens": {
+                                      "type": "number"
+                                    },
+                                    "rejection": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "slot",
+                                    "sharedPrefixTokens"
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "required": [
+                          "schemaVersion",
+                          "source",
+                          "requestId",
+                          "timestamp",
+                          "serverLaunchId",
+                          "model",
+                          "status"
+                        ]
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/cache-decisions/{id}": {
+      "get": {
+        "summary": "Privacy-safe historical cache decision detail",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "integer"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "persisted"
+                      ]
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "number"
+                    },
+                    "serverLaunchId": {
+                      "type": "string"
+                    },
+                    "workerLaunchId": {
+                      "type": "string"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "backend": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok",
+                        "error",
+                        "cancelled"
+                      ]
+                    },
+                    "cache": {
+                      "type": "object",
+                      "properties": {
+                        "hit": {
+                          "type": "boolean"
+                        },
+                        "missReason": {
+                          "type": "string"
+                        },
+                        "reusedTokens": {
+                          "type": "number"
+                        },
+                        "candidates": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "slot": {
+                                "type": "integer"
+                              },
+                              "generation": {
+                                "type": "number"
+                              },
+                              "state": {
+                                "type": "string"
+                              },
+                              "sharedPrefixTokens": {
+                                "type": "number"
+                              },
+                              "rejection": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "slot",
+                              "sharedPrefixTokens"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "source",
+                    "requestId",
+                    "timestamp",
+                    "serverLaunchId",
+                    "model",
+                    "status"
                   ]
                 }
               }
@@ -4303,6 +6060,276 @@
                             },
                             "limitation": {
                               "type": "string"
+                            },
+                            "crashes": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "lastCrashAt": {
+                              "type": "string"
+                            },
+                            "memory": {
+                              "type": "object",
+                              "properties": {
+                                "activeBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "cacheBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "peakActiveBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "activeBytes",
+                                "cacheBytes",
+                                "peakActiveBytes"
+                              ]
+                            },
+                            "retention": {
+                              "type": "object",
+                              "properties": {
+                                "maxActive": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "queued": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "previousMaxActive": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lastAdjustmentReason": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "lastAdjustmentAt": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "retainedGrowthReserveBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "globalResidentMemoryBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "pressureState": {
+                                  "type": "string",
+                                  "enum": [
+                                    "normal",
+                                    "warning",
+                                    "critical"
+                                  ]
+                                },
+                                "activePolicy": {
+                                  "type": "object",
+                                  "properties": {
+                                    "mode": {
+                                      "type": "string",
+                                      "enum": [
+                                        "auto",
+                                        "fixed"
+                                      ]
+                                    },
+                                    "selectedMax": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "backendCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "hardwareCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "modelCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "memoryCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "reason": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "inputs": {
+                                      "type": "object",
+                                      "additionalProperties": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "boolean"
+                                          },
+                                          {
+                                            "nullable": true
+                                          },
+                                          {
+                                            "nullable": true
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "mode",
+                                    "selectedMax",
+                                    "backendCeiling",
+                                    "hardwareCeiling",
+                                    "modelCeiling",
+                                    "memoryCeiling",
+                                    "reason",
+                                    "inputs"
+                                  ]
+                                },
+                                "active": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedTotal": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedSessions": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedAnchors": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "budgetBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "highWatermarkBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lowWatermarkBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "underPressure": {
+                                  "type": "boolean"
+                                },
+                                "hardCeiling": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "evictionReason": {
+                                  "type": "string"
+                                },
+                                "evictionCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "maxActive",
+                                "activePolicy",
+                                "active",
+                                "retainedTotal",
+                                "retainedSessions",
+                                "retainedAnchors",
+                                "retainedBytes",
+                                "sessionBytes",
+                                "anchorBytes",
+                                "budgetBytes",
+                                "highWatermarkBytes",
+                                "lowWatermarkBytes",
+                                "underPressure",
+                                "hardCeiling",
+                                "evictionCount"
+                              ]
+                            },
+                            "tokenCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "modelContextWindow": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "effectiveContextWindow": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "maxInputTokens": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "maxOutputTokens": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "modelContextWindowSource": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "maxOutputTokensSource": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "backendAllocationCap": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "userConfiguredOverride": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                }
+                              },
+                              "required": [
+                                "modelContextWindow",
+                                "effectiveContextWindow",
+                                "maxInputTokens",
+                                "maxOutputTokens",
+                                "backendAllocationCap",
+                                "userConfiguredOverride"
+                              ]
                             }
                           },
                           "required": [
@@ -4486,6 +6513,276 @@
                             },
                             "limitation": {
                               "type": "string"
+                            },
+                            "crashes": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "lastCrashAt": {
+                              "type": "string"
+                            },
+                            "memory": {
+                              "type": "object",
+                              "properties": {
+                                "activeBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "cacheBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "peakActiveBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "activeBytes",
+                                "cacheBytes",
+                                "peakActiveBytes"
+                              ]
+                            },
+                            "retention": {
+                              "type": "object",
+                              "properties": {
+                                "maxActive": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "queued": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "previousMaxActive": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lastAdjustmentReason": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "lastAdjustmentAt": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "retainedGrowthReserveBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "globalResidentMemoryBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "pressureState": {
+                                  "type": "string",
+                                  "enum": [
+                                    "normal",
+                                    "warning",
+                                    "critical"
+                                  ]
+                                },
+                                "activePolicy": {
+                                  "type": "object",
+                                  "properties": {
+                                    "mode": {
+                                      "type": "string",
+                                      "enum": [
+                                        "auto",
+                                        "fixed"
+                                      ]
+                                    },
+                                    "selectedMax": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "backendCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "hardwareCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "modelCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "memoryCeiling": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "reason": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "inputs": {
+                                      "type": "object",
+                                      "additionalProperties": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "boolean"
+                                          },
+                                          {
+                                            "nullable": true
+                                          },
+                                          {
+                                            "nullable": true
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "mode",
+                                    "selectedMax",
+                                    "backendCeiling",
+                                    "hardwareCeiling",
+                                    "modelCeiling",
+                                    "memoryCeiling",
+                                    "reason",
+                                    "inputs"
+                                  ]
+                                },
+                                "active": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedTotal": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedSessions": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedAnchors": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "retainedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "budgetBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "highWatermarkBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lowWatermarkBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "underPressure": {
+                                  "type": "boolean"
+                                },
+                                "hardCeiling": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "evictionReason": {
+                                  "type": "string"
+                                },
+                                "evictionCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "maxActive",
+                                "activePolicy",
+                                "active",
+                                "retainedTotal",
+                                "retainedSessions",
+                                "retainedAnchors",
+                                "retainedBytes",
+                                "sessionBytes",
+                                "anchorBytes",
+                                "budgetBytes",
+                                "highWatermarkBytes",
+                                "lowWatermarkBytes",
+                                "underPressure",
+                                "hardCeiling",
+                                "evictionCount"
+                              ]
+                            },
+                            "tokenCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "modelContextWindow": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "effectiveContextWindow": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "maxInputTokens": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "maxOutputTokens": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "modelContextWindowSource": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "maxOutputTokensSource": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "backendAllocationCap": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "userConfiguredOverride": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                }
+                              },
+                              "required": [
+                                "modelContextWindow",
+                                "effectiveContextWindow",
+                                "maxInputTokens",
+                                "maxOutputTokens",
+                                "backendAllocationCap",
+                                "userConfiguredOverride"
+                              ]
                             }
                           },
                           "required": [
@@ -5396,6 +7693,17 @@
                                   "output"
                                 ]
                               },
+                              "limitSource": {
+                                "type": "object",
+                                "properties": {
+                                  "context": {
+                                    "type": "string"
+                                  },
+                                  "output": {
+                                    "type": "string"
+                                  }
+                                }
+                              },
                               "upstream": {
                                 "type": "object",
                                 "properties": {
@@ -5493,6 +7801,10 @@
                               },
                               "quantization": {
                                 "type": "string"
+                              },
+                              "sizeBytes": {
+                                "type": "integer",
+                                "minimum": 0
                               },
                               "alias": {
                                 "type": "string"
@@ -5956,6 +8268,45 @@
                     "type": "number",
                     "minimum": -2,
                     "maximum": 2
+                  },
+                  "cache": {
+                    "type": "object",
+                    "properties": {
+                      "namespace": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "tenant": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "project": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "harness": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "agent": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "session": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "priority": {
+                        "type": "string",
+                        "enum": [
+                          "interactive",
+                          "background"
+                        ]
+                      },
+                      "side_request": {
+                        "type": "boolean"
+                      }
+                    }
                   }
                 },
                 "required": [

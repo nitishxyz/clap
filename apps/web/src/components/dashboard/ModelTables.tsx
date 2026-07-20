@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel, type ModelResolveOption, type ModelResolveResponse } from "@/lib/api";
-import { fmtBytes, fmtDuration, fmtTokens } from "@/lib/format";
+import { fmtBytes, fmtDuration, fmtMaxOutputTokens, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
-import { BoxBar, isUnifiedMlx, MLX_ACTIVE_TITLE, MLX_CACHE_TITLE, RSS_TITLE } from "./Usage";
+import { BoxBar, formatWorkerCpu, isUnifiedMlx, MLX_ACTIVE_TITLE, MLX_CACHE_TITLE, RSS_TITLE } from "./Usage";
 
 function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: boolean; danger?: boolean; onClick: () => void }) {
   return (
@@ -47,6 +47,10 @@ function DetailItem({ label, children }: { label: string; children: ReactNode })
 
 function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuCount, open, onToggle }: { entry: DashboardLoadedModel; now: number; actions: ActionState; platform?: string; systemMemoryBytes?: number; cpuCount?: number; open: boolean; onToggle: () => void }) {
   const unifiedMlx = isUnifiedMlx(entry.backend, platform);
+  const concurrency = entry.worker.retention;
+  const growthReserve = concurrency?.retainedGrowthReserveBytes
+    ?? (typeof concurrency?.activePolicy.inputs.retained_growth_reserve_bytes === "number"
+      ? concurrency.activePolicy.inputs.retained_growth_reserve_bytes : undefined);
   return (
     <div className="border-b border-soft-border last:border-b-0">
       <div
@@ -59,6 +63,12 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
         <span className="min-w-0 flex-1 truncate text-[0.78rem]" title={entry.localPath}>{entry.id}</span>
         <span className="hidden shrink-0 sm:inline"><Tag>{entry.backend}</Tag></span>
         <span className="shrink-0">{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.state}</Tag>}</span>
+        <span className="shrink-0 tabular-nums" data-model-capacity="summary">
+          <Tag tone={concurrency?.underPressure ? "warn" : undefined}>
+            <span className="sm:hidden">{concurrency ? `${concurrency.active}/${concurrency.maxActive} · q${concurrency.queued ?? "?"}` : "n/a"}</span>
+            <span className="hidden sm:inline">{concurrency ? `${concurrency.active}/${concurrency.maxActive} active · ${concurrency.queued ?? "?"} queued` : "capacity unavailable"}</span>
+          </Tag>
+        </span>
         {entry.pinned ? <span className="hidden shrink-0 sm:inline"><Tag tone="pin">pinned</Tag></span> : null}
         <span className="flex shrink-0 gap-1">
           {entry.pinned ? (
@@ -84,8 +94,9 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
       </div>
       <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>
         <div className="overflow-hidden">
-          <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 border-t border-soft-border px-3 py-2.5 pl-8 sm:grid-cols-2 xl:grid-cols-3">
-            <DetailItem label="mem">
+          <div className="border-t border-soft-border px-3 py-2.5 pl-8">
+            <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-4" data-model-details="primary">
+            <DetailItem label="memory">
               <TableBarCell
                 pct={entry.usage && systemMemoryBytes ? (entry.usage.rssBytes / systemMemoryBytes) * 100 : undefined}
                 value={entry.usage ? fmtBytes(entry.usage.rssBytes) : undefined}
@@ -95,19 +106,11 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
             <DetailItem label="cpu">
               <TableBarCell
                 pct={entry.usage ? (cpuCount ? entry.usage.cpuPercent / cpuCount : Math.min(100, entry.usage.cpuPercent)) : undefined}
-                value={entry.usage ? `${entry.usage.cpuPercent.toFixed(0)}%` : undefined}
+                value={entry.usage ? formatWorkerCpu(entry.usage.cpuPercent) : undefined}
               />
             </DetailItem>
-            {unifiedMlx ? (
-              <>
-                <DetailItem label="mlx active"><span title={MLX_ACTIVE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.activeBytes) : "-"}</span></DetailItem>
-                <DetailItem label="mlx cache"><span title={MLX_CACHE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.cacheBytes) : "-"}</span></DetailItem>
-                <DetailItem label="mlx peak">{entry.worker.memory ? fmtBytes(entry.worker.memory.peakActiveBytes) : "-"}</DetailItem>
-              </>
-            ) : (
-              <DetailItem label="vram">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "-"}</DetailItem>
-            )}
-            <DetailItem label="requests">{entry.activeRequests}</DetailItem>
+            <DetailItem label="model active / max">{entry.activeRequests} / {concurrency?.maxActive ?? "unavailable"}</DetailItem>
+            <DetailItem label="model queued">{concurrency?.queued ?? "unavailable"}</DetailItem>
             <DetailItem label="keep-alive">{entry.keepAlive}</DetailItem>
             <DetailItem label="expires">
               {entry.pinned ? "pinned" : entry.expiresAt ? fmtDuration(new Date(entry.expiresAt).getTime() - now) : "-"}
@@ -115,6 +118,98 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
             <DetailItem label="last used">{fmtDuration(now - new Date(entry.lastUsedAt).getTime())} ago</DetailItem>
             <DetailItem label="pid">{entry.worker?.pid ?? "-"}</DetailItem>
             <DetailItem label="backend">{entry.backend} · {entry.format}</DetailItem>
+            <DetailItem label="context">{entry.worker.tokenCapabilities?.effectiveContextWindow ? fmtTokens(entry.worker.tokenCapabilities.effectiveContextWindow) : "unknown"}</DetailItem>
+            <DetailItem label="max input">{entry.worker.tokenCapabilities?.maxInputTokens != null ? fmtTokens(entry.worker.tokenCapabilities.maxInputTokens) : "unknown"}</DetailItem>
+            <DetailItem label="max output">
+              <span title={entry.worker.tokenCapabilities?.maxOutputTokens == null && entry.worker.tokenCapabilities?.effectiveContextWindow != null
+                ? "No fixed generation cap is declared; available output depends on prompt length."
+                : undefined}>
+                {fmtMaxOutputTokens(entry.worker.tokenCapabilities?.maxOutputTokens, entry.worker.tokenCapabilities?.effectiveContextWindow)}
+              </span>
+            </DetailItem>
+            <DetailItem label="context source">
+              {entry.worker.tokenCapabilities?.userConfiguredOverride
+                ? `override ${fmtTokens(entry.worker.tokenCapabilities.userConfiguredOverride)}`
+                : entry.worker.tokenCapabilities?.modelContextWindow
+                  ? `model ${fmtTokens(entry.worker.tokenCapabilities.modelContextWindow)}`
+                  : "unknown"}
+            </DetailItem>
+            </div>
+            <div className="mt-2 border-t border-soft-border pt-2" data-model-details="concurrency">
+              <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.62rem] uppercase tracking-[0.08em] text-muted">
+                <span>Worker Capacity</span>
+                <Tag tone={concurrency?.underPressure ? "warn" : concurrency ? "ok" : undefined}>
+                  {concurrency?.pressureState ?? (concurrency?.underPressure ? "pressure" : concurrency ? "normal" : "unavailable")}
+                </Tag>
+              </div>
+              <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailItem label="worker active / max">{concurrency ? `${concurrency.active} / ${concurrency.maxActive}` : "unavailable"}</DetailItem>
+                <DetailItem label="worker queued">{concurrency?.queued ?? "unavailable"}</DetailItem>
+                <DetailItem label="mode">{concurrency?.activePolicy.mode ?? "unavailable"}</DetailItem>
+                <DetailItem label="selected limit">{concurrency?.activePolicy.selectedMax ?? "unavailable"}</DetailItem>
+                <DetailItem label="previous limit">{concurrency?.previousMaxActive ?? "unavailable"}</DetailItem>
+                <DetailItem label="backend ceiling">{concurrency?.activePolicy.backendCeiling ?? "unavailable"}</DetailItem>
+                <DetailItem label="hardware ceiling">{concurrency?.activePolicy.hardwareCeiling ?? "unavailable"}</DetailItem>
+                <DetailItem label="model ceiling">{concurrency?.activePolicy.modelCeiling ?? "unavailable"}</DetailItem>
+                <DetailItem label="memory ceiling">{concurrency?.activePolicy.memoryCeiling ?? "unavailable"}</DetailItem>
+                <DetailItem label="limiting reason">{concurrency?.activePolicy.reason.replaceAll("_", " ") ?? "unavailable"}</DetailItem>
+                <DetailItem label="last adjustment">{concurrency?.lastAdjustmentReason?.replaceAll("_", " ") ?? "unavailable"}</DetailItem>
+                <DetailItem label="adjusted">
+                  {concurrency?.lastAdjustmentAt
+                    ? <span title={concurrency.lastAdjustmentAt}>{fmtDuration(now - new Date(concurrency.lastAdjustmentAt).getTime())} ago</span>
+                    : "unavailable"}
+                </DetailItem>
+                <DetailItem label="retained growth reserve">{growthReserve !== undefined ? fmtBytes(growthReserve) : "unavailable"}</DetailItem>
+                <DetailItem label="current retained">{concurrency ? fmtBytes(concurrency.retainedBytes) : "unavailable"}</DetailItem>
+                <DetailItem label="global resident memory">{concurrency?.globalResidentMemoryBytes !== undefined ? fmtBytes(concurrency.globalResidentMemoryBytes) : "unavailable"}</DetailItem>
+              </div>
+            </div>
+            <div className="mt-2 border-t border-soft-border pt-2" data-model-details="backend">
+              <div className="mb-1.5 text-[0.62rem] uppercase tracking-[0.08em] text-muted">{entry.backend} memory</div>
+              <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-3">
+                {unifiedMlx ? (
+                  <>
+                    <DetailItem label="active"><span title={MLX_ACTIVE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.activeBytes) : "unavailable"}</span></DetailItem>
+                    <DetailItem label="cache"><span title={MLX_CACHE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.cacheBytes) : "unavailable"}</span></DetailItem>
+                    <DetailItem label="peak">{entry.worker.memory ? fmtBytes(entry.worker.memory.peakActiveBytes) : "unavailable"}</DetailItem>
+                  </>
+                ) : (
+                  <DetailItem label="vram">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "unavailable"}</DetailItem>
+                )}
+              </div>
+            </div>
+            {entry.worker.retention ? (
+              <div className="mt-2 border-t border-soft-border pt-2" data-model-details="retained-cache">
+                <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.62rem] uppercase tracking-[0.08em] text-muted">
+                  <span>Retained Cache</span>
+                  <Tag tone={entry.worker.retention.underPressure ? "warn" : "ok"}>
+                    {entry.worker.retention.underPressure ? "pressure" : "healthy"}
+                  </Tag>
+                </div>
+                <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-4">
+                  <DetailItem label="startup available">
+                    {typeof entry.worker.retention.activePolicy.inputs.startup_available_bytes === "number"
+                      ? fmtBytes(entry.worker.retention.activePolicy.inputs.startup_available_bytes) : "unknown"}
+                  </DetailItem>
+                  <DetailItem label="active reserve">
+                    {typeof entry.worker.retention.activePolicy.inputs.per_active_reserve_bytes === "number"
+                      ? fmtBytes(entry.worker.retention.activePolicy.inputs.per_active_reserve_bytes) : "unknown"}
+                  </DetailItem>
+                  <DetailItem label="retained total">{entry.worker.retention.retainedTotal}</DetailItem>
+                  <DetailItem label="sessions">{entry.worker.retention.retainedSessions}</DetailItem>
+                  <DetailItem label="anchors">{entry.worker.retention.retainedAnchors}</DetailItem>
+                  <DetailItem label="retained bytes">{fmtBytes(entry.worker.retention.retainedBytes)}</DetailItem>
+                  <DetailItem label="session bytes">{fmtBytes(entry.worker.retention.sessionBytes)}</DetailItem>
+                  <DetailItem label="anchor bytes">{fmtBytes(entry.worker.retention.anchorBytes)}</DetailItem>
+                  <DetailItem label="budget">{fmtBytes(entry.worker.retention.budgetBytes)}</DetailItem>
+                  <DetailItem label="high watermark">{fmtBytes(entry.worker.retention.highWatermarkBytes)}</DetailItem>
+                  <DetailItem label="low watermark">{fmtBytes(entry.worker.retention.lowWatermarkBytes)}</DetailItem>
+                  <DetailItem label="hard ceiling">{entry.worker.retention.hardCeiling}</DetailItem>
+                  <DetailItem label="evictions">{entry.worker.retention.evictionCount}</DetailItem>
+                  <DetailItem label="last reason">{entry.worker.retention.evictionReason ?? "none"}</DetailItem>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

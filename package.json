@@ -23,6 +23,7 @@
     "llama:build": "bun run runtime:llama:build",
     "mlx:build": "bun run runtime:mlx:build",
     "ensure:libexec": "bun run scripts/ensure-libexec.ts",
+    "release:macos:validate": "CLAP_SIGNING_DRY_RUN=1 bash scripts/macos-release.sh",
     "typecheck": "bun run ensure:libexec && bunx tsc --noEmit -p tsconfig.json",
     "test": "bun run ensure:libexec && bun test apps packages"
   },

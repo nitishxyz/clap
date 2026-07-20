@@ -51,7 +51,33 @@ export type PromSnapshot = {
   };
   activeRequests: number;
   queue: { inflight: number; queued: number; maxInflight: number; queueDepth: number };
-  loadedModels: Array<{ id: string; state: string; crashes?: number }>;
+  loadedModels: Array<{
+    id: string;
+    state: string;
+    crashes?: number;
+    retention?: {
+      maxActive: number;
+      active: number;
+      retainedTotal: number;
+      retainedSessions: number;
+      retainedAnchors: number;
+      retainedBytes: number;
+      sessionBytes: number;
+      anchorBytes: number;
+      budgetBytes: number;
+      highWatermarkBytes: number;
+      lowWatermarkBytes: number;
+      underPressure: boolean;
+      hardCeiling: number;
+      evictionReason?: string;
+      evictionCount: number;
+    };
+    tokenCapabilities?: {
+      effectiveContextWindow: number | null;
+      maxInputTokens: number | null;
+      maxOutputTokens: number | null;
+    };
+  }>;
   uptimeMs: number;
   histograms: {
     ttftMs: Histogram;
@@ -110,9 +136,41 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   gauge("clap_model_loaded", "Loaded models (1 per loaded model)", snapshot.loadedModels.map(
     (model) => [`{model="${esc(model.id)}",state="${esc(model.state)}"}`, 1],
   ));
+  for (const [kind, field] of [
+    ["context", "effectiveContextWindow"],
+    ["input", "maxInputTokens"],
+    ["output", "maxOutputTokens"],
+  ] as const) {
+    gauge(`clap_model_${kind}_token_limit`, `Effective model ${kind} token limit (omitted when unknown)`, snapshot.loadedModels
+      .filter((model) => model.tokenCapabilities?.[field] !== null && model.tokenCapabilities?.[field] !== undefined)
+      .map((model) => [`{model="${esc(model.id)}"}`, model.tokenCapabilities![field]!]));
+  }
   counter("clap_worker_crashes_total", "Worker crashes since server start", snapshot.loadedModels
     .filter((model) => (model.crashes ?? 0) > 0)
     .map((model) => [`{model="${esc(model.id)}"}`, model.crashes ?? 0]));
+  const retained = snapshot.loadedModels.filter((model) => model.retention !== undefined);
+  for (const [name, help, field] of [
+    ["clap_mlx_retention_max_active", "Maximum simultaneously active MLX retained entries", "maxActive"],
+    ["clap_mlx_retention_active", "Currently active MLX retained entries", "active"],
+    ["clap_mlx_retention_entries", "MLX retained entries", "retainedTotal"],
+    ["clap_mlx_retention_session_entries", "MLX retained session entries", "retainedSessions"],
+    ["clap_mlx_retention_anchor_entries", "MLX retained anchor entries", "retainedAnchors"],
+    ["clap_mlx_retention_bytes", "Physical bytes retained by MLX caches", "retainedBytes"],
+    ["clap_mlx_retention_session_bytes", "Physical bytes retained by MLX session caches", "sessionBytes"],
+    ["clap_mlx_retention_anchor_bytes", "Physical bytes retained by MLX prefix anchors", "anchorBytes"],
+    ["clap_mlx_retention_budget_bytes", "MLX retained cache byte budget", "budgetBytes"],
+    ["clap_mlx_retention_high_watermark_bytes", "MLX retained cache high watermark", "highWatermarkBytes"],
+    ["clap_mlx_retention_low_watermark_bytes", "MLX retained cache low watermark", "lowWatermarkBytes"],
+    ["clap_mlx_retention_hard_ceiling", "MLX retained entry hard ceiling", "hardCeiling"],
+  ] as const) {
+    gauge(name, help, retained.map((model) => [`{model="${esc(model.id)}"}`, model.retention![field]]));
+  }
+  gauge("clap_mlx_retention_under_pressure", "Whether MLX retained caches are under byte pressure", retained.map(
+    (model) => [`{model="${esc(model.id)}"}`, model.retention!.underPressure ? 1 : 0],
+  ));
+  counter("clap_mlx_retention_evictions_total", "MLX retained cache evictions", retained.map(
+    (model) => [`{model="${esc(model.id)}",reason="${esc(model.retention!.evictionReason ?? "none")}"}`, model.retention!.evictionCount],
+  ));
 
   lines.push("# HELP clap_request_ttft_ms Time to first token (excludes queue wait)", "# TYPE clap_request_ttft_ms histogram");
   lines.push(...snapshot.histograms.ttftMs.render("clap_request_ttft_ms"));

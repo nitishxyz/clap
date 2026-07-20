@@ -1,4 +1,5 @@
 import { makeRequestHistograms } from "./prometheus";
+import { CacheEventStore, type CacheCandidateDiagnostic, type PersistedCacheDecision } from "./cache-event-store";
 
 export type RequestStatus = "active" | "ok" | "error" | "cancelled";
 
@@ -31,6 +32,7 @@ export type RequestDetail = {
 };
 
 export type RequestRecord = {
+  source: "live";
   id: string;
   startedAt: number;
   endedAt?: number;
@@ -52,9 +54,17 @@ export type RequestRecord = {
   cacheHit?: boolean;
   reusedTokens?: number;
   reuseKind?: "slot" | "branch" | "anchor";
-  reuseScope?: "system" | "conversation";
+  reuseScope?: "system" | "conversation" | "session" | "agent" | "project" | "harness" | "tenant";
   sideRequest?: boolean;
   slot?: number;
+  cacheNamespace?: string;
+  donorSlot?: number;
+  targetSlot?: number;
+  evictedSlots?: number[];
+  cacheDecisionUs?: number;
+  plannedReuseTokens?: number;
+  realizedReuseTokens?: number;
+  cacheFallback?: string;
   finishReason?: string;
   toolCalls?: number;
   messageCount?: number;
@@ -90,10 +100,35 @@ export type RequestFinish = {
   cacheHit?: boolean;
   reusedTokens?: number;
   reuseKind?: "slot" | "branch" | "anchor";
-  reuseScope?: "system" | "conversation";
+  reuseScope?: "system" | "conversation" | "session" | "agent" | "project" | "harness" | "tenant";
   sideRequest?: boolean;
   slot?: number;
+  cacheNamespace?: string;
+  donorSlot?: number;
+  targetSlot?: number;
+  evictedSlots?: number[];
+  cacheDecisionUs?: number;
+  plannedReuseTokens?: number;
+  realizedReuseTokens?: number;
+  cacheFallback?: string;
+  cacheMissReason?: string;
+  workerLaunchId?: string;
+  donorGeneration?: number;
+  targetGeneration?: number;
+  cacheEvictions?: Array<{ slot: number; reason?: string }>;
+  cacheCandidates?: CacheCandidateDiagnostic[];
+  systemTokenHash?: string;
+  systemTokenCount?: number;
+  toolsTokenHash?: string;
+  toolsTokenCount?: number;
+  stableBoundaryTokenHash?: string;
+  stableBoundaryTokenCount?: number;
+  stableBoundaryKind?: string;
+  promptTokenHash?: string;
+  promptTokenCount?: number;
+  prefillMs?: number;
   finishReason?: string;
+  errorCode?: string;
   toolCalls?: number;
   error?: string;
   response?: RequestDetail["response"];
@@ -112,7 +147,18 @@ export type RequestHandle = {
 
 export type ChatLikeRequest = {
   messages?: Array<{ role: string; content?: unknown; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }>;
-  tools?: Array<{ function?: { name?: string } }>;
+  tools?: Array<{ function?: { name?: string; description?: string; parameters?: unknown } }>;
+  backend?: string;
+  cache?: {
+    namespace?: string;
+    tenant?: string;
+    project?: string;
+    harness?: string;
+    agent?: string;
+    session?: string;
+    priority?: "interactive" | "background";
+    side_request?: boolean;
+  };
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
@@ -166,7 +212,10 @@ export class MetricsCollector {
   private readonly eventLog: ServerEvent[] = [];
   private sequence = 0;
   private eventSequence = 0;
+  readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
+
+  constructor(readonly cacheEvents?: CacheEventStore) {}
 
   readonly totals: MetricsTotals = {
     requests: 0,
@@ -200,7 +249,8 @@ export class MetricsCollector {
   start(model: string, endpoint: string, stream: boolean): RequestHandle {
     this.sequence += 1;
     const record: RequestRecord = {
-      id: `r${this.sequence}`,
+      source: "live",
+      id: `r_${crypto.randomUUID()}`,
       startedAt: Date.now(),
       model,
       endpoint,
@@ -212,6 +262,10 @@ export class MetricsCollector {
     this.byId.set(record.id, record);
     this.totals.requests += 1;
     let finished = false;
+    let durableIdentity: Pick<PersistedCacheDecision,
+      "backend" | "namespaceFingerprint" | "sessionIdentitySource" | "sessionFingerprint" |
+      "projectFingerprint" | "agentFingerprint" | "harnessFingerprint" | "systemTokenHash" |
+      "toolsTokenHash" | "promptTokenHash" | "priority" | "side"> = {};
     // Queue accounting: a request may wait behind others on the same serial
     // worker. Time spent in the "queued" phase is tracked separately so TTFT
     // reflects actual model work instead of billing every waiting request for
@@ -231,6 +285,28 @@ export class MetricsCollector {
       capture: (request) => {
         const messages = request.messages ?? [];
         const kept = messages.slice(-MESSAGE_LIMIT);
+        const systemContent = messages.filter((message) => message.role === "system").map((message) => contentToString(message.content));
+        const toolShape = request.tools ?? [];
+        const promptShape = messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          tool_calls: message.tool_calls,
+        }));
+        const identity = request.cache;
+        durableIdentity = {
+          backend: request.backend,
+          namespaceFingerprint: this.cacheEvents?.fingerprint(identity?.namespace ?? identity?.tenant),
+          sessionIdentitySource: identity?.session ? "request.cache.session" : undefined,
+          sessionFingerprint: this.cacheEvents?.fingerprint(identity?.session),
+          projectFingerprint: this.cacheEvents?.fingerprint(identity?.project),
+          agentFingerprint: this.cacheEvents?.fingerprint(identity?.agent),
+          harnessFingerprint: this.cacheEvents?.fingerprint(identity?.harness),
+          systemTokenHash: this.cacheEvents?.fingerprint(systemContent),
+          toolsTokenHash: this.cacheEvents?.fingerprint(toolShape),
+          promptTokenHash: this.cacheEvents?.fingerprint({ messages: promptShape, tools: toolShape }),
+          priority: identity?.priority,
+          side: identity?.side_request,
+        };
         record.messageCount = messages.length;
         record.conversation = conversationFingerprint(record.model, messages);
         record.detail = {
@@ -301,6 +377,14 @@ export class MetricsCollector {
         record.reuseScope = result.reuseScope;
         record.sideRequest = result.sideRequest;
         record.slot = result.slot;
+        record.cacheNamespace = result.cacheNamespace;
+        record.donorSlot = result.donorSlot;
+        record.targetSlot = result.targetSlot;
+        record.evictedSlots = result.evictedSlots;
+        record.cacheDecisionUs = result.cacheDecisionUs;
+        record.plannedReuseTokens = result.plannedReuseTokens;
+        record.realizedReuseTokens = result.realizedReuseTokens;
+        record.cacheFallback = result.cacheFallback;
         record.finishReason = result.finishReason;
         record.toolCalls = result.toolCalls;
         record.error = result.error;
@@ -337,6 +421,55 @@ export class MetricsCollector {
           this.totals.reusedTokens += result.reusedTokens ?? 0;
         } else if (result.cacheHit === false) {
           this.totals.cacheMisses += 1;
+        }
+        if (record.status !== "active") {
+          this.cacheEvents?.append({
+            schemaVersion: 2,
+            source: "persisted",
+            requestId: record.id,
+            timestamp: record.endedAt,
+            serverLaunchId: this.serverLaunchId,
+            workerLaunchId: result.workerLaunchId,
+            model: record.model,
+            endpoint: record.endpoint,
+            ...durableIdentity,
+            systemTokenHash: result.systemTokenHash ? this.cacheEvents?.fingerprint(result.systemTokenHash) : durableIdentity.systemTokenHash,
+            systemTokenCount: result.systemTokenCount,
+            toolsTokenHash: result.toolsTokenHash ? this.cacheEvents?.fingerprint(result.toolsTokenHash) : durableIdentity.toolsTokenHash,
+            toolsTokenCount: result.toolsTokenCount,
+            ...(result.stableBoundaryTokenHash
+              && typeof result.stableBoundaryTokenCount === "number" && Number.isInteger(result.stableBoundaryTokenCount)
+              && result.stableBoundaryTokenCount > 0 && result.stableBoundaryKind ? {
+                stableBoundaryTokenHash: this.cacheEvents?.fingerprint(result.stableBoundaryTokenHash),
+                stableBoundaryTokenCount: result.stableBoundaryTokenCount,
+                stableBoundaryKind: result.stableBoundaryKind,
+              } : {}),
+            promptTokenHash: result.promptTokenHash ? this.cacheEvents?.fingerprint(result.promptTokenHash) : durableIdentity.promptTokenHash,
+            promptTokenCount: result.promptTokenCount ?? result.promptTokens,
+            status: record.status,
+            finishReason: result.finishReason,
+            errorCode: result.errorCode,
+            cache: {
+              hit: result.cacheHit,
+              missReason: result.cacheMissReason,
+              plannedTokens: result.plannedReuseTokens,
+              realizedTokens: result.realizedReuseTokens,
+              reusedTokens: result.reusedTokens,
+              kind: result.reuseKind,
+              scope: result.reuseScope,
+              donorSlot: result.donorSlot,
+              donorGeneration: result.donorGeneration,
+              targetSlot: result.targetSlot,
+              targetGeneration: result.targetGeneration,
+              evictions: result.cacheEvictions ?? result.evictedSlots?.map((slot) => ({ slot })),
+              fallback: result.cacheFallback,
+              decisionUs: result.cacheDecisionUs,
+              candidates: result.cacheCandidates?.slice(0, 32),
+            },
+            ttftMs: record.ttftMs,
+            prefillMs: result.prefillMs,
+            durationMs: record.durationMs,
+          });
         }
         this.history.push(record);
         if (this.history.length > HISTORY_LIMIT) {

@@ -32,6 +32,34 @@ extendZodWithOpenApi(z);
 
 export function createOpenApiDocument() {
   const registry = new OpenAPIRegistry();
+  const CacheDecisionSchema = z.object({
+    schemaVersion: z.number().int(),
+    source: z.literal("persisted"),
+    requestId: z.string(),
+    timestamp: z.number(),
+    serverLaunchId: z.string(),
+    workerLaunchId: z.string().optional(),
+    model: z.string(),
+    backend: z.string().optional(),
+    status: z.enum(["ok", "error", "cancelled"]),
+    cache: z.object({
+      hit: z.boolean().optional(),
+      missReason: z.string().optional(),
+      reusedTokens: z.number().optional(),
+      candidates: z.array(z.object({
+        slot: z.number().int(),
+        generation: z.number().optional(),
+        state: z.string().optional(),
+        sharedPrefixTokens: z.number(),
+        rejection: z.string().optional(),
+      })).optional(),
+    }).passthrough().optional(),
+  }).passthrough();
+  const CacheDecisionPageSchema = z.object({
+    source: z.literal("persisted"),
+    items: z.array(CacheDecisionSchema),
+    nextCursor: z.string().optional(),
+  });
 
   registry.register("ErrorResponse", ErrorResponseSchema);
   registry.register("HealthResponse", HealthResponseSchema);
@@ -57,6 +85,8 @@ export function createOpenApiDocument() {
   registry.register("OllamaPullRequest", OllamaPullRequestSchema);
   registry.register("OllamaChatRequest", OllamaChatRequestSchema);
   registry.register("OllamaGenerateRequest", OllamaGenerateRequestSchema);
+  registry.register("CacheDecision", CacheDecisionSchema);
+  registry.register("CacheDecisionPage", CacheDecisionPageSchema);
 
   registry.registerPath({
     method: "get",
@@ -98,6 +128,34 @@ export function createOpenApiDocument() {
     path: "/clap/v1/runtime/models",
     summary: "Loaded runtime model registry",
     responses: jsonResponses(LoadedModelsResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/clap/v1/cache-decisions",
+    summary: "Paginated privacy-safe historical cache decisions",
+    request: {
+      query: z.object({
+        request_id: z.string().optional(),
+        model: z.string().optional(),
+        backend: z.string().optional(),
+        status: z.enum(["ok", "error", "cancelled"]).optional(),
+        hit: z.enum(["true", "false"]).optional(),
+        since: z.coerce.number().optional(),
+        until: z.coerce.number().optional(),
+        limit: z.coerce.number().int().min(1).max(200).optional(),
+        cursor: z.string().optional(),
+      }),
+    },
+    responses: jsonResponses(CacheDecisionPageSchema),
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/clap/v1/cache-decisions/{id}",
+    summary: "Privacy-safe historical cache decision detail",
+    request: { params: z.object({ id: z.string() }) },
+    responses: jsonResponses(CacheDecisionSchema),
   });
 
   registry.registerPath({

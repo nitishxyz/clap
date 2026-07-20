@@ -1,0 +1,10 @@
+language = "C"
+include_guard = "CLAP_CACHE_H"
+cpp_compat = true
+usize_is_size_t = true
+
+[parse]
+parse_deps = false
+
+[export]
+prefix = ""

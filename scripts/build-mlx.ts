@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const packageDir = join(root, "native", "mlx");
+const cacheDir = join(root, "native", "cache");
 const libexec = join(root, "libexec");
 const buildConfig = process.env.CLAP_SWIFT_CONFIGURATION ?? "release";
 
@@ -13,6 +14,7 @@ if (process.platform !== "darwin" || process.arch !== "arm64") {
   process.exit(1);
 }
 
+await run(["cargo", "build", "--release", "-p", "clap-cache-ffi"], cacheDir);
 await run(["swift", "build", "--package-path", packageDir, "-c", buildConfig]);
 
 const binary = join(packageDir, ".build", "arm64-apple-macosx", buildConfig, "clap-mlx");
@@ -27,8 +29,8 @@ await chmod(join(libexec, "clap-mlx"), 0o755);
 await copyOrBuildMetalLibrary(binary, libexec);
 console.log(`built ${join(libexec, "clap-mlx")}`);
 
-async function run(command: string[]) {
-  const proc = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });
+async function run(command: string[], cwd = root) {
+  const proc = Bun.spawn(command, { cwd, stdout: "inherit", stderr: "inherit" });
   const code = await proc.exited;
   if (code !== 0) throw new Error(`${command.join(" ")} exited ${code}`);
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchRequestDetail, type DashboardRequest } from "@/lib/api";
 import { fmtClock, fmtDuration, fmtTokens } from "@/lib/format";
+import { cacheReusePercent } from "./RequestTables";
 import { Tag } from "./Shared";
 
 const roleColor: Record<string, string> = {
@@ -15,6 +16,107 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div className="border border-soft-border bg-panel-strong px-2 py-1.5">
       <div className="text-[0.62rem] uppercase tracking-[0.06em] text-muted">{label}</div>
       <div className="mt-0.5 text-[0.8rem]">{children}</div>
+    </div>
+  );
+}
+
+function fmtDecisionLatency(us: number): string {
+  if (us < 1000) return `${Math.round(us)}µs`;
+  return `${(us / 1000).toFixed(1)}ms`;
+}
+
+const unavailable = <span className="text-muted">unavailable</span>;
+
+// Cache outcome is reported independently of request intent (side vs primary)
+// and of final status: cancelled/error requests may still carry the decision.
+export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
+  const pct = cacheReusePercent(record);
+  const reused = record.reusedTokens ?? (record.cacheHit === false ? 0 : undefined);
+  const diagnostics = record.cacheDiagnostics;
+  return (
+    <div>
+      <div className="text-[0.68rem] uppercase tracking-[0.08em] text-muted">cache decision</div>
+      <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <Field label="decision">
+          {record.cacheHit === true ? (
+            <Tag tone="hit" title="prefix cache hit: reused tokens came from the KV cache instead of being re-prefilled">hit</Tag>
+          ) : record.cacheHit === false ? (
+            <Tag title="prefix cache miss: the full prompt was prefilled">miss</Tag>
+          ) : (
+            unavailable
+          )}
+          {record.status !== "ok" && record.status !== "active" ? (
+            <span className="ml-2 text-muted">· from {record.status} request</span>
+          ) : null}
+        </Field>
+        <Field label="intent">
+          {record.sideRequest ? (
+            <Tag tone="warn" title="side request: branched from primary work; intent is independent of cache hit/miss">side request</Tag>
+          ) : (
+            "primary"
+          )}
+        </Field>
+        <Field label="reused tokens">
+          {reused !== undefined ? `${fmtTokens(reused)} tok${pct !== undefined ? ` · ${pct}%` : ""}` : unavailable}
+        </Field>
+        <Field label="kind">{record.reuseKind ?? unavailable}</Field>
+        <Field label="scope">{record.reuseScope ?? unavailable}</Field>
+        <Field label="namespace">{record.cacheNamespace ?? unavailable}</Field>
+        <Field label="planned / realized">
+          {record.plannedReuseTokens === undefined && record.realizedReuseTokens === undefined
+            ? unavailable
+            : `${record.plannedReuseTokens !== undefined ? `${fmtTokens(record.plannedReuseTokens)} tok` : "unavailable"} / ${record.realizedReuseTokens !== undefined ? `${fmtTokens(record.realizedReuseTokens)} tok` : "unavailable"}`}
+        </Field>
+        <Field label="donor → target">
+          {record.donorSlot === undefined && record.targetSlot === undefined
+            ? unavailable
+            : `${record.donorSlot !== undefined ? `s${record.donorSlot}` : "unavailable"} → ${record.targetSlot !== undefined ? `s${record.targetSlot}` : "unavailable"}`}
+        </Field>
+        <Field label="evictions">
+          {record.evictedSlots === undefined
+            ? unavailable
+            : record.evictedSlots.length
+              ? record.evictedSlots.map((slot) => `s${slot}`).join(", ")
+              : "none"}
+        </Field>
+        <Field label="fallback">{record.cacheFallback ?? unavailable}</Field>
+        <Field label="decision latency">
+          {record.cacheDecisionUs !== undefined ? fmtDecisionLatency(record.cacheDecisionUs) : unavailable}
+        </Field>
+      </div>
+      {diagnostics ? (
+        <div className="mt-2 border border-soft-border bg-panel-strong p-2">
+          <div className="text-[0.64rem] uppercase tracking-[0.07em] text-muted">privacy-safe persisted diagnostics</div>
+          <div className="mt-1 text-[0.72rem] text-muted">
+            backend {diagnostics.backend ?? "unknown"} · server {diagnostics.serverLaunchId.slice(0, 8)}
+            {diagnostics.workerLaunchId ? ` · worker ${diagnostics.workerLaunchId.slice(0, 8)}` : ""}
+            {diagnostics.cache?.missReason ? ` · miss ${diagnostics.cache.missReason}` : ""}
+            {diagnostics.errorCode ? ` · error ${diagnostics.errorCode}` : ""}
+          </div>
+          {diagnostics.cache?.candidates?.length ? (
+            <div className="mt-1.5 grid gap-1">
+              {diagnostics.cache.candidates.map((candidate, index) => (
+                <div key={`${candidate.slot}-${candidate.generation ?? index}`} className="text-[0.7rem]">
+                  slot {candidate.slot}
+                  {candidate.generation !== undefined ? ` gen ${candidate.generation}` : ""}
+                  {candidate.state ? ` · ${candidate.state}` : ""}
+                  {` · shared ${fmtTokens(candidate.sharedPrefixTokens)} tok`}
+                  {candidate.selected ? " · selected" : candidate.rejection
+                    ? ` · rejected: ${candidate.rejection}` : " · eligible (lower rank)"}
+                  {candidate.namespaceCompatible === false ? " · namespace mismatch" : ""}
+                  {candidate.modelCompatible === false ? " · model mismatch" : ""}
+                  {candidate.sessionCompatible === false ? " · session mismatch" : ""}
+                  {candidate.materialized === false ? " · not materialized" : ""}
+                  {candidate.trimEligible === false ? " · cannot trim" : ""}
+                  {candidate.copyEligible === false ? " · cannot copy" : ""}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-1 text-[0.7rem] text-muted">candidate diagnostics unavailable</div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -118,14 +220,12 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
                 in {fmtTokens(record.promptTokens)} · out {fmtTokens(record.completionTokens)}
                 {record.tokensPerSecond ? ` · ${record.tokensPerSecond} tok/s` : ""}
               </Field>
-              <Field label="kv cache">
-                {record.sideRequest
-                  ? "side request"
-                  : record.cacheHit === true
-                    ? `hit${record.reuseKind ? ` · ${record.reuseKind}` : ""}${record.reuseScope ? ` · ${record.reuseScope}` : ""}${record.reusedTokens ? ` · ${fmtTokens(record.reusedTokens)} reused` : ""}`
-                    : record.cacheHit === false
-                      ? "miss"
-                      : "-"}
+              <Field label="intent">
+                {record.sideRequest ? (
+                  <Tag tone="warn" title="side request: branched from primary work; intent is independent of cache hit/miss">side request</Tag>
+                ) : (
+                  "primary"
+                )}
               </Field>
               <Field label="params">
                 {detail ? [
@@ -139,6 +239,8 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
                 {detail?.toolNames.length ? `${detail.toolNames.length}: ${detail.toolNames.slice(0, 6).join(", ")}${detail.toolNames.length > 6 ? "…" : ""}` : "none"}
               </Field>
             </div>
+
+            <CacheDecisionSection record={record} />
 
             {record.error ? (
               <div className="border border-err/40 bg-panel-strong p-2 text-[0.76rem] text-err">{record.error}</div>

@@ -1,10 +1,31 @@
 import Foundation
+import Darwin
+import ClapCacheBridge
+import ClapCachePolicy
 import HuggingFace
 import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import Tokenizers
+
+private func startupAvailableMemoryBytes() -> UInt64? {
+  var statistics = vm_statistics64()
+  var count = mach_msg_type_number_t(
+    MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+  let status = withUnsafeMutablePointer(to: &statistics) { pointer in
+    pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+      host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+    }
+  }
+  var pageSize: vm_size_t = 0
+  guard status == KERN_SUCCESS,
+        host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS else { return nil }
+  let pages = UInt64(statistics.free_count) + UInt64(statistics.inactive_count) +
+    UInt64(statistics.purgeable_count)
+  let bytes = pages.multipliedReportingOverflow(by: UInt64(pageSize))
+  return bytes.overflow ? nil : bytes.partialValue
+}
 
 struct ChatMessage: Decodable {
   let role: String
@@ -25,12 +46,78 @@ struct WorkerUsage: Encodable {
   let completion_tokens: Int
 }
 
+struct WorkerCacheCandidate: Encodable {
+  let slot: Int
+  let generation: UInt64
+  let state: String
+  let shared_prefix_tokens: Int
+  let namespace_compatible: Bool
+  let model_compatible: Bool
+  let session_compatible: Bool
+  let generation_compatible: Bool
+  let busy_eligible: Bool
+  let lease_eligible: Bool
+  let materialized: Bool
+  let trim_eligible: Bool
+  let copy_eligible: Bool
+  let eligible: Bool
+  let selected: Bool
+  let rejection: String?
+}
+
 struct WorkerCache: Encodable {
   let hit: Bool
   let reused_tokens: Int
   let reuse_kind: String?
   let reuse_scope: String?
   let side_request: Bool
+  let namespace: String?
+  let donor_slot: Int?
+  let target_slot: Int
+  let evicted_slots: [Int]
+  let decision_us: UInt64
+  let planned_reuse_tokens: Int
+  let realized_reuse_tokens: Int
+  let fallback: String?
+  let miss_reason: String?
+  let candidates: [WorkerCacheCandidate]
+  let prompt_token_hash: String
+  let prompt_token_count: Int
+  let stable_boundary_token_hash: String?
+  let stable_boundary_token_count: Int
+  let stable_boundary_kind: String?
+}
+
+func tokenFingerprint(_ tokens: [Int], count: Int) -> String {
+  let limit = min(max(count, 0), tokens.count)
+  var bytes = Array((cacheTelemetryKey + "|tokens-v1|\(limit)|").utf8)
+  for token in tokens.prefix(limit) {
+    var value = UInt32(truncatingIfNeeded: token).littleEndian
+    withUnsafeBytes(of: &value) { bytes.append(contentsOf: $0) }
+  }
+  return (0..<4).map { domain -> String in
+    var hash = UInt64(1_469_598_103_934_665_603) ^ UInt64(domain)
+    for byte in bytes {
+      hash ^= UInt64(byte)
+      hash &*= 1_099_511_628_211
+    }
+    return String(format: "%016llx", hash)
+  }.joined()
+}
+
+func cacheCandidateState(_ state: UInt32) -> String {
+  switch state {
+  case UInt32(CC_SLOT_SESSION): return "session"
+  case UInt32(CC_SLOT_PROMPT_BOUNDARY): return "prompt_boundary"
+  case UInt32(CC_SLOT_ANCHOR): return "anchor"
+  default: return "empty"
+  }
+}
+
+func cacheCandidateRejection(_ rejection: UInt32) -> String? {
+  [1: "namespace", 2: "model_domain", 3: "generation", 4: "busy_lease",
+   5: "materialization", 6: "session", 7: "nontrim", 8: "capability",
+   9: "min_prefix", 10: "capacity", 11: "absent_anchor", 12: "lower_rank"][rejection]
 }
 
 struct WorkerPrefill: Encodable {
@@ -42,6 +129,91 @@ struct WorkerMemory: Encodable {
   let active_bytes: Int
   let cache_bytes: Int
   let peak_active_bytes: Int
+}
+
+struct WorkerActivePolicyInputs: Encodable {
+  let physical_memory_bytes: UInt64
+  let startup_available_bytes: UInt64?
+  let model_active_bytes: UInt64?
+  let retained_budget_bytes: UInt64
+  let retained_bytes: UInt64
+  let retained_growth_reserve_bytes: UInt64
+  let os_reserve_bytes: UInt64
+  let usable_runtime_bytes: UInt64
+  let per_active_reserve_bytes: UInt64
+  let processor_count: Int
+  let hybrid_or_recurrent: Bool
+}
+
+struct WorkerActivePolicy: Encodable {
+  let mode: String
+  let selected_max: Int
+  let backend_ceiling: Int
+  let hardware_ceiling: Int
+  let model_ceiling: Int
+  let memory_ceiling: Int
+  let reason: String
+  let inputs: WorkerActivePolicyInputs
+}
+
+struct WorkerRetention: Encodable {
+  let max_active: Int
+  let queued: Int
+  let previous_max_active: Int?
+  let last_adjustment_reason: String?
+  let last_adjustment_at: String?
+  let retained_growth_reserve_bytes: UInt64
+  let global_resident_memory_bytes: UInt64?
+  let pressure_state: String?
+  let active_policy: WorkerActivePolicy
+  let active: Int
+  let retained_total: Int
+  let retained_sessions: Int
+  let retained_anchors: Int
+  let retained_bytes: UInt64
+  let session_bytes: UInt64
+  let anchor_bytes: UInt64
+  let budget_bytes: UInt64
+  let high_watermark_bytes: UInt64
+  let low_watermark_bytes: UInt64
+  let under_pressure: Bool
+  let hard_ceiling: Int
+  let eviction_reason: String?
+  let eviction_count: UInt64
+}
+
+struct WorkerTokenCapabilities: Encodable {
+  enum CodingKeys: String, CodingKey {
+    case model_context_window
+    case effective_context_window
+    case max_input_tokens
+    case max_output_tokens
+    case model_context_window_source
+    case max_output_tokens_source
+    case backend_allocation_cap
+    case user_configured_override
+  }
+
+  let model_context_window: Int?
+  let effective_context_window: Int?
+  let max_input_tokens: Int?
+  let max_output_tokens: Int?
+  let model_context_window_source: String?
+  let max_output_tokens_source: String?
+  let backend_allocation_cap: Int?
+  let user_configured_override: Int?
+
+  func encode(to encoder: any Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(model_context_window, forKey: .model_context_window)
+    try container.encode(effective_context_window, forKey: .effective_context_window)
+    try container.encode(max_input_tokens, forKey: .max_input_tokens)
+    try container.encode(max_output_tokens, forKey: .max_output_tokens)
+    try container.encode(model_context_window_source, forKey: .model_context_window_source)
+    try container.encode(max_output_tokens_source, forKey: .max_output_tokens_source)
+    try container.encode(backend_allocation_cap, forKey: .backend_allocation_cap)
+    try container.encode(user_configured_override, forKey: .user_configured_override)
+  }
 }
 
 struct WorkerMessage: Encodable {
@@ -60,6 +232,8 @@ struct WorkerMessage: Encodable {
   let cache: WorkerCache?
   let prefill: WorkerPrefill?
   let memory: WorkerMemory?
+  let retention: WorkerRetention?
+  let token_capabilities: WorkerTokenCapabilities?
 }
 
 // OpenAI-style stop can be a bare string or an array of strings.
@@ -88,6 +262,14 @@ struct ControlRequest: Decodable {
   let id: String?
   let type: String?
   let model: String?
+  let max_active: Int?
+  let previous_max_active: Int?
+  let limiting_reason: String?
+  let last_adjustment_reason: String?
+  let last_adjustment_at: String?
+  let retained_growth_reserve_bytes: UInt64?
+  let global_resident_memory_bytes: UInt64?
+  let pressure_state: String?
   let messages: [ChatMessage]?
   let stream: Bool?
   let max_tokens: Int?
@@ -100,6 +282,7 @@ struct ControlRequest: Decodable {
   let repetition_penalty: Double?
   let presence_penalty: Double?
   let frequency_penalty: Double?
+  let cache: CacheIntent?
 }
 
 func memorySnapshot() -> WorkerMemory {
@@ -107,8 +290,8 @@ func memorySnapshot() -> WorkerMemory {
   return WorkerMemory(active_bytes: snapshot.activeMemory, cache_bytes: snapshot.cacheMemory, peak_active_bytes: snapshot.peakMemory)
 }
 
-func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, code: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, prefill: WorkerPrefill? = nil, memory: WorkerMemory? = nil) {
-  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, code: code, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, prefill: prefill, memory: memory)
+func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, code: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, prefill: WorkerPrefill? = nil, memory: WorkerMemory? = nil, retention: WorkerRetention? = nil, tokenCapabilities: WorkerTokenCapabilities? = nil) {
+  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, code: code, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, prefill: prefill, memory: memory, retention: retention, token_capabilities: tokenCapabilities)
   let data = try! JSONEncoder().encode(message)
   FileHandle.standardOutput.write(data)
   FileHandle.standardOutput.write(Data([0x0a]))
@@ -349,7 +532,6 @@ func declaredEosTokenIds(_ url: URL) -> Set<Int> {
 }
 
 func main() async {
-  do {
     guard #available(macOS 14.0, *) else {
       emit(error: "clap-mlx requires macOS 14 or newer on Apple Silicon")
       exit(2)
@@ -361,13 +543,34 @@ func main() async {
 
     var loadedModel: String?
     var loadedDirectory: URL?
-    var loadedContainer: ModelContainer?
     var languageModel: (any LanguageModel)?
     var tokenizer: (any MLXLMCommon.Tokenizer)?
     var eosTokenIds: Set<Int> = []
+    var declaredModelContextLength = 0
     var modelContextLength = 0
+    var modelMaxOutputTokens = 0
+    var modelContextLengthSource: String?
+    var modelMaxOutputTokensSource: String?
 
     let env = ProcessInfo.processInfo.environment
+    let physicalMemoryBytes = ProcessInfo.processInfo.physicalMemory
+    let availableMemoryAtStartup = startupAvailableMemoryBytes()
+    let retentionConfig = RetentionConfiguration.fromEnvironment(env,
+      physicalMemoryBytes: physicalMemoryBytes,
+      startupAvailableMemoryBytes: availableMemoryAtStartup)
+    let retainedGrowthMinimumBytes = UInt64(env["CLAP_MLX_RETAINED_GROWTH_MIN_BYTES"] ?? "")
+      ?? 64 * 1_048_576
+    let retainedGrowthReservePercent = UInt64(env["CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT"] ?? "")
+      ?? 10
+    var activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
+      physicalMemoryBytes: physicalMemoryBytes,
+      startupAvailableMemoryBytes: availableMemoryAtStartup, modelActiveBytes: nil,
+      retainedBudgetBytes: retentionConfig.physicalByteBudget,
+      retainedGrowthMinimumBytes: retainedGrowthMinimumBytes,
+      retainedGrowthReservePercent: retainedGrowthReservePercent,
+      retainedCeiling: retentionConfig.hardCeiling,
+      processorCount: ProcessInfo.processInfo.processorCount))
+    var maxActive = activePolicy.selectedMax
     // Context window policy (parity with the llama worker): default to the
     // model's trained context; CLAP_MLX_CONTEXT pins it, and
     // CLAP_MLX_MAX_SESSION_CTX caps any single session's share.
@@ -380,25 +583,8 @@ func main() async {
     default: nil
     }
 
-    func declaredContextLength(_ url: URL) -> Int {
-      guard let data = try? Data(contentsOf: url),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
-      func read(_ dict: [String: Any]) -> Int {
-        for key in ["max_position_embeddings", "n_positions", "max_sequence_length"] {
-          if let value = dict[key] as? Int, value > 0 { return value }
-        }
-        return 0
-      }
-      let direct = read(json)
-      if direct > 0 { return direct }
-      if let textConfig = json["text_config"] as? [String: Any] { return read(textConfig) }
-      return 0
-    }
-
-    // Multi-session token-level KV cache slots (mirrors the llama.cpp
-    // worker): each slot remembers the exact token ids resident in its cache.
-    // Requests pick the slot with the longest common prefix (any number of
-    // interleaved sessions stay warm); misses recycle the LRU slot.
+    // Physical KV slots mirror Rust coordinator state. The worker executes
+    // authorized operations but does not independently choose cache policy.
     final class KVSlot {
       var caches: [KVCache] = []
       var tokens: [Int] = []
@@ -413,13 +599,96 @@ func main() async {
       // A request-local end-of-prompt snapshot restored after decode. Unlike
       // a dedicated prefix anchor, this remains the session's normal slot.
       var isPromptBoundary = false
+      var coordinatorGeneration: UInt64 = 0
+      var cacheIdentity: PhysicalCacheIdentity? = nil
     }
-    let slotLimit = max(1, Int(ProcessInfo.processInfo.environment["CLAP_MLX_SLOTS"] ?? "4") ?? 4)
-    var kvSlots: [KVSlot] = []
+    var retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
+      hardCeiling: retentionConfig.hardCeiling)
+    var kvSlots: [KVSlot] {
+      retainedRegistry.slotIDs.compactMap { retainedRegistry.entry(for: $0) }
+    }
     var kvUseCounter: UInt64 = 0
+    var cacheCoordinator: CacheCoordinator?
+    var cacheDomain = ""
+    var lastEvictionReason: String?
+    var previousMaxActive: Int?
+    var coordinatedLimitingReason: String?
+    var lastAdjustmentReason: String?
+    var lastAdjustmentAt: String?
+    var coordinatedGrowthReserveBytes: UInt64?
+    var globalResidentMemoryBytes: UInt64?
+    var pressureState: String?
+    var activePolicyModelBytes: UInt64?
+    var activePolicyHybrid = false
     func invalidateKVCache() {
-      kvSlots = []
+      try? cacheCoordinator?.reset()
+      cacheCoordinator = nil
+      retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
+        hardCeiling: retentionConfig.hardCeiling)
       kvUseCounter = 0
+      lastEvictionReason = nil
+    }
+
+    func clearPhysicalSlot(_ slot: KVSlot) {
+      slot.caches = []
+      slot.tokens = []
+      slot.isAnchor = false
+      slot.isPromptBoundary = false
+      slot.anchorScope = nil
+      slot.cacheIdentity = nil
+      slot.coordinatorGeneration = 0
+    }
+
+    func physicalCacheBytes(_ caches: [KVCache]) -> UInt64 {
+      let arrays = caches.flatMap(\.state).map {
+        CacheArrayDescriptor(storageIdentity: UInt64(bitPattern:
+          Int64(ObjectIdentifier($0).hashValue)),
+          elementCount: $0.size, itemSize: $0.itemSize,
+          allocatedBytes: $0.nbytes)
+      }
+      return max(1, PhysicalCacheByteEstimator.estimate(arrays: arrays))
+    }
+
+    func retentionSnapshot(queued: Int = 0) -> WorkerRetention? {
+      guard let coordinator = cacheCoordinator,
+            let telemetry = try? coordinator.retentionTelemetry() else { return nil }
+      let retainedBytes = min(telemetry.total_bytes, retentionConfig.physicalByteBudget)
+      let remainingBudget = retentionConfig.physicalByteBudget - retainedBytes
+      let growthReserve = min(remainingBudget, max(retainedGrowthMinimumBytes,
+        remainingBudget / 100 * min(100, retainedGrowthReservePercent)))
+      let policy = WorkerActivePolicy(mode: activePolicy.mode,
+        selected_max: maxActive, backend_ceiling: activePolicy.backendCeiling,
+        hardware_ceiling: activePolicy.hardwareCeiling, model_ceiling: activePolicy.modelCeiling,
+        memory_ceiling: activePolicy.memoryCeiling,
+        reason: coordinatedLimitingReason ?? activePolicy.reason,
+        inputs: WorkerActivePolicyInputs(physical_memory_bytes: physicalMemoryBytes,
+          startup_available_bytes: availableMemoryAtStartup,
+          model_active_bytes: activePolicyModelBytes,
+          retained_budget_bytes: retentionConfig.physicalByteBudget,
+          retained_bytes: retainedBytes,
+          retained_growth_reserve_bytes: growthReserve,
+          os_reserve_bytes: activePolicy.osReserveBytes,
+          usable_runtime_bytes: activePolicy.usableRuntimeBytes,
+          per_active_reserve_bytes: activePolicy.perActiveReserveBytes,
+          processor_count: ProcessInfo.processInfo.processorCount,
+          hybrid_or_recurrent: activePolicyHybrid))
+      return WorkerRetention(max_active: maxActive, queued: queued,
+        previous_max_active: previousMaxActive,
+        last_adjustment_reason: lastAdjustmentReason,
+        last_adjustment_at: lastAdjustmentAt,
+        retained_growth_reserve_bytes: coordinatedGrowthReserveBytes ?? growthReserve,
+        global_resident_memory_bytes: globalResidentMemoryBytes,
+        pressure_state: pressureState, active_policy: policy,
+        active: retainedRegistry.activeCount,
+        retained_total: Int(telemetry.total_slots), retained_sessions: Int(telemetry.session_slots),
+        retained_anchors: Int(telemetry.anchor_slots), retained_bytes: telemetry.total_bytes,
+        session_bytes: telemetry.session_bytes, anchor_bytes: telemetry.anchor_bytes,
+        budget_bytes: telemetry.physical_byte_budget,
+        high_watermark_bytes: telemetry.high_watermark_bytes,
+        low_watermark_bytes: telemetry.low_watermark_bytes,
+        under_pressure: telemetry.under_pressure != 0,
+        hard_ceiling: retentionConfig.hardCeiling, eviction_reason: lastEvictionReason,
+        eviction_count: telemetry.evictions)
     }
 
     func loadModel(_ model: String, directory: URL) async throws {
@@ -428,7 +697,6 @@ func main() async {
       let box = await container.perform { context in
         UncheckedBox(value: (context.model, context.tokenizer, context.configuration.extraEOSTokens))
       }
-      loadedContainer = container
       languageModel = box.value.0
       tokenizer = box.value.1
       loadedModel = model
@@ -443,14 +711,58 @@ func main() async {
       for file in ["generation_config.json", "config.json"] {
         eosTokenIds.formUnion(declaredEosTokenIds(directory.appendingPathComponent(file)))
       }
-      modelContextLength = contextOverride > 0
-        ? contextOverride
-        : declaredContextLength(directory.appendingPathComponent("config.json"))
-      if kvBits != nil { debugLog("kv cache quantization enabled: \(kvBits!)-bit") }
-      debugLog("context length: \(modelContextLength > 0 ? String(modelContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
-      debugLog("model loaded; eos token ids: \(eosTokenIds.sorted())")
+      let metadata = DeclaredModelMetadata.load(from: directory)
+      declaredModelContextLength = metadata.context?.value ?? 0
+      modelContextLengthSource = metadata.context?.source
+      let knownContextCaps = [declaredModelContextLength, contextOverride, sessionCap].filter { $0 > 0 }
+      modelContextLength = knownContextCaps.min() ?? 0
+      modelMaxOutputTokens = metadata.maxOutputTokens?.value ?? 0
+      modelMaxOutputTokensSource = metadata.maxOutputTokens?.source
+      let outputOverride = Int(env["CLAP_MLX_MAX_OUTPUT"] ?? "") ?? 0
+      if outputOverride > 0 {
+        if modelMaxOutputTokens == 0 || outputOverride < modelMaxOutputTokens {
+          modelMaxOutputTokens = outputOverride
+          modelMaxOutputTokensSource = "environment:CLAP_MLX_MAX_OUTPUT"
+        }
+      }
+      cacheDomain = "\(model)|mlx|ctx=\(modelContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
       Memory.clearCache()
       let memory = memorySnapshot()
+      activePolicyModelBytes = memory.active_bytes > 0 ? UInt64(memory.active_bytes) : nil
+      let capabilityText = [metadata.architecture, metadata.modelType]
+        .compactMap { $0?.lowercased() }.joined(separator: " ")
+      activePolicyHybrid = ["hybrid", "recurrent", "mamba", "deltanet", "ssm"]
+        .contains { capabilityText.contains($0) }
+      activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
+        explicitMax: Int(env["CLAP_MAX_ACTIVE"] ?? ""),
+        physicalMemoryBytes: physicalMemoryBytes,
+        startupAvailableMemoryBytes: availableMemoryAtStartup,
+        modelActiveBytes: activePolicyModelBytes,
+        retainedBudgetBytes: retentionConfig.physicalByteBudget,
+        retainedGrowthMinimumBytes: retainedGrowthMinimumBytes,
+        retainedGrowthReservePercent: retainedGrowthReservePercent,
+        retainedCeiling: retentionConfig.hardCeiling,
+        processorCount: ProcessInfo.processInfo.processorCount,
+        isHybridOrRecurrent: activePolicyHybrid))
+      maxActive = activePolicy.selectedMax
+      retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
+        hardCeiling: retentionConfig.hardCeiling)
+      do {
+        cacheCoordinator = try CacheCoordinator(retention: retentionConfig, capacity: Int.max / 4)
+        for slotID in 0..<retentionConfig.initialEntries {
+          let slot = KVSlot()
+          slot.coordinatorGeneration = try cacheCoordinator?.slot(slotID).generation ?? 0
+          try retainedRegistry.register(slotID: UInt32(slotID), entry: slot)
+        }
+      } catch {
+        cacheCoordinator = nil
+        debugLog("cache coordinator unavailable; cache admission fails closed: \(error)")
+      }
+      if kvBits != nil { debugLog("kv cache quantization enabled: \(kvBits!)-bit") }
+      debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(modelContextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(modelMaxOutputTokensSource ?? "unknown")")
+      debugLog("context length: \(modelContextLength > 0 ? String(modelContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
+      debugLog("model loaded; eos token ids: \(eosTokenIds.sorted())")
+      debugLog("active concurrency: mode=\(activePolicy.mode) selected=\(activePolicy.selectedMax) reason=\(activePolicy.reason) memory_ceiling=\(activePolicy.memoryCeiling)")
       debugLog("mlx memory after load: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
     }
 
@@ -474,7 +786,6 @@ func main() async {
 
     let prefillChunk = 512
     let decodeStepsPerPass = 6
-    let parallelLimit = max(1, Int(ProcessInfo.processInfo.environment["CLAP_MLX_PARALLEL"] ?? "") ?? slotLimit)
 
     final class ActiveRequest {
       let id: String?
@@ -484,6 +795,12 @@ func main() async {
       let reusedTokens: Int
       let reuseKind: String?
       let reuseScope: String?
+      let cacheIdentity: CacheIdentity
+      let cacheDecision: CacheDecision?
+      let cacheCandidates: [CacheCandidateEvaluation]
+      let cacheEvictions: [Int]
+      let cacheFallback: String?
+      let slotIndex: Int
       let slot: KVSlot
       var caches: [KVCache]
       var promptBoundaryCaches: [KVCache]? = nil
@@ -512,7 +829,7 @@ func main() async {
       let stops: [String]
       let holdback: Int
 
-      init(id: String?, streaming: Bool, maxTokens: Int, promptTokens: [Int], reusedTokens: Int, reuseKind: String?, reuseScope: String?, slot: KVSlot, caches: [KVCache], fedTokens: [Int], suffix: [Int], detokenizer: NaiveStreamingDetokenizer, parameters: GenerateParameters, stops: [String]) {
+      init(id: String?, streaming: Bool, maxTokens: Int, promptTokens: [Int], reusedTokens: Int, reuseKind: String?, reuseScope: String?, cacheIdentity: CacheIdentity, cacheDecision: CacheDecision?, cacheCandidates: [CacheCandidateEvaluation], cacheEvictions: [Int], cacheFallback: String?, slotIndex: Int, slot: KVSlot, caches: [KVCache], fedTokens: [Int], suffix: [Int], detokenizer: NaiveStreamingDetokenizer, parameters: GenerateParameters, stops: [String]) {
         self.id = id
         self.streaming = streaming
         self.maxTokens = maxTokens
@@ -520,6 +837,12 @@ func main() async {
         self.reusedTokens = reusedTokens
         self.reuseKind = reuseKind
         self.reuseScope = reuseScope
+        self.cacheIdentity = cacheIdentity
+        self.cacheDecision = cacheDecision
+        self.cacheCandidates = cacheCandidates
+        self.cacheEvictions = cacheEvictions
+        self.cacheFallback = cacheFallback
+        self.slotIndex = slotIndex
         self.slot = slot
         self.caches = caches
         self.fedTokens = fedTokens
@@ -545,13 +868,26 @@ func main() async {
       return offset > 0 ? offset : fallback
     }
 
+    func ensureAdmissionSlot() throws {
+      guard !kvSlots.contains(where: { !$0.busy && $0.caches.isEmpty }) else { return }
+      guard retainedRegistry.count < retentionConfig.hardCeiling,
+            let coordinator = cacheCoordinator else { return }
+      let registered = try coordinator.registerSlot()
+      let slot = KVSlot()
+      slot.coordinatorGeneration = registered.generation
+      try retainedRegistry.register(slotID: UInt32(registered.slot), entry: slot)
+    }
+
     func finalize(_ req: ActiveRequest) {
       req.slot.busy = false
+      retainedRegistry.release(slotID: UInt32(req.slotIndex))
       if req.failed {
-        req.slot.caches = []
-        req.slot.tokens = []
-        req.slot.isPromptBoundary = false
-        req.slot.anchorScope = nil
+        let generation = req.slot.coordinatorGeneration
+        clearPhysicalSlot(req.slot)
+        if let coordinator = cacheCoordinator, generation != 0 {
+          req.slot.coordinatorGeneration = (try? coordinator.invalidate(
+            slot: req.slotIndex, generation: generation)) ?? 0
+        }
         return
       }
       if let continuationBoundary = req.continuationBoundary,
@@ -576,6 +912,24 @@ func main() async {
         req.slot.isPromptBoundary = false
         req.slot.anchorScope = nil
       }
+      if let coordinator = cacheCoordinator, req.slot.coordinatorGeneration != 0 {
+        do {
+          req.slot.coordinatorGeneration = try coordinator.confirm(
+            slot: req.slotIndex, generation: req.slot.coordinatorGeneration,
+            tokens: req.slot.tokens,
+            state: req.slot.isPromptBoundary ? UInt32(CC_SLOT_PROMPT_BOUNDARY) : UInt32(CC_SLOT_SESSION),
+            busy: true, physicalBytes: physicalCacheBytes(req.slot.caches))
+          try coordinator.setBusy(slot: req.slotIndex,
+                                  generation: req.slot.coordinatorGeneration, busy: false)
+        } catch {
+          let generation = req.slot.coordinatorGeneration
+          if generation != 0 {
+            _ = try? coordinator.invalidate(slot: req.slotIndex, generation: generation)
+          }
+          req.slot.coordinatorGeneration = 0
+          debugLog("cache finalize metadata failed: \(error)")
+        }
+      }
       // Flush any text held back for stop-sequence matching.
       if req.streaming && !req.cancelled && req.emitted < req.collected.count {
         let tail = String(req.collected.dropFirst(req.emitted))
@@ -586,7 +940,46 @@ func main() async {
         emit(id: req.id, content: req.collected)
       }
       let usage = WorkerUsage(prompt_tokens: req.promptTokens.count, completion_tokens: req.generatedCount)
-      let cacheInfo = WorkerCache(hit: req.reusedTokens > 0, reused_tokens: req.reusedTokens, reuse_kind: req.reuseKind, reuse_scope: req.reuseScope, side_request: false)
+      let cacheInfo = WorkerCache(
+        hit: req.reusedTokens > 0,
+        reused_tokens: req.reusedTokens,
+        reuse_kind: req.reuseKind,
+        reuse_scope: req.reuseScope,
+        side_request: req.cacheIdentity.sideRequest,
+        namespace: req.cacheIdentity.exportedNamespace,
+        donor_slot: req.cacheDecision?.donor,
+        target_slot: req.slotIndex,
+        evicted_slots: req.cacheEvictions,
+        decision_us: req.cacheDecision?.decisionUs ?? 0,
+        planned_reuse_tokens: req.cacheDecision?.plannedReuseTokens ?? req.reusedTokens,
+        realized_reuse_tokens: req.cacheDecision?.realizedReuseTokens ?? req.reusedTokens,
+        fallback: req.cacheFallback,
+        miss_reason: req.reusedTokens > 0 ? nil : "no_shared_prefix",
+        candidates: req.cacheCandidates.map { candidate in
+          WorkerCacheCandidate(
+            slot: candidate.slot, generation: candidate.generation,
+            state: cacheCandidateState(candidate.state),
+            shared_prefix_tokens: candidate.sharedPrefixTokens,
+            namespace_compatible: candidate.namespaceCompatible,
+            model_compatible: candidate.modelCompatible,
+            session_compatible: candidate.sessionCompatible,
+            generation_compatible: candidate.generationCompatible,
+            busy_eligible: candidate.busyEligible,
+            lease_eligible: candidate.leaseEligible,
+            materialized: candidate.materialized,
+            trim_eligible: candidate.trimEligible,
+            copy_eligible: candidate.copyEligible,
+            eligible: candidate.eligible, selected: candidate.selected,
+            rejection: cacheCandidateRejection(candidate.rejection))
+        },
+        prompt_token_hash: tokenFingerprint(req.promptTokens, count: req.promptTokens.count),
+        prompt_token_count: req.promptTokens.count,
+        stable_boundary_token_hash: req.anchorPlantAt.map {
+          tokenFingerprint(req.promptTokens, count: $0)
+        },
+        stable_boundary_token_count: req.anchorPlantAt ?? 0,
+        stable_boundary_kind: req.anchorPlantAt == nil ? nil : "prompt"
+      )
       emit(id: req.id, done: true, cancelled: req.cancelled ? true : nil, finishReason: req.cancelled ? "cancel" : req.finishReason, usage: usage, cache: cacheInfo)
     }
 
@@ -604,23 +997,11 @@ func main() async {
           emit(id: id, error: "model is not loaded")
           return nil
         }
-        let maxTokens = control.max_tokens ?? 4096
+        let requestedMaxTokens = control.max_tokens
         let temperature = control.temperature ?? 0.7
         // Full sampling parity with the llama worker: top_p/top_k/min_p,
         // seed, repetition/presence/frequency penalties, and opt-in KV cache
         // quantization (CLAP_MLX_KV_TYPE=q8_0|q4_0).
-        let generateParameters = GenerateParameters(
-          maxTokens: maxTokens,
-          kvBits: kvBits,
-          temperature: Float(temperature),
-          topP: Float(control.top_p ?? 1.0),
-          topK: control.top_k ?? 0,
-          minP: Float(control.min_p ?? 0.0),
-          repetitionPenalty: control.repetition_penalty.map { Float($0) },
-          presencePenalty: control.presence_penalty.map { Float($0) },
-          frequencyPenalty: control.frequency_penalty.map { Float($0) },
-          seed: control.seed
-        )
         var toolSpecs: [ToolSpec]? = nil
         if let envelope = try? JSONDecoder().decode(ToolsEnvelope.self, from: data),
            let rawTools = envelope.tools, !rawTools.isEmpty {
@@ -656,26 +1037,17 @@ func main() async {
 
         let usesFallback = usesGemma4FallbackPrompt(loadedDirectory ?? modelDirectory)
         var promptTokens: [Int]
-        var renderedNatively = false
-        var renderedMessages: [[String: any Sendable]]? = nil
-        var renderedToolSpecs: [ToolSpec]? = nil
         if usesFallback {
           promptTokens = tok.encode(text: gemma4Prompt(entries: entries), addSpecialTokens: false)
         } else {
           do {
             promptTokens = try tok.applyChatTemplate(messages: structuredMessages, tools: toolSpecs)
-            renderedNatively = true
-            renderedMessages = structuredMessages
-            renderedToolSpecs = toolSpecs
           } catch {
             if toolSpecs != nil {
               let compatible = (toolSpecs ?? []).map { templateCompatibleToolSpec($0) }
               if let tokens = try? tok.applyChatTemplate(messages: structuredMessages, tools: compatible) {
                 debugLog("chat template for \(loadedModel ?? model) required a nullable-preserving compatibility view of all \(compatible.count) caller-provided tools")
                 promptTokens = tokens
-                renderedNatively = true
-                renderedMessages = structuredMessages
-                renderedToolSpecs = compatible
               } else {
                 debugLog("chat template for \(loadedModel ?? model) failed with all \(toolSpecs?.count ?? 0) caller-provided tools (\(error)); retrying with JSON tool instructions")
                 let toolJson = toolSpecJson(toolSpecs ?? [])
@@ -695,9 +1067,6 @@ func main() async {
                 let retryMessages: [[String: any Sendable]] = patched.map { ["role": $0.role, "content": $0.content] }
                 if let tokens = try? tok.applyChatTemplate(messages: retryMessages, tools: nil) {
                   promptTokens = tokens
-                  renderedNatively = true
-                  renderedMessages = retryMessages
-                  renderedToolSpecs = nil
                 } else {
                   debugLog("template retry without tools failed; using plain transcript")
                   let transcript = patched.map { "\($0.role): \($0.content)" }.joined(separator: "\n\n") + "\n\nassistant:"
@@ -711,48 +1080,6 @@ func main() async {
             }
           }
         }
-        var templateBoundary = 0
-        if renderedNatively,
-           let renderedMessages,
-           let stable = try? tok.applyChatTemplate(
-             messages: renderedMessages,
-             tools: renderedToolSpecs,
-             additionalContext: ["add_generation_prompt": false]
-           ),
-           stable.count >= 16,
-           stable.count < promptTokens.count,
-           promptTokens.starts(with: stable) {
-          templateBoundary = stable.count
-          debugLog("native template continuation boundary: \(templateBoundary)/\(promptTokens.count) tokens")
-        }
-        var systemBoundary = 0
-        if renderedNatively, let renderedMessages {
-          let leadingSystem = Array(renderedMessages.prefix { ($0["role"] as? String) == "system" })
-          if !leadingSystem.isEmpty {
-            let probeA = leadingSystem + [["role": "user", "content": "alpha_clap_cache_probe"]]
-            let probeB = leadingSystem + [["role": "user", "content": "zeta_clap_cache_probe"]]
-            if let tokensA = try? tok.applyChatTemplate(
-                 messages: probeA,
-                 tools: renderedToolSpecs,
-                 additionalContext: ["add_generation_prompt": false]
-               ),
-               let tokensB = try? tok.applyChatTemplate(
-                 messages: probeB,
-                 tools: renderedToolSpecs,
-                 additionalContext: ["add_generation_prompt": false]
-               ) {
-              let limit = min(tokensA.count, tokensB.count, promptTokens.count)
-              while systemBoundary < limit,
-                    tokensA[systemBoundary] == tokensB[systemBoundary],
-                    tokensA[systemBoundary] == promptTokens[systemBoundary] {
-                systemBoundary += 1
-              }
-              if systemBoundary >= 16 {
-                debugLog("native template system boundary: \(systemBoundary)/\(promptTokens.count) tokens")
-              }
-            }
-          }
-        }
         if ProcessInfo.processInfo.environment["CLAP_MLX_DEBUG_PROMPT"] != nil {
           debugLog("prompt (\(promptTokens.count) tokens): \(tok.decode(tokenIds: promptTokens, skipSpecialTokens: false))")
         }
@@ -760,103 +1087,176 @@ func main() async {
         // Admission control (parity with the llama worker): reject oversized
         // prompts before any prefill with a structured code the server maps
         // to an OpenAI-style 400.
-        let outputReserve = max(1, min(maxTokens, 256))
-        if modelContextLength > 0 && promptTokens.count + outputReserve >= modelContextLength {
-          emit(id: id, error: "prompt exceeds context window; prompt tokens=\(promptTokens.count), context=\(modelContextLength), reserved output tokens=\(outputReserve). Increase CLAP_MLX_CONTEXT or reduce the prompt/tool history.", code: "context_length_exceeded")
+        if modelContextLength > 0 && promptTokens.count >= modelContextLength {
+          emit(id: id, error: "prompt is too long for the loaded model; prompt_tokens=\(promptTokens.count), max_input_tokens=\(modelContextLength - 1), effective_context_window=\(modelContextLength).", code: "context_length_exceeded")
           return nil
         }
-        if sessionCap > 0 && promptTokens.count + outputReserve >= sessionCap {
+        if let requestedMaxTokens, modelMaxOutputTokens > 0, requestedMaxTokens > modelMaxOutputTokens {
+          emit(id: id, error: "requested max_tokens=\(requestedMaxTokens) exceeds the loaded model maximum output tokens=\(modelMaxOutputTokens).", code: "max_output_tokens_exceeded")
+          return nil
+        }
+        if requestedMaxTokens == nil && modelContextLength == 0 && modelMaxOutputTokens == 0 {
+          emit(id: id, error: "max_tokens is required because this model does not declare token limits.", code: "token_capability_unknown")
+          return nil
+        }
+        let availableOutput = modelContextLength > 0 ? modelContextLength - promptTokens.count : modelMaxOutputTokens
+        let maxTokens = requestedMaxTokens
+          ?? (modelMaxOutputTokens > 0 ? min(modelMaxOutputTokens, availableOutput) : availableOutput)
+        if modelContextLength > 0 && promptTokens.count + maxTokens > modelContextLength {
+          emit(id: id, error: "prompt plus requested output exceeds the loaded model context; prompt_tokens=\(promptTokens.count), requested_output_tokens=\(maxTokens), effective_context_window=\(modelContextLength).", code: "context_length_exceeded")
+          return nil
+        }
+        let generateParameters = GenerateParameters(
+          maxTokens: maxTokens,
+          kvBits: kvBits,
+          temperature: Float(temperature),
+          topP: Float(control.top_p ?? 1.0),
+          topK: control.top_k ?? 0,
+          minP: Float(control.min_p ?? 0.0),
+          repetitionPenalty: control.repetition_penalty.map { Float($0) },
+          presencePenalty: control.presence_penalty.map { Float($0) },
+          frequencyPenalty: control.frequency_penalty.map { Float($0) },
+          seed: control.seed
+        )
+        let outputReserve = maxTokens
+
+        let cacheIdentity = CacheIdentity(domain: cacheDomain, requestId: id, intent: control.cache)
+        let physicalIdentity = PhysicalCacheIdentity(fingerprint: cacheIdentity.fingerprint)
+        var stableBoundaries: [Int] = []
+        if !usesFallback {
+          let leadingSystemCount = structuredMessages.prefix { ($0["role"] as? String) == "system" }.count
+          let systemPrefixCounts = leadingSystemCount > 0 ? Array(1...leadingSystemCount) : []
+          let prefixCounts = (toolSpecs?.isEmpty == false ? [0] : []) + systemPrefixCounts
+          for count in prefixCounts {
+            let prefixMessages = Array(structuredMessages.prefix(count))
+            if let rendered = try? tok.applyChatTemplate(messages: prefixMessages, tools: toolSpecs) {
+              let boundary = zip(rendered, promptTokens).prefix { $0.0 == $0.1 }.count
+              if boundary >= 16 && boundary < promptTokens.count {
+                stableBoundaries.append(boundary)
+              }
+            }
+          }
+          stableBoundaries = Array(Set(stableBoundaries)).sorted()
+        }
+        var coordinatorPlan: CachePlan? = nil
+        var cacheFallback: String? = cacheCoordinator == nil ? "coordinator_unavailable_no_cache" : nil
+        if let coordinator = cacheCoordinator {
+          try ensureAdmissionSlot()
+          let slotMaterializations = kvSlots.enumerated().map { index, slot in
+            let logical = try? coordinator.slot(index)
+            let physical = PhysicalSlotRecord(identity: slot.cacheIdentity, tokens: slot.tokens,
+              generation: slot.coordinatorGeneration, hasCaches: !slot.caches.isEmpty,
+              isAnchor: slot.isAnchor)
+            let generationMatches = logical.map { $0.generation == slot.coordinatorGeneration } ?? false
+            let residentMatches = logical.map { Int($0.resident_len) == slot.tokens.count } ?? false
+            let stateMatches = logical.map {
+              (slot.isAnchor && $0.state == UInt32(CC_SLOT_ANCHOR)) ||
+                (!slot.isAnchor && $0.state != UInt32(CC_SLOT_ANCHOR))
+            } ?? false
+            let identityMatches = slot.cacheIdentity?.isCompatible(with: physicalIdentity) ?? false
+            let materialized = logical.map {
+              physical.isMaterialized(for: physicalIdentity, logicalGeneration: $0.generation,
+                logicalResidentLength: Int($0.resident_len), logicalState: $0.state,
+                anchorState: UInt32(CC_SLOT_ANCHOR))
+            } ?? false
+            if !slot.caches.isEmpty && !materialized {
+              var rejected: [String] = []
+              if !generationMatches { rejected.append("generation") }
+              if !residentMatches { rejected.append("resident_length") }
+              if !stateMatches { rejected.append("state") }
+              if !identityMatches { rejected.append("namespace_identity") }
+              debugLog("cache donor rejected: slot=\(index) reasons=\(rejected.joined(separator: ",")) physical_generation=\(slot.coordinatorGeneration) logical_generation=\(logical?.generation ?? 0) physical_tokens=\(slot.tokens.count) logical_resident=\(logical?.resident_len ?? 0) logical_state=\(logical?.state ?? 0) anchor=\(slot.isAnchor)")
+            }
+            return CacheSlotMaterialization(
+              materialized: materialized,
+              writable: !slot.busy,
+              partialSuffixTrim: materialized && slot.caches.allSatisfy(\.isTrimmable),
+              copyable: materialized
+            )
+          }
+          var capabilities = UInt64(CC_CAP_WHOLE_STATE_COPY) |
+            UInt64(CC_CAP_PARTIAL_SUFFIX_TRIM) | UInt64(CC_CAP_PARTIAL_PREFIX_BRANCH) |
+            UInt64(CC_CAP_SAFE_BUSY_DONOR) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT) |
+            UInt64(CC_CAP_RELIABLE_RESIDENT_LENGTH) |
+            UInt64(CC_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS)
+          if slotMaterializations.contains(where: { $0.materialized && !$0.partialSuffixTrim }) {
+            capabilities |= UInt64(CC_CAP_SLIDING_WINDOW) | UInt64(CC_CAP_RECURRENT_OR_HYBRID)
+          }
+          if kvBits != nil { capabilities |= UInt64(CC_CAP_KV_QUANTIZED) }
+          do {
+            coordinatorPlan = try coordinator.plan(tokens: promptTokens, identity: cacheIdentity,
+              capabilities: capabilities, slots: slotMaterializations,
+              stableBoundaries: stableBoundaries, outputReserve: outputReserve)
+            if let view = coordinatorPlan?.view {
+              debugLog("cache coordinator plan: operation=\(view.operation) reuse=\(view.reuseTokens) donor=\(view.donor.map(String.init) ?? "none") target=\(view.target)")
+            }
+          } catch {
+            cacheFallback = "coordinator_plan_failed_closed"
+            debugLog("cache coordinator plan failed closed: \(error)")
+            throw error
+          }
+          guard coordinatorPlan != nil else { throw CacheCoordinatorError.unavailable }
+        }
+        guard coordinatorPlan != nil else { throw CacheCoordinatorError.unavailable }
+        if sessionCap > 0 && promptTokens.count + outputReserve > sessionCap {
           emit(id: id, error: "prompt exceeds the per-session context cap; prompt tokens=\(promptTokens.count), max_session_ctx=\(sessionCap), reserved output tokens=\(outputReserve). Reduce the prompt/tool history or raise max_session_ctx / CLAP_MLX_MAX_SESSION_CTX.", code: "context_length_exceeded")
           return nil
         }
 
-        // Slot selection: longest shared prefix among non-busy slots; a weak
-        // match recycles the LRU non-busy slot. parallelLimit <= slotLimit
-        // guarantees a free slot exists.
-        var bestSlot: KVSlot? = nil
+        // Rust is the sole cache policy authority. These variables describe
+        // only the coordinator-selected physical operation.
         var bestPrefix = 0
-        for candidate in kvSlots where !candidate.busy && !candidate.isAnchor {
-          var prefix = 0
-          let maxPrefix = min(candidate.tokens.count, promptTokens.count)
-          while prefix < maxPrefix && candidate.tokens[prefix] == promptTokens[prefix] { prefix += 1 }
-          if prefix > bestPrefix {
-            bestPrefix = prefix
-            bestSlot = candidate
-          }
-        }
-        // A future tool turn can change template output shortly before the
-        // generation suffix (Qwen's multi-step-tool formatting does this).
-        // Snapshot a small safety margin before the no-generation boundary;
-        // for large prompts this still preserves effectively all prefill work.
-        let templateSafetyTail = 64
-        let proactiveAnchor = systemBoundary >= 16
-          ? systemBoundary
-          : max(0, templateBoundary - templateSafetyTail)
-        // Keep the normal session slot at a later, template-safe boundary.
-        // The safety tail covers model templates that rewrite control tokens
-        // immediately before a tool continuation. The persistent system
-        // anchor remains separate for new conversations.
-        let rollingBoundary = templateBoundary >= 16
-          ? max(systemBoundary, templateBoundary - templateSafetyTail)
-          : 0
-        var anchorCandidate = proactiveAnchor
-        // Demote a best match whose caches cannot rewind to the shared
-        // boundary: same-slot reuse would fail, and keeping it as bestSlot
-        // would both wipe a warm session and shadow anchor donors.
-        if let matched = bestSlot, bestPrefix >= 16 {
-          var adjusted = bestPrefix
-          if adjusted == promptTokens.count { adjusted -= 1 }
-          let rewindNeeded = matched.tokens.count - adjusted
-          let trimmableBest = !matched.caches.isEmpty && matched.caches.allSatisfy { $0.isTrimmable }
-          if !(trimmableBest || rewindNeeded == 0) {
-            if proactiveAnchor < 16 { anchorCandidate = bestPrefix }
-            bestSlot = nil
-            bestPrefix = 0
-          }
-        }
-        // Cross-slot prefix branching (dedup): if any OTHER slot — busy ones
-        // and anchors included — holds a longer shared prefix (e.g. the
-        // org-wide system prompt), clone its cache and trim to the shared
-        // boundary instead of re-prefilling. Donors qualify when their caches
-        // can trim to the boundary OR when the donor's entire cache is a
-        // prefix of the new prompt (whole-copy, trim 0 — works even for
-        // rotating/sliding-window caches that cannot rewind).
+        let anchorCandidate = coordinatorPlan?.view.anchorTokens ?? 0
         var branchDonor: KVSlot? = nil
         var branchPrefix = bestPrefix
-        for candidate in kvSlots where candidate !== bestSlot {
-          guard !candidate.caches.isEmpty else { continue }
-          var prefix = 0
-          let maxPrefix = min(candidate.tokens.count, promptTokens.count)
-          while prefix < maxPrefix && candidate.tokens[prefix] == promptTokens[prefix] { prefix += 1 }
-          let wholeCopy = prefix == candidate.tokens.count
-          if !wholeCopy && !candidate.caches.allSatisfy({ $0.isTrimmable }) {
-            if proactiveAnchor < 16 && prefix > anchorCandidate { anchorCandidate = prefix }
-            continue
+        if let planned = coordinatorPlan {
+          let view = planned.view
+          guard view.target < kvSlots.count,
+                view.donor == nil || view.donor! < kvSlots.count else {
+            try planned.abort()
+            throw CacheCoordinatorError.unavailable
           }
-          if prefix > branchPrefix {
-            branchPrefix = prefix
-            branchDonor = candidate
+          let targetSlot = kvSlots[view.target]
+          if view.operation == UInt32(CC_OPERATION_CONTINUE) {
+            let trimNeeded = targetSlot.tokens.count - view.reuseTokens
+            guard view.donor == view.target, !targetSlot.caches.isEmpty, trimNeeded >= 0,
+                  trimNeeded == 0 || targetSlot.caches.allSatisfy(\.isTrimmable) else {
+              try planned.abort()
+              throw CacheCoordinatorError.unavailable
+            }
+          } else if view.operation == UInt32(CC_OPERATION_BRANCH) ||
+                    view.operation == UInt32(CC_OPERATION_RESTORE) {
+            guard let donorIndex = view.donor, donorIndex != view.target else {
+              try planned.abort()
+              throw CacheCoordinatorError.unavailable
+            }
+            let donorSlot = kvSlots[donorIndex]
+            let donorOffset = cacheSequenceLength(donorSlot.caches, fallback: donorSlot.tokens.count)
+            let trimNeeded = donorOffset - view.reuseTokens
+            guard !donorSlot.caches.isEmpty, trimNeeded >= 0,
+                  trimNeeded == 0 || donorSlot.caches.allSatisfy(\.isTrimmable) else {
+              try planned.abort()
+              throw CacheCoordinatorError.unavailable
+            }
+          }
+          if view.operation == UInt32(CC_OPERATION_CONTINUE) {
+            bestPrefix = view.reuseTokens
+            branchDonor = nil
+          } else if view.operation == UInt32(CC_OPERATION_BRANCH) ||
+                    view.operation == UInt32(CC_OPERATION_RESTORE) {
+            bestPrefix = 0
+            branchDonor = view.donor.map { kvSlots[$0] }
+            branchPrefix = view.reuseTokens
+          } else {
+            bestPrefix = 0
+            branchDonor = nil
+            branchPrefix = 0
           }
         }
-        let slot: KVSlot
-        if let matched = bestSlot, bestPrefix >= 16 {
-          slot = matched
-        } else {
-          bestPrefix = 0
-          if kvSlots.count < slotLimit {
-            slot = KVSlot()
-            kvSlots.append(slot)
-          } else if let lru = kvSlots.filter({ !$0.busy && !$0.isAnchor }).min(by: { $0.lastUsed < $1.lastUsed }) ?? kvSlots.filter({ !$0.busy }).min(by: { $0.lastUsed < $1.lastUsed }) {
-            slot = lru
-            slot.caches = []
-            slot.tokens = []
-            slot.isAnchor = false
-            slot.isPromptBoundary = false
-            slot.anchorScope = nil
-          } else {
-            slot = KVSlot()
-            kvSlots.append(slot)
-          }
+        guard let planned = coordinatorPlan else { throw CacheCoordinatorError.unavailable }
+        let slot = kvSlots[planned.view.target]
+        if planned.view.operation != UInt32(CC_OPERATION_CONTINUE) {
+          clearPhysicalSlot(slot)
         }
         kvUseCounter += 1
         slot.lastUsed = kvUseCounter
@@ -868,33 +1268,26 @@ func main() async {
         var fedTokens: [Int]
         var suffix: [Int]
         var reusedTokens = 0
-        var reuseKind: String? = nil
+        let reuseKind = normalizedCacheReuseKind(operation: planned.view.operation)
         var reuseScope: String? = nil
         var branched = false
-        if let donor = branchDonor, branchPrefix >= 16, branchPrefix > bestPrefix, slot !== donor {
+        if let donor = branchDonor {
           var sharedPrefix = branchPrefix
           if sharedPrefix == promptTokens.count { sharedPrefix -= 1 }
           let cloned = donor.caches.map { $0.copy() }
           let cloneOffset = cacheSequenceLength(cloned, fallback: donor.tokens.count)
           let trimNeeded = cloneOffset - sharedPrefix
-          if trimNeeded >= 0 && (trimNeeded == 0 || cloned.allSatisfy({ $0.isTrimmable })) {
-            if trimNeeded > 0 {
-              for cache in cloned { cache.trim(trimNeeded) }
-            }
-            caches = cloned
-            fedTokens = Array(promptTokens.prefix(sharedPrefix))
-            suffix = Array(promptTokens.dropFirst(sharedPrefix))
-            reusedTokens = sharedPrefix
-            reuseKind = donor.isAnchor || donor.isPromptBoundary ? "anchor" : "branch"
-            reuseScope = donor.anchorScope
-            prefix = sharedPrefix
-            branched = true
-            debugLog("kv prefix branch: cloned \(sharedPrefix)/\(promptTokens.count) shared tokens from \(donor.isAnchor ? "an anchor" : "another slot"), prefilling \(suffix.count)")
-          } else {
-            caches = []
-            fedTokens = []
-            suffix = promptTokens
+          if trimNeeded > 0 {
+            for cache in cloned { cache.trim(trimNeeded) }
           }
+          caches = cloned
+          fedTokens = Array(promptTokens.prefix(sharedPrefix))
+          suffix = Array(promptTokens.dropFirst(sharedPrefix))
+          reusedTokens = sharedPrefix
+          reuseScope = donor.anchorScope
+          prefix = sharedPrefix
+          branched = true
+          debugLog("kv prefix branch: cloned \(sharedPrefix)/\(promptTokens.count) shared tokens from \(donor.isAnchor ? "an anchor" : "another slot"), prefilling \(suffix.count)")
         } else {
           caches = []
           fedTokens = []
@@ -904,7 +1297,7 @@ func main() async {
         let trimNeeded = slot.tokens.count - prefix
         if branched {
           // cache assignment handled above
-        } else if prefix > 0 && !slot.caches.isEmpty && (trimmable || trimNeeded == 0) {
+        } else if prefix > 0 {
           if trimNeeded > 0 {
             for cache in slot.caches { cache.trim(trimNeeded) }
           }
@@ -912,14 +1305,9 @@ func main() async {
           fedTokens = Array(promptTokens.prefix(prefix))
           suffix = Array(promptTokens.dropFirst(prefix))
           reusedTokens = prefix
-          reuseKind = slot.isPromptBoundary ? "anchor" : "slot"
           reuseScope = slot.anchorScope
           debugLog("kv prefix reuse (slot \(kvSlots.firstIndex(where: { $0 === slot }) ?? -1)): \(prefix)/\(promptTokens.count) tokens cached, prefilling \(suffix.count)")
         } else {
-          if prefix >= 16 && !slot.caches.isEmpty && !trimmable {
-            // Same-slot rewind failed too; remember the boundary for anchoring.
-            if prefix > anchorCandidate { anchorCandidate = prefix }
-          }
           caches = lm.newCache(parameters: generateParameters)
           fedTokens = []
           suffix = promptTokens
@@ -934,6 +1322,35 @@ func main() async {
         slot.tokens = fedTokens
         slot.isPromptBoundary = false
         slot.anchorScope = nil
+        slot.cacheIdentity = physicalIdentity
+
+        var cacheDecision: CacheDecision? = nil
+        let slotIndex = planned.view.target
+        try retainedRegistry.activate(slotID: UInt32(slotIndex))
+        if let planned = coordinatorPlan {
+          do {
+            let victims = planned.view.evictions.filter { $0 != slotIndex }.map(UInt32.init)
+            try retainedRegistry.validateEvictions(victims)
+            cacheDecision = try planned.commit(residentTokens: reusedTokens,
+                                               state: UInt32(CC_SLOT_SESSION),
+                                               physicalBytes: physicalCacheBytes(caches))
+            slot.coordinatorGeneration = try cacheCoordinator?.slot(
+              slotIndex).generation ?? 0
+            retainedRegistry.reconcileEvictions(victims) { _, victim in
+              clearPhysicalSlot(victim)
+            }
+            if !victims.isEmpty {
+              lastEvictionReason = retentionConfig.physicalByteBudget > 0
+                ? "byte_pressure" : "retained_capacity"
+            }
+            reusedTokens = cacheDecision?.realizedReuseTokens ?? reusedTokens
+            reuseScope = cacheScopeName(cacheDecision?.scope ?? cacheIdentity.scope)
+          } catch {
+            retainedRegistry.release(slotID: UInt32(slotIndex))
+            clearPhysicalSlot(slot)
+            throw error
+          }
+        }
 
         let request = ActiveRequest(
           id: id,
@@ -943,6 +1360,12 @@ func main() async {
           reusedTokens: reusedTokens,
           reuseKind: reuseKind,
           reuseScope: reuseScope,
+          cacheIdentity: cacheIdentity,
+          cacheDecision: cacheDecision,
+          cacheCandidates: coordinatorPlan?.candidates ?? [],
+          cacheEvictions: coordinatorPlan?.view.evictions ?? [],
+          cacheFallback: cacheFallback,
+          slotIndex: slotIndex,
           slot: slot,
           caches: caches,
           fedTokens: fedTokens,
@@ -951,27 +1374,10 @@ func main() async {
           parameters: generateParameters,
           stops: control.stop?.values ?? []
         )
-        if rollingBoundary >= 16,
-           rollingBoundary < promptTokens.count,
-           rollingBoundary > systemBoundary {
-          request.continuationBoundary = rollingBoundary
-          if rollingBoundary == reusedTokens,
-             request.caches.contains(where: { !$0.isTrimmable }) {
-            request.continuationBoundaryCaches = request.caches.map { $0.copy() }
-            debugLog("captured rolling conversation anchor from reused cache: \(rollingBoundary) tokens")
-          }
-        }
-        // Plant an anchor at the native template's pre-generation boundary or
-        // at a discovered unrecoverable shared boundary. Tool continuations
-        // rerender the prompt before the generation suffix, so the full prompt
-        // snapshot alone is not necessarily their exact token prefix.
+        // Plant only the exact shared boundary selected by Rust.
         if reusedTokens == 0, anchorCandidate >= 16, anchorCandidate < promptTokens.count {
-          let boundary = Array(promptTokens.prefix(anchorCandidate))
-          let exists = kvSlots.contains { $0.tokens == boundary }
-          if !exists {
-            request.anchorPlantAt = anchorCandidate
-            request.anchorPlantScope = anchorCandidate == systemBoundary ? "system" : "conversation"
-          }
+          request.anchorPlantAt = anchorCandidate
+          request.anchorPlantScope = "shared"
         }
         return request
       } catch {
@@ -988,32 +1394,76 @@ func main() async {
         debugLog("\(reason) anchor skipped: fed=\(req.fedTokens.count) offset=\(offset) plant=\(plant)")
         return false
       }
-      // Dedupe against OTHER slots only: mid-prefill, the requester's own
-      // slot tokens are exactly the boundary.
-      guard !kvSlots.contains(where: { $0 !== req.slot && $0.tokens == boundary }) else { return true }
-      // When the pool is full, a small side-request anchor must not evict an
-      // expensive harness/system anchor. Replace only an anchor no larger
-      // than the new one, preferring the smallest and then oldest. An empty
-      // idle session slot is also safe; otherwise skip this snapshot.
+      // Rust owns anchor deduplication, target choice, and eviction policy.
+      guard let coordinator = cacheCoordinator else { return false }
       let anchor: KVSlot
-      if kvSlots.count < slotLimit {
-        anchor = KVSlot()
-        kvSlots.append(anchor)
-      } else if let victim = kvSlots.filter({
-          !$0.busy && $0 !== req.slot && $0.isAnchor && $0.tokens.count <= plant
-        }).min(by: {
-          $0.tokens.count == $1.tokens.count ? $0.lastUsed < $1.lastUsed : $0.tokens.count < $1.tokens.count
-        })
-        ?? kvSlots.filter({ !$0.busy && $0 !== req.slot && !$0.isAnchor && $0.caches.isEmpty }).min(by: { $0.lastUsed < $1.lastUsed }) {
-        anchor = victim
-      } else {
-        debugLog("\(reason) anchor skipped: no lower-value cache slot available for \(plant) tokens")
+      let anchorPlan: CachePlan
+      do {
+        try ensureAdmissionSlot()
+        let slotMaterializations = kvSlots.map {
+          CacheSlotMaterialization(
+            materialized: false,
+            writable: !$0.busy,
+            partialSuffixTrim: false,
+            copyable: false
+          )
+        }
+        anchorPlan = try coordinator.plan(tokens: boundary, identity: req.cacheIdentity,
+          capabilities: UInt64(CC_CAP_WHOLE_STATE_COPY) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT),
+          slots: slotMaterializations,
+          outputReserve: 0, state: UInt32(CC_SLOT_ANCHOR))
+        guard anchorPlan.view.target < kvSlots.count,
+              !kvSlots[anchorPlan.view.target].busy else {
+          try? anchorPlan.abort()
+          debugLog("\(reason) coordinated anchor skipped: target unavailable")
+          return false
+        }
+        anchor = kvSlots[anchorPlan.view.target]
+      } catch {
+        debugLog("\(reason) coordinated anchor skipped: \(error)")
         return false
+      }
+      if anchorPlan.view.operation == UInt32(CC_OPERATION_NOOP) {
+        do {
+          _ = try anchorPlan.commit(residentTokens: plant, state: UInt32(CC_SLOT_ANCHOR),
+            physicalBytes: physicalCacheBytes(anchor.caches))
+          debugLog("coordinated \(reason) anchor already exists: slot=\(anchorPlan.view.target)")
+          return true
+        } catch {
+          debugLog("\(reason) coordinated anchor no-op failed: \(error)")
+          return false
+        }
       }
       anchor.isAnchor = true
       anchor.anchorScope = req.anchorPlantScope
       anchor.caches = req.caches.map { $0.copy() }
       anchor.tokens = boundary
+      anchor.cacheIdentity = PhysicalCacheIdentity(fingerprint: req.cacheIdentity.fingerprint)
+      do {
+        let index = anchorPlan.view.target
+        let victims = anchorPlan.view.evictions.filter { $0 != index }.map(UInt32.init)
+        try retainedRegistry.validateEvictions(victims)
+        _ = try anchorPlan.commit(residentTokens: plant, state: UInt32(CC_SLOT_ANCHOR),
+          physicalBytes: physicalCacheBytes(anchor.caches))
+        let logical = try coordinator.slot(index)
+        anchor.coordinatorGeneration = logical.generation
+        retainedRegistry.reconcileEvictions(victims) { _, victim in
+          clearPhysicalSlot(victim)
+        }
+        if !victims.isEmpty {
+          lastEvictionReason = retentionConfig.physicalByteBudget > 0
+            ? "byte_pressure" : "retained_capacity"
+        }
+        let fingerprint = req.cacheIdentity.fingerprint.map { String(format: "%02x", $0) }.joined()
+        let flags = CacheSlotMaterialization(materialized: !anchor.caches.isEmpty,
+          writable: !anchor.busy, partialSuffixTrim: anchor.caches.allSatisfy(\.isTrimmable),
+          copyable: !anchor.caches.isEmpty).flags
+        debugLog("coordinated \(reason) anchor committed: slot=\(index) logical_state=\(logical.state) logical_generation=\(logical.generation) logical_resident=\(logical.resident_len) namespace=\(fingerprint) physical_generation=\(anchor.coordinatorGeneration) physical_tokens=\(anchor.tokens.count) physical_identity=\(anchor.cacheIdentity != nil) flags=\(flags)")
+      } catch {
+        clearPhysicalSlot(anchor)
+        debugLog("\(reason) coordinated anchor commit failed: \(error)")
+        return false
+      }
       kvUseCounter += 1
       anchor.lastUsed = kvUseCounter
       debugLog("planted \(reason) anchor: \(plant) tokens (exact-state snapshot for non-rewindable caches)")
@@ -1040,6 +1490,24 @@ func main() async {
       debugLog("captured rolling conversation anchor: \(boundary) tokens")
     }
 
+    func advanceCoordinator(_ req: ActiveRequest, tokens: [Int]) {
+      guard !tokens.isEmpty, let coordinator = cacheCoordinator,
+            req.slot.coordinatorGeneration != 0 else { return }
+      do {
+        req.slot.coordinatorGeneration = try coordinator.advance(
+          slot: req.slotIndex, generation: req.slot.coordinatorGeneration,
+          tokens: tokens, state: UInt32(CC_SLOT_SESSION), busy: true,
+          physicalBytes: physicalCacheBytes(req.caches))
+      } catch {
+        let generation = req.slot.coordinatorGeneration
+        if generation != 0 {
+          _ = try? coordinator.invalidate(slot: req.slotIndex, generation: generation)
+        }
+        req.slot.coordinatorGeneration = 0
+        debugLog("cache metadata advance reconciled after error: \(error)")
+      }
+    }
+
     func step(_ req: ActiveRequest) {
       guard !req.cancelled, !req.completed, !req.failed, let lm = languageModel else { return }
       do {
@@ -1063,6 +1531,7 @@ func main() async {
             req.pos = chunkEnd
             req.fedTokens.append(contentsOf: chunk)
             req.slot.tokens = req.fedTokens
+            advanceCoordinator(req, tokens: chunk)
             emit(id: req.id, prefill: WorkerPrefill(done: req.reusedTokens + req.pos, total: req.promptTokens.count))
             if let plant = req.anchorPlantAt, !req.anchorPlanted, plant - req.reusedTokens == req.pos {
               plantAnchor(req)
@@ -1082,6 +1551,7 @@ func main() async {
             req.pos = req.suffix.count
             req.fedTokens.append(contentsOf: tail)
             req.slot.tokens = req.fedTokens
+            advanceCoordinator(req, tokens: tail)
             // Decode mutates recurrent cache state irreversibly. Preserve the
             // exact end-of-prompt state in this request and restore it into
             // the same slot at finalize, so even a one-slot worker can reuse
@@ -1214,6 +1684,27 @@ func main() async {
         return false
       }
 
+      if type == "set_max_active" {
+        guard let requested = control.max_active, requested > 0 else {
+          emit(id: id, error: "set_max_active.max_active must be positive")
+          return false
+        }
+        let oldMaxActive = maxActive
+        maxActive = min(requested, activePolicy.backendCeiling,
+          activePolicy.hardwareCeiling, activePolicy.modelCeiling,
+          max(1, retentionConfig.hardCeiling))
+        previousMaxActive = control.previous_max_active ?? oldMaxActive
+        coordinatedLimitingReason = control.limiting_reason
+        lastAdjustmentReason = control.last_adjustment_reason
+        lastAdjustmentAt = control.last_adjustment_at
+        coordinatedGrowthReserveBytes = control.retained_growth_reserve_bytes
+        globalResidentMemoryBytes = control.global_resident_memory_bytes
+        pressureState = control.pressure_state
+        retainedRegistry.updateMaxActive(maxActive)
+        emit(id: id, done: true, retention: retentionSnapshot(queued: pendingChats.count))
+        return false
+      }
+
       if type == "unload" || type == "load" {
         // Model mutations wait until in-flight requests drain.
         if !active.isEmpty || !pendingChats.isEmpty {
@@ -1222,7 +1713,6 @@ func main() async {
         }
         if type == "unload" {
           invalidateKVCache()
-          loadedContainer = nil
           languageModel = nil
           tokenizer = nil
           loadedDirectory = nil
@@ -1239,7 +1729,17 @@ func main() async {
           if loadedModel != model || languageModel == nil {
             try await loadModel(model, directory: modelDirectory)
           }
-          emit(id: id, loaded: true, done: true, memory: memorySnapshot())
+          emit(id: id, loaded: true, done: true, memory: memorySnapshot(),
+            retention: retentionSnapshot(), tokenCapabilities: WorkerTokenCapabilities(
+            model_context_window: declaredModelContextLength > 0 ? declaredModelContextLength : nil,
+            effective_context_window: modelContextLength > 0 ? modelContextLength : nil,
+            max_input_tokens: modelContextLength > 0 ? modelContextLength - 1 : nil,
+            max_output_tokens: modelMaxOutputTokens > 0 ? modelMaxOutputTokens : nil,
+            model_context_window_source: modelContextLengthSource,
+            max_output_tokens_source: modelMaxOutputTokensSource,
+            backend_allocation_cap: contextOverride > 0 ? contextOverride : (declaredModelContextLength > 0 ? declaredModelContextLength : nil),
+            user_configured_override: contextOverride > 0 ? contextOverride : nil
+          ))
         } catch {
           emit(id: id, error: String(describing: error))
         }
@@ -1247,6 +1747,7 @@ func main() async {
       }
 
       pendingChats.append((id: id, control: control, data: data))
+      emit(retention: retentionSnapshot(queued: pendingChats.count))
       return false
     }
 
@@ -1268,7 +1769,8 @@ func main() async {
 
       // Admit pending chats up to the parallel limit. Requests for a
       // different model wait until the current model's requests drain.
-      while active.count < parallelLimit, !pendingChats.isEmpty {
+      while active.count < maxActive, !pendingChats.isEmpty {
+        if retainedRegistry.count >= retentionConfig.hardCeiling && kvSlots.allSatisfy(\.busy) { break }
         let candidate = pendingChats[0]
         let needsLoad = loadedModel != candidate.control.model || languageModel == nil
         if needsLoad && !active.isEmpty { break }
@@ -1277,6 +1779,7 @@ func main() async {
         if let request = await prepareRequest(id: candidate.id, control: candidate.control, data: candidate.data) {
           active.append(request)
           allocatorNeedsIdleClear = true
+          emit(retention: retentionSnapshot(queued: pendingChats.count))
         }
       }
 
@@ -1292,14 +1795,10 @@ func main() async {
         Memory.clearCache()
         let memory = memorySnapshot()
         debugLog("mlx memory after idle clear: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
-        emit(memory: memory)
+        emit(memory: memory, retention: retentionSnapshot())
         allocatorNeedsIdleClear = false
       }
     }
-  } catch {
-    emit(error: String(describing: error))
-    exit(1)
-  }
 }
 
 await main()

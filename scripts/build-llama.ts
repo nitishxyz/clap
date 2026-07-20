@@ -10,6 +10,8 @@ const buildDir = join(llamaDir, "build");
 const libexec = join(root, "libexec");
 const wrapperSource = join(root, "native", "llama", "clap-llama.cpp");
 const wrapperOutput = join(libexec, "clap-llama");
+const cacheDir = join(root, "native", "cache");
+const cacheLibDir = join(cacheDir, "target", "release");
 
 if (!existsSync(llamaDir)) {
   console.error("llama.cpp is not vendored. Run: bun run runtime:llama:vendor");
@@ -51,6 +53,7 @@ if (wantCuda) {
 await run(configure);
 const buildJobs = process.env.CLAP_BUILD_JOBS ?? String(availableParallelism());
 await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j", buildJobs]);
+await run(["cargo", "build", "--release", "-p", "clap-cache-ffi"], cacheDir);
 
 await mkdir(libexec, { recursive: true });
 
@@ -64,9 +67,11 @@ const compile = [
   "-I", join(llamaDir, "ggml", "include"),
   "-I", join(llamaDir, "ggml", "src"),
   "-I", join(llamaDir, "vendor"),
+  "-I", join(cacheDir, "include"),
   "-L", join(buildDir, "src"),
   "-L", join(buildDir, "ggml", "src"),
   "-L", join(buildDir, "ggml", "src", "ggml-cpu"),
+  join(cacheLibDir, process.platform === "win32" ? "clap_cache_ffi.lib" : "libclap_cache_ffi.a"),
   "-lllama",
   "-lggml",
   "-lggml-base",
@@ -111,8 +116,8 @@ await chmod(wrapperOutput, 0o755);
 
 console.log(`built ${wrapperOutput}`);
 
-async function run(command: string[]) {
-  const proc = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });
+async function run(command: string[], cwd = root) {
+  const proc = Bun.spawn(command, { cwd, stdout: "inherit", stderr: "inherit" });
   const code = await proc.exited;
   if (code !== 0) throw new Error(`${command.join(" ")} exited ${code}`);
 }

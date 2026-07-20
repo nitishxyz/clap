@@ -68,6 +68,7 @@ export type RequestDetail = {
 };
 
 export type DashboardRequest = {
+  source?: "live" | "persisted";
   id: string;
   startedAt: number;
   endedAt?: number;
@@ -88,15 +89,65 @@ export type DashboardRequest = {
   tokensPerSecond?: number;
   cacheHit?: boolean;
   reuseKind?: "slot" | "branch" | "anchor";
-  reuseScope?: "system" | "conversation";
+  reuseScope?: "system" | "conversation" | "session" | "agent" | "project" | "harness" | "tenant";
   reusedTokens?: number;
   sideRequest?: boolean;
   slot?: number;
+  cacheNamespace?: string;
+  donorSlot?: number;
+  targetSlot?: number;
+  evictedSlots?: number[];
+  cacheDecisionUs?: number;
+  plannedReuseTokens?: number;
+  realizedReuseTokens?: number;
+  cacheFallback?: string;
   finishReason?: string;
   toolCalls?: number;
   messageCount?: number;
   error?: string;
   detail?: RequestDetail;
+  cacheDiagnostics?: {
+    serverLaunchId: string;
+    workerLaunchId?: string;
+    backend?: string;
+    namespaceFingerprint?: string;
+    sessionIdentitySource?: string;
+    sessionFingerprint?: string;
+    projectFingerprint?: string;
+    agentFingerprint?: string;
+    harnessFingerprint?: string;
+    systemTokenHash?: string;
+    systemTokenCount?: number;
+    toolsTokenHash?: string;
+    toolsTokenCount?: number;
+    stableBoundaryTokenHash?: string;
+    stableBoundaryTokenCount?: number;
+    stableBoundaryKind?: string;
+    promptTokenHash?: string;
+    promptTokenCount?: number;
+    errorCode?: string;
+    prefillMs?: number;
+    cache?: {
+      missReason?: string;
+      donorGeneration?: number;
+      targetGeneration?: number;
+      evictions?: Array<{ slot: number; reason?: string }>;
+      candidates?: Array<{
+        slot: number;
+        generation?: number;
+        state?: string;
+        sharedPrefixTokens: number;
+        namespaceCompatible?: boolean;
+        modelCompatible?: boolean;
+        sessionCompatible?: boolean;
+        materialized?: boolean;
+        trimEligible?: boolean;
+        copyEligible?: boolean;
+        selected?: boolean;
+        rejection?: string;
+      }>;
+    };
+  };
 };
 
 export type ServerEvent = {
@@ -106,6 +157,15 @@ export type ServerEvent = {
   message: string;
   model?: string;
   durationMs?: number;
+};
+
+export type ModelTokenCapabilities = {
+  modelContextWindow: number | null;
+  effectiveContextWindow: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
+  backendAllocationCap: number | null;
+  userConfiguredOverride: number | null;
 };
 
 export type DashboardLoadedModel = {
@@ -125,6 +185,34 @@ export type DashboardLoadedModel = {
     pid?: number;
     state: string;
     memory?: { activeBytes: number; cacheBytes: number; peakActiveBytes: number };
+    retention?: {
+      maxActive: number;
+      activePolicy: {
+        mode: "auto" | "fixed";
+        selectedMax: number;
+        backendCeiling: number;
+        hardwareCeiling: number;
+        modelCeiling: number;
+        memoryCeiling: number;
+        reason: string;
+        inputs: Record<string, string | number | boolean | null>;
+      };
+      active: number;
+      retainedTotal: number;
+      retainedSessions: number;
+      retainedAnchors: number;
+      retainedBytes: number;
+      sessionBytes: number;
+      anchorBytes: number;
+      budgetBytes: number;
+      highWatermarkBytes: number;
+      lowWatermarkBytes: number;
+      underPressure: boolean;
+      hardCeiling: number;
+      evictionReason?: string;
+      evictionCount: number;
+    };
+    tokenCapabilities?: ModelTokenCapabilities;
   };
   usage?: { rssBytes: number; cpuPercent: number };
   gpuMemoryBytes?: number;
@@ -138,7 +226,7 @@ export type DashboardModel = {
   status: "available" | "not_downloaded" | "unsupported";
   quantization?: string;
   sizeBytes?: number;
-  limit?: { context?: number };
+  limit?: { context?: number | null; output?: number | null };
   capabilities?: { toolCall?: boolean; reasoning?: boolean };
   modalities?: { input?: string[] };
 };

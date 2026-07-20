@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createNativeBundleManifest, nativeBundleBuildId } from "../packages/runtime-router/src/native-bundle";
 
 const root = new URL("..", import.meta.url).pathname;
 const libexec = join(root, "libexec");
@@ -17,9 +18,9 @@ const targetIsDarwinArm = target ? target.includes("darwin-arm64") || target.inc
 const binary = join(dist, target ? `clap-${target.replace(/^bun-/, "")}` : "clap");
 
 const workers = [
-  { name: "clap-llama", required: true },
-  { name: "clap-mlx", required: targetIsDarwinArm },
-  { name: "mlx.metallib", required: targetIsDarwinArm },
+  { name: "clap-llama", required: true, executable: true },
+  { name: "clap-mlx", required: targetIsDarwinArm, executable: true },
+  { name: "mlx.metallib", required: targetIsDarwinArm, executable: false },
 ];
 
 const missing = workers.filter((worker) => worker.required && !existsSync(join(libexec, worker.name)));
@@ -39,11 +40,13 @@ for (const worker of workers) {
 
 // Content-addressed build id so extracted workers in ~/.clap/libexec/<id>/ are
 // refreshed exactly when the embedded workers change.
-const hasher = new Bun.CryptoHasher("sha256");
-for (const worker of workers) {
-  hasher.update(await Bun.file(join(libexec, worker.name)).arrayBuffer());
-}
-const embedBuild = hasher.digest("hex").slice(0, 12);
+const manifest = await createNativeBundleManifest(workers.map((worker) => ({
+  name: worker.name,
+  data: Bun.file(join(libexec, worker.name)),
+  executable: worker.executable,
+})));
+const embedBuild = await nativeBundleBuildId(manifest);
+const embeddedManifest = JSON.stringify(manifest);
 
 if (!target) await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
@@ -53,6 +56,7 @@ const build = Bun.spawn(
     "bun", "build", "--compile", "--minify", entrypoint,
     ...(target ? ["--target", target] : []),
     "--define", `process.env.CLAP_EMBED_BUILD="${embedBuild}"`,
+    "--define", `process.env.CLAP_EMBED_MANIFEST=${JSON.stringify(embeddedManifest)}`,
     "--outfile", binary,
   ],
   { cwd: root, stdout: "inherit", stderr: "inherit" },

@@ -17,6 +17,11 @@ export function fmtTokens(value: number | undefined | null): string {
   return String(value);
 }
 
+export function fmtMaxOutputTokens(maxOutputTokens: number | null | undefined, effectiveContextWindow: number | null | undefined): string {
+  if (maxOutputTokens != null) return fmtTokens(maxOutputTokens);
+  return effectiveContextWindow != null ? "context-bound" : "unknown";
+}
+
 export function fmtBytes(value: number | undefined | null): string {
   if (!value) return "-";
   const units = ["B", "KiB", "MiB", "GiB"];

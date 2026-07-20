@@ -59,6 +59,6 @@ const tagColors = {
   pin: "border-thinking text-thinking",
 } as const;
 
-export function Tag({ tone = "default", children }: { tone?: keyof typeof tagColors; children: ReactNode }) {
-  return <span className={`inline-block border px-1.5 text-[0.7rem] ${tagColors[tone]}`}>{children}</span>;
+export function Tag({ tone = "default", title, children }: { tone?: keyof typeof tagColors; title?: string; children: ReactNode }) {
+  return <span title={title} className={`inline-block whitespace-nowrap border px-1.5 text-[0.7rem] ${tagColors[tone]}`}>{children}</span>;
 }

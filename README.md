@@ -10,7 +10,7 @@ See `docs/clap-local-model-server-plan.md` for the product plan and milestone do
 curl -fsSL https://raw.githubusercontent.com/nitishxyz/clap/main/install.sh | sh
 ```
 
-Downloads the latest release for your platform (macOS arm64 or Linux x64), verifies the sha256 checksum, and installs `clap` to `/usr/local/bin` (falls back to `~/.local/bin`). Set `CLAP_VERSION` to pin a tag or `CLAP_INSTALL_DIR` to choose the destination. Then:
+Downloads the latest release tarball for your platform (macOS arm64 or Linux x64), verifies its SHA-256 checksum, and installs `clap` to `/usr/local/bin` (falls back to `~/.local/bin`). The macOS tarball contains the same Developer ID-signed CLI that is verified from the notarized, stapled DMG; the DMG is also attached to each release for manual installation. Set `CLAP_VERSION` to pin a tag or `CLAP_INSTALL_DIR` to choose the destination. Then:
 
 ```bash
 clap run llama3.2:3b
@@ -49,7 +49,7 @@ bun run build:binary   # compiles dist/clap with the workers embedded
 
 Ship (or `scp`) the single `dist/clap` file anywhere; on first run it extracts its native workers to `~/.clap/libexec/<build-id>/` and uses them from there. Stale extractions from previous builds are cleaned up automatically. The compiled binary supports every CLI command, including spawning its own background server.
 
-CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push/PR. Tagging `v*` triggers the release workflow (`.github/workflows/release.yml`), which builds the native workers and compiled binary on macOS arm64 and attaches `clap-<tag>-darwin-arm64.tar.gz` (with a `.sha256` checksum) to a GitHub release. Native binaries are never committed to git — `libexec/` build outputs are gitignored and distributed through release artifacts.
+CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push/PR. Tagging `v*` triggers the release workflow (`.github/workflows/release.yml`), which builds the native workers and compiled binary and attaches checksummed platform tarballs. macOS releases also include a notarized, stapled `clap-<tag>-darwin-arm64.dmg`; its verified signed CLI is repackaged as `clap-<tag>-darwin-arm64.tar.gz` for `install.sh`. Native binaries are never committed to git — `libexec/` build outputs are gitignored and distributed through release artifacts.
 
 ## Background Server
 

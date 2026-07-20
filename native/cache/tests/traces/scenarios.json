@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "attention_partial_branch",
+      "capabilities": ["partial_prefix_branch", "safe_busy_donor"],
+      "donor": { "tokens": [1, 2, 3, 4], "busy": true, "state": "session" },
+      "request": { "tokens": [1, 2, 3, 9], "session": 2 },
+      "expect": { "operation": "branch", "reuse_tokens": 3 }
+    },
+    {
+      "name": "recurrent_anchor_restore",
+      "capabilities": ["whole_state_copy", "recurrent_or_hybrid"],
+      "donor": { "tokens": [1, 2, 3], "busy": false, "state": "anchor" },
+      "request": { "tokens": [1, 2, 3, 9], "session": 3 },
+      "expect": { "operation": "restore", "reuse_tokens": 3 }
+    },
+    {
+      "name": "non_rewindable_fallback",
+      "capabilities": ["whole_state_copy"],
+      "donor": { "tokens": [1, 2, 3, 4], "busy": false, "state": "session" },
+      "request": { "tokens": [1, 2, 8], "session": 4 },
+      "expect": { "operation": "fresh", "reuse_tokens": 0 }
+    },
+    {
+      "name": "stable_16k_harness_cross_session_branch",
+      "context_per_sequence": 131072,
+      "slots": 4,
+      "capabilities": ["partial_prefix_branch", "unified_storage", "safe_busy_donor"],
+      "turns": [
+        { "session": 0, "tokens": { "range": [0, 16384], "suffix": [41] } },
+        { "session": 0, "tokens": { "range": [0, 16384], "suffix": [42] } },
+        { "session": 2, "tokens": { "range": [0, 16384], "suffix": [43] } }
+      ],
+      "request_defaults": { "max_tokens": "omitted", "append_only": true },
+      "expect": { "operation": "branch", "reuse_tokens": 16384, "evictions": [] }
+    },
+    {
+      "name": "short_unrelated_request_uses_empty_slot",
+      "context_per_sequence": 131072,
+      "slots": 4,
+      "resident": [{ "tokens": { "range": [0, 16384] }, "priority": "interactive" }],
+      "request": { "tokens": { "range": [50000, 50096] }, "side_request": true },
+      "expect": { "operation": "fresh", "evictions": [] }
+    },
+    {
+      "name": "full_pool_value_pressure",
+      "context_per_sequence": 131072,
+      "slots": 4,
+      "resident": [
+        { "tokens": { "range": [0, 16384] }, "priority": "interactive", "reuse_count": 3 },
+        { "tokens": { "range": [50000, 50096] }, "priority": "background", "side_request": true },
+        { "tokens": [70001, 70002], "priority": "interactive" },
+        { "tokens": [70003, 70004], "priority": "interactive" }
+      ],
+      "request": { "tokens": [80000, 80001, 80002] },
+      "expect": { "evict_resident": 1, "preserve_resident": 0 }
+    },
+    {
+      "name": "four_mlx_slots_near_context_non_rewindable_anchor",
+      "context_per_sequence": 131072,
+      "slots": 4,
+      "capabilities": ["whole_state_copy", "recurrent_or_hybrid", "sliding_window"],
+      "resident": [
+        { "tokens": { "range": [0, 130000], "rewindable": false }, "busy": true },
+        { "tokens": { "range": [200000, 330000], "rewindable": false } },
+        { "tokens": { "range": [400000, 530000], "rewindable": false } },
+        { "tokens": { "range": [600000, 730000], "rewindable": false } }
+      ],
+      "request": { "tokens": { "range": [0, 16384], "suffix": [900001] } },
+      "expect": { "operation": "fresh", "anchor_tokens": 16384 }
+    },
+    {
+      "name": "failed_mutation_has_no_ghost_target_or_victim",
+      "slots": 2,
+      "resident": [
+        { "tokens": [1, 2, 3], "state": "anchor" },
+        { "tokens": [9, 9, 9], "state": "session" }
+      ],
+      "request": { "tokens": [1, 2, 3, 4], "inject_failure_after_eviction": true },
+      "expect": { "invalidated": [1], "preserved_read_only_donor": 0 }
+    }
+  ]
+}

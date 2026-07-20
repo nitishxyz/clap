@@ -10,9 +10,10 @@ import { z } from "zod";
 const KvTypeSchema = z.enum(["f16", "q8_0", "q4_0"]);
 
 const LlamaSectionSchema = z.object({
-  slots: z.number().int().positive().optional(),
+  retained_max: z.number().int().positive().optional(),
   context: z.number().int().positive().optional(),
   max_session_ctx: z.number().int().positive().optional(),
+  max_output: z.number().int().positive().optional(),
   batch: z.number().int().positive().optional(),
   ubatch: z.number().int().positive().optional(),
   gpu_layers: z.number().int().nonnegative().optional(),
@@ -23,10 +24,18 @@ const LlamaSectionSchema = z.object({
 }).partial();
 
 const MlxSectionSchema = z.object({
-  slots: z.number().int().positive().optional(),
-  parallel: z.number().int().positive().optional(),
+  retained_initial: z.number().int().positive().optional(),
+  retained_max: z.number().int().positive().optional(),
+  retained_budget_bytes: z.number().int().positive().optional(),
+  retained_budget_gib: z.number().positive().optional(),
+  retained_budget_percent: z.number().positive().max(100).optional(),
+  retained_high_percent: z.number().positive().max(100).optional(),
+  retained_low_percent: z.number().positive().max(100).optional(),
+  retained_growth_min_bytes: z.number().int().nonnegative().optional(),
+  retained_growth_reserve_percent: z.number().nonnegative().max(100).optional(),
   context: z.number().int().positive().optional(),
   max_session_ctx: z.number().int().positive().optional(),
+  max_output: z.number().int().positive().optional(),
   kv_type: KvTypeSchema.optional(),
 }).partial();
 
@@ -42,6 +51,12 @@ export const ClapConfigSchema = z.object({
   limits: z.object({
     max_inflight: z.number().int().positive().optional(),
     queue_depth: z.number().int().positive().optional(),
+    max_active: z.number().int().positive().optional(),
+  }).partial().default({}),
+  telemetry: z.object({
+    cache_decisions_enabled: z.boolean().optional().default(true),
+    cache_decisions_max_mib: z.number().int().min(1).max(1024).optional().default(32),
+    cache_decisions_max_age_days: z.number().int().min(1).max(365).optional().default(14),
   }).partial().default({}),
   llama: LlamaSectionSchema.default({}),
   mlx: MlxSectionSchema.default({}),
@@ -138,9 +153,10 @@ export function updateUserConfig(patch: Record<string, unknown>): { config: Clap
 }
 
 const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> = [
-  ["slots", "CLAP_LLAMA_SLOTS"],
+  ["retained_max", "CLAP_LLAMA_RETAINED_MAX"],
   ["context", "CLAP_LLAMA_CONTEXT"],
   ["max_session_ctx", "CLAP_LLAMA_MAX_SESSION_CTX"],
+  ["max_output", "CLAP_LLAMA_MAX_OUTPUT"],
   ["batch", "CLAP_LLAMA_BATCH"],
   ["ubatch", "CLAP_LLAMA_UBATCH"],
   ["gpu_layers", "CLAP_LLAMA_GPU_LAYERS"],
@@ -148,16 +164,27 @@ const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> =
 ];
 
 const MLX_ENV_MAP: Array<[keyof z.infer<typeof MlxSectionSchema>, string]> = [
-  ["slots", "CLAP_MLX_SLOTS"],
-  ["parallel", "CLAP_MLX_PARALLEL"],
+  ["retained_initial", "CLAP_MLX_RETAINED_INITIAL"],
+  ["retained_max", "CLAP_MLX_RETAINED_MAX"],
+  ["retained_budget_bytes", "CLAP_MLX_RETAINED_BUDGET_BYTES"],
+  ["retained_budget_gib", "CLAP_MLX_RETAINED_BUDGET_GIB"],
+  ["retained_budget_percent", "CLAP_MLX_RETAINED_BUDGET_PERCENT"],
+  ["retained_high_percent", "CLAP_MLX_RETAINED_HIGH_PERCENT"],
+  ["retained_low_percent", "CLAP_MLX_RETAINED_LOW_PERCENT"],
+  ["retained_growth_min_bytes", "CLAP_MLX_RETAINED_GROWTH_MIN_BYTES"],
+  ["retained_growth_reserve_percent", "CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT"],
   ["context", "CLAP_MLX_CONTEXT"],
   ["max_session_ctx", "CLAP_MLX_MAX_SESSION_CTX"],
+  ["max_output", "CLAP_MLX_MAX_OUTPUT"],
   ["kv_type", "CLAP_MLX_KV_TYPE"],
 ];
 
 // Applies [llama] globals to the process environment. Explicit environment
 // variables always win over the config file.
 export function applyConfigToEnv(config: ClapConfig): void {
+  if (config.limits.max_active !== undefined && process.env.CLAP_MAX_ACTIVE === undefined) {
+    process.env.CLAP_MAX_ACTIVE = String(config.limits.max_active);
+  }
   for (const [key, envName] of LLAMA_ENV_MAP) {
     const value = config.llama[key];
     if (value !== undefined && process.env[envName] === undefined) {

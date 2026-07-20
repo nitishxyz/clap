@@ -133,16 +133,22 @@ function GpuRows({ gpu }: { gpu: DashboardGpu }) {
   );
 }
 
-const WORKER_GRID = "grid grid-cols-[minmax(8rem,1.4fr)_3.25rem_minmax(6rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)] items-center gap-x-3 px-3";
+export function formatWorkerCpu(percent?: number): string | undefined {
+  if (percent === undefined) return undefined;
+  if (percent > 0 && percent < 1) return "<1%";
+  return `${percent.toFixed(0)}%`;
+}
 
-export function WorkerBarCell({ pct, value, tone, dim, title }: { pct?: number; value?: string; tone?: string; dim?: boolean; title?: string }) {
+export function WorkerMetricCell({ label, pct, value, tone, title }: { label: string; pct?: number; value?: string; tone?: string; title?: string }) {
+  const available = value !== undefined;
   return (
-    <span className="flex min-w-0 items-center gap-2" title={title}>
-      <BoxBar pct={pct} tone={tone} className="min-w-0 flex-1" />
-      <span className={`w-[4.6rem] shrink-0 truncate text-right text-[0.72rem] tabular-nums ${dim || pct === undefined ? "text-muted" : ""}`}>
-        {value ?? "-"}
-      </span>
-    </span>
+    <div className={`min-w-0 border border-soft-border px-2 py-1.5 ${available ? "bg-panel" : "bg-panel/40"}`} title={title} data-worker-metric={label.toLowerCase()}>
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span className="truncate text-[0.62rem] uppercase tracking-[0.06em] text-muted">{label}</span>
+        <span className={`shrink-0 text-[0.72rem] tabular-nums ${available ? "" : "text-muted"}`}>{value ?? "unavailable"}</span>
+      </div>
+      <BoxBar pct={pct} tone={tone} className="w-full" />
+    </div>
   );
 }
 
@@ -168,17 +174,17 @@ function WorkerRow({ entry, platform, systemMemoryBytes, cpuCount, gpuTotalBytes
     : undefined;
   const cachePct = mlxMemory && systemMemoryBytes ? (mlxMemory.cacheBytes / systemMemoryBytes) * 100 : undefined;
   return (
-    <div className={`${WORKER_GRID} py-1`}>
-      <span className="truncate text-[0.74rem]" title={`${entry.id}\n${entry.localPath}`}>{midTruncate(entry.id)}</span>
-      <span className="truncate text-[0.7rem] tabular-nums text-muted">{entry.worker?.pid ?? "-"}</span>
-      <WorkerBarCell pct={cpuPct} value={usage ? `${usage.cpuPercent.toFixed(0)}%` : undefined} />
-      <WorkerBarCell
-        pct={rssPct}
-        value={usage ? shortBytes(usage.rssBytes) : undefined}
-        title={RSS_TITLE}
-      />
-      <WorkerBarCell pct={acceleratorPct} tone="bg-cache" value={acceleratorBytes !== undefined ? shortBytes(acceleratorBytes) : undefined} title={unifiedMlx ? MLX_ACTIVE_TITLE : "Dedicated GPU memory used by this worker"} />
-      <WorkerBarCell pct={cachePct} tone="bg-warn" value={mlxMemory ? shortBytes(mlxMemory.cacheBytes) : undefined} title={unifiedMlx ? MLX_CACHE_TITLE : undefined} />
+    <div className="border-b border-soft-border px-3 py-2 last:border-b-0">
+      <div className="mb-1.5 flex min-w-0 items-baseline justify-between gap-3">
+        <span className="truncate text-[0.74rem]" title={`${entry.id}\n${entry.localPath}`}>{midTruncate(entry.id)}</span>
+        <span className="shrink-0 text-[0.68rem] tabular-nums text-muted">PID {entry.worker?.pid ?? "unavailable"}</span>
+      </div>
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
+        <WorkerMetricCell label="CPU" pct={cpuPct} value={usage ? formatWorkerCpu(usage.cpuPercent) : undefined} title="Process CPU sampled by ps; values below one percent are shown as <1%" />
+        <WorkerMetricCell label="RSS" pct={rssPct} value={usage ? fmtBytes(usage.rssBytes) : undefined} title={RSS_TITLE} />
+        <WorkerMetricCell label="Accelerator" pct={acceleratorPct} tone="bg-cache" value={acceleratorBytes !== undefined ? fmtBytes(acceleratorBytes) : undefined} title={unifiedMlx ? MLX_ACTIVE_TITLE : "Dedicated GPU memory used by this worker; unavailable when the platform cannot attribute GPU memory by process"} />
+        <WorkerMetricCell label="Reclaimable" pct={cachePct} tone="bg-warn" value={mlxMemory ? fmtBytes(mlxMemory.cacheBytes) : undefined} title={unifiedMlx ? MLX_CACHE_TITLE : "Backend does not expose reclaimable allocator memory"} />
+      </div>
     </div>
   );
 }
@@ -237,29 +243,17 @@ export function UsagePanel({ data }: { data: DashboardData }) {
       </div>
       <Card title="workers" meta={data.loaded.length ? `${data.loaded.length} resident` : undefined}>
         {data.loaded.length ? (
-          <div className="overflow-x-auto">
-            <div className="min-w-[640px]">
-              <div className={`${WORKER_GRID} pb-1 text-[0.66rem] uppercase tracking-[0.06em] text-muted`}>
-                <span>model</span>
-                <span>pid</span>
-                <span>cpu</span>
-                <span>rss</span>
-                <span>accelerator</span>
-                <span>reclaimable</span>
-              </div>
-              <div className="max-h-44 overflow-y-auto">
-                {data.loaded.map((entry) => (
-                  <WorkerRow
-                    key={entry.key}
-                    entry={entry}
-                    platform={server.platform}
-                    systemMemoryBytes={memTotal}
-                    cpuCount={server.cpuCount}
-                    gpuTotalBytes={gpuTotal}
-                  />
-                ))}
-              </div>
-            </div>
+          <div className="max-h-72 overflow-y-auto">
+            {data.loaded.map((entry) => (
+              <WorkerRow
+                key={entry.key}
+                entry={entry}
+                platform={server.platform}
+                systemMemoryBytes={memTotal}
+                cpuCount={server.cpuCount}
+                gpuTotalBytes={gpuTotal}
+              />
+            ))}
           </div>
         ) : (
           <div className="px-3 py-1 text-[0.72rem] text-muted">no resident workers</div>
