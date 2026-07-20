@@ -5,6 +5,12 @@ import Foundation
 let cacheTelemetryKey = ProcessInfo.processInfo.environment["CLAP_TELEMETRY_HMAC_KEY"]
   ?? UUID().uuidString + UUID().uuidString
 
+struct CacheBoundaryDescriptor: Decodable {
+  let kind: String
+  let through_message: Int?
+  let label: String?
+}
+
 struct CacheIntent: Decodable {
   let namespace: String?
   let tenant: String?
@@ -14,6 +20,7 @@ struct CacheIntent: Decodable {
   let session: String?
   let priority: String?
   let side_request: Bool?
+  let boundaries: [CacheBoundaryDescriptor]?
 }
 
 struct CacheIdentity {
@@ -61,6 +68,7 @@ struct CachePlanView {
   let donor: Int?
   let reuseTokens: Int
   let anchorTokens: Int
+  let anchorBoundaries: [Int]
   let decisionUs: UInt64
   let evictions: [Int]
 }
@@ -140,6 +148,16 @@ final class CachePlan {
       try CacheCoordinator.check("cc_plan_eviction", cc_plan_eviction(handle, index, &slot, &generation))
       evictions.append(Int(slot))
     }
+    var anchorBoundaryCount: UInt32 = 0
+    try CacheCoordinator.check("cc_plan_anchor_boundary_count",
+      cc_plan_anchor_boundary_count(handle, &anchorBoundaryCount))
+    var anchorBoundaries: [Int] = []
+    for index in 0..<anchorBoundaryCount {
+      var tokenCount: UInt64 = 0
+      try CacheCoordinator.check("cc_plan_anchor_boundary",
+        cc_plan_anchor_boundary(handle, index, &tokenCount))
+      anchorBoundaries.append(Int(tokenCount))
+    }
     var candidateCount: UInt32 = 0
     try CacheCoordinator.check("cc_plan_candidate_count",
       cc_plan_candidate_count(handle, &candidateCount))
@@ -170,6 +188,7 @@ final class CachePlan {
       donor: raw.has_donor != 0 ? Int(raw.donor_slot) : nil,
       reuseTokens: Int(raw.reuse_tokens),
       anchorTokens: Int(raw.anchor_tokens),
+      anchorBoundaries: anchorBoundaries,
       decisionUs: raw.decision_us,
       evictions: evictions
     )
@@ -211,12 +230,19 @@ final class CachePlan {
 final class CacheCoordinator {
   private let handle: OpaquePointer
 
-  init(retention: RetentionConfiguration, capacity: Int) throws {
+  init(retention: RetentionConfiguration, capacity: Int,
+       environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+    let enabled = environment["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0"
+    let minimum = UInt64(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048
+    let interval = UInt64(environment["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048
+    let maximum = UInt32(environment["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8
+    let fraction = UInt32(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS"] ?? "") ?? 2_500
+    let cap = UInt64(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BYTES"] ?? "") ?? 0
     guard let handle = cc_manager_create_with_retention(
       UInt32(retention.initialEntries), 16, UInt64(max(capacity, 1)),
       UInt32(retention.hardCeiling), UInt32(retention.hardCeiling),
       retention.physicalByteBudget, retention.highWatermarkBytes,
-      retention.lowWatermarkBytes) else {
+      retention.lowWatermarkBytes, enabled ? 1 : 0, minimum, interval, maximum, fraction, cap) else {
       throw CacheCoordinatorError.unavailable
     }
     self.handle = handle
@@ -231,7 +257,8 @@ final class CacheCoordinator {
   func plan(tokens: [Int], identity: CacheIdentity, capabilities: UInt64,
             slots: [CacheSlotMaterialization],
             stableBoundaries: [Int] = [],
-            outputReserve: Int, state: UInt32 = UInt32(CC_SLOT_SESSION)) throws -> CachePlan {
+            outputReserve: Int, state: UInt32 = UInt32(CC_SLOT_SESSION),
+            scope: UInt32? = nil, estimatedBytesPerToken: UInt64 = 0) throws -> CachePlan {
     let token32 = tokens.map(Int32.init)
     let slotCapabilities = slots.map(\.flags)
     let boundaries = stableBoundaries.map(UInt64.init)
@@ -241,9 +268,10 @@ final class CacheCoordinator {
           boundaries.withUnsafeBufferPointer { boundaries in
             cc_manager_plan(handle, tokens.baseAddress, tokens.count, fingerprint.baseAddress,
               identity.tenant, identity.project, identity.harness, identity.agent,
-              identity.session, identity.scope, identity.priority,
+              identity.session, scope ?? identity.scope, identity.priority,
               identity.sideRequest ? 1 : 0, capabilities, slots.baseAddress, slots.count,
-              boundaries.baseAddress, boundaries.count, UInt64(outputReserve), state)
+              boundaries.baseAddress, boundaries.count, UInt64(outputReserve),
+              estimatedBytesPerToken, state)
           }
         }
       }
@@ -302,6 +330,11 @@ final class CacheCoordinator {
 
   func setBusy(slot: Int, generation: UInt64, busy: Bool) throws {
     try Self.check("cc_manager_set_busy", cc_manager_set_busy(handle, UInt32(slot), generation, busy ? 1 : 0))
+  }
+
+  func setAnchorProtected(slot: Int, generation: UInt64, protected: Bool) throws {
+    try Self.check("cc_manager_set_anchor_protected",
+      cc_manager_set_anchor_protected(handle, UInt32(slot), generation, protected ? 1 : 0))
   }
 
   func invalidate(slot: Int, generation: UInt64) throws -> UInt64 {

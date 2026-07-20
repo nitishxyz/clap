@@ -201,6 +201,23 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                   <DetailItem label="retained bytes">{fmtBytes(entry.worker.retention.retainedBytes)}</DetailItem>
                   <DetailItem label="session bytes">{fmtBytes(entry.worker.retention.sessionBytes)}</DetailItem>
                   <DetailItem label="anchor bytes">{fmtBytes(entry.worker.retention.anchorBytes)}</DetailItem>
+                  <DetailItem label="automatic checkpoints">
+                    {entry.worker.retention.automaticCheckpointCount ?? "unknown"}
+                  </DetailItem>
+                  <DetailItem label="automatic checkpoint bytes">
+                    {entry.worker.retention.automaticCheckpointBytes === undefined
+                      ? "unknown" : fmtBytes(entry.worker.retention.automaticCheckpointBytes)}
+                  </DetailItem>
+                  <DetailItem label="checkpoint policy">
+                    {entry.worker.retention.automaticCheckpointsEnabled === undefined ? "unknown"
+                      : entry.worker.retention.automaticCheckpointsEnabled
+                        ? `${entry.worker.retention.automaticCheckpointMinimumTokens}/${entry.worker.retention.automaticCheckpointIntervalTokens}/${entry.worker.retention.automaticCheckpointMax}`
+                        : "disabled"}
+                  </DetailItem>
+                  <DetailItem label="checkpoint budget">
+                    {entry.worker.retention.automaticCheckpointBudgetBytes === undefined
+                      ? "unknown" : fmtBytes(entry.worker.retention.automaticCheckpointBudgetBytes)}
+                  </DetailItem>
                   <DetailItem label="budget">{fmtBytes(entry.worker.retention.budgetBytes)}</DetailItem>
                   <DetailItem label="high watermark">{fmtBytes(entry.worker.retention.highWatermarkBytes)}</DetailItem>
                   <DetailItem label="low watermark">{fmtBytes(entry.worker.retention.lowWatermarkBytes)}</DetailItem>

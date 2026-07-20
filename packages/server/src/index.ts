@@ -37,7 +37,12 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
-import { CacheEventStore } from "./cache-event-store";
+import { CacheEventStore, type PersistedCacheDecision } from "./cache-event-store";
+import {
+  classifyPersistedCacheOutcome,
+  firstDecisionIdsForWorkerModelDomain,
+  sessionDisplayIdentity,
+} from "./dashboard-identity";
 import { applyConfigToEnv, loadClapConfig, updateUserConfig, workerEnvForModel } from "./config";
 export { configPaths, loadClapConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
@@ -72,8 +77,53 @@ export function createServer(
     maxBytes: (config.telemetry.cache_decisions_max_mib ?? 32) * 1024 * 1024,
     maxAgeMs: (config.telemetry.cache_decisions_max_age_days ?? 14) * 24 * 60 * 60 * 1000,
   });
-  const metrics = new MetricsCollector(cacheEvents);
+  // Authoritative checkpoint minimum: explicit env wins (applyConfigToEnv
+  // seeds it from config when unset), matching what workers receive.
+  const checkpointMinimumTokens = () => {
+    const fromEnv = Number(process.env.CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS);
+    return Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : config.cache.checkpoints.minimum_tokens;
+  };
+  const metrics = new MetricsCollector(cacheEvents, { checkpointMinimumTokens });
   applyConfigToEnv(config);
+
+  // Persisted rows carry launch IDs so the dashboard can tell records from a
+  // previous server/worker launch (cache no longer resident) apart from rows
+  // belonging to a currently warm worker. Old records without a stored
+  // outcome are re-classified reproducibly from their raw persisted fields;
+  // the stored events themselves are never rewritten.
+  const warmWorkerLaunchIds = (): Set<string> => {
+    const warm = new Set<string>();
+    for (const entry of lifecycle.list()) {
+      const launchId = residents.get(entry.key)?.info().launchId;
+      if (typeof launchId === "string" && launchId.length > 0) warm.add(launchId);
+    }
+    return warm;
+  };
+  // Cold authority is derived at list/query time from ordered worker+model
+  // domain evidence (timestamp, workerLaunchId, model). Stored events are never
+  // rewritten; empty candidates without first-decision evidence stay non-cold.
+  const firstDecisionAuthority = (events: PersistedCacheDecision[]) =>
+    firstDecisionIdsForWorkerModelDomain(events.map((event) => ({
+      id: event.requestId,
+      timestamp: event.timestamp,
+      model: event.model,
+      workerLaunchId: event.workerLaunchId,
+    })));
+  const persistedOutcome = (
+    event: PersistedCacheDecision,
+    firstIds: Set<string>,
+  ) => classifyPersistedCacheOutcome(event, {
+    checkpointMinimumTokens: checkpointMinimumTokens(),
+    isFirstDecisionForWorkerModelDomain: firstIds.has(event.requestId),
+  });
+  const persistedIdentity = (event: PersistedCacheDecision) =>
+    sessionDisplayIdentity({
+      sessionFingerprint: event.sessionFingerprint,
+      promptPrefixId: event.promptPrefixId,
+    });
+  const persistedHistorical = (event: PersistedCacheDecision, warm: Set<string>) =>
+    event.serverLaunchId !== metrics.serverLaunchId
+    || (event.workerLaunchId !== undefined && !warm.has(event.workerLaunchId));
   residents.memorySnapshot = async (pids) => {
     const [usedBytes, processUsage] = await Promise.all([
       systemMemoryUsedBytes(),
@@ -145,10 +195,18 @@ export function createServer(
 
   app.onError((error, c) => {
     if (error instanceof z.ZodError) {
-      return c.json({ error: { message: error.message, type: "invalid_request_error", code: "invalid_json" } }, 400);
+      const boundaryIssue = error.issues.some((issue) => issue.path[0] === "cache" && issue.path[1] === "boundaries");
+      return c.json({
+        error: {
+          message: error.message,
+          type: "invalid_request_error",
+          code: boundaryIssue ? "invalid_cache_boundary" : "invalid_json",
+        },
+      }, 400);
     }
     if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) &&
-        (error.code === "context_length_exceeded" || error.code === "max_output_tokens_exceeded" || error.code === "token_capability_unknown")) {
+        (error.code === "context_length_exceeded" || error.code === "max_output_tokens_exceeded" || error.code === "token_capability_unknown" ||
+          error.code === "invalid_cache_boundary" || error.code === "unsafe_cache_boundary" || error.code === "non_prefix_cache_boundary")) {
       return c.json(ErrorResponseSchema.parse({
         error: { message: error.message, type: "invalid_request_error", code: error.code },
       }), 400);
@@ -250,11 +308,12 @@ export function createServer(
     config.auth = updated.config.auth;
     config.models = updated.config.models;
     config.llama = updated.config.llama;
+    config.cache = updated.config.cache;
     metrics.event("server", `config updated (${updated.path})`);
     return c.json({
       config: updated.config,
       path: updated.path,
-      note: "auth/models/llama apply to new requests and worker starts; [server] and [limits] apply on restart",
+      note: "auth/models/llama apply to new requests; [cache.checkpoints], [server], and [limits] apply on restart",
     });
   });
 
@@ -327,36 +386,57 @@ export function createServer(
       sampleGpuUsage(),
       systemMemoryUsedBytes(),
     ]);
-    const liveRequests = metrics.recent(80);
+    const liveRequests = metrics.recent(80).map((request) => ({
+      ...request,
+      historical: false as const,
+    }));
     const liveIds = new Set(liveRequests.map((request) => request.id));
-    const persistedRequests = cacheEvents.list({}, 80).items
+    const warmWorkers = warmWorkerLaunchIds();
+    // Pull a wider window so first-decision authority is stable even when the
+    // dashboard only returns the newest 80 rows.
+    const persistedWindow = cacheEvents.list({}, 200).items;
+    const firstIds = firstDecisionAuthority(persistedWindow);
+    const persistedRequests = persistedWindow
       .filter((event) => !liveIds.has(event.requestId))
-      .map((event) => ({
-        source: "persisted" as const,
-        id: event.requestId,
-        startedAt: event.timestamp - (event.durationMs ?? 0),
-        endedAt: event.timestamp,
-        durationMs: event.durationMs,
-        ttftMs: event.ttftMs,
-        model: event.model,
-        endpoint: event.endpoint ?? "/v1/chat/completions",
-        stream: false,
-        status: event.status,
-        phase: "done" as const,
-        promptTokens: event.promptTokenCount,
-        cacheHit: event.cache?.hit,
-        reusedTokens: event.cache?.reusedTokens,
-        reuseKind: event.cache?.kind,
-        reuseScope: event.cache?.scope,
-        sideRequest: event.side,
-        donorSlot: event.cache?.donorSlot,
-        targetSlot: event.cache?.targetSlot,
-        cacheDecisionUs: event.cache?.decisionUs,
-        plannedReuseTokens: event.cache?.plannedTokens,
-        realizedReuseTokens: event.cache?.realizedTokens,
-        cacheFallback: event.cache?.fallback,
-        finishReason: event.finishReason,
-      }));
+      .slice(0, 80)
+      .map((event) => {
+        const identity = persistedIdentity(event);
+        return {
+          source: "persisted" as const,
+          id: event.requestId,
+          startedAt: event.timestamp - (event.durationMs ?? 0),
+          endedAt: event.timestamp,
+          durationMs: event.durationMs,
+          ttftMs: event.ttftMs,
+          model: event.model,
+          endpoint: event.endpoint ?? "/v1/chat/completions",
+          stream: false,
+          status: event.status,
+          phase: "done" as const,
+          promptTokens: event.promptTokenCount,
+          conversation: identity.promptPrefixId,
+          sessionDisplayId: identity.sessionDisplayId,
+          sessionIdentityKind: identity.sessionIdentityKind,
+          sessionFingerprint: identity.sessionFingerprint,
+          cacheHit: event.cache?.hit,
+          reusedTokens: event.cache?.reusedTokens,
+          reuseKind: event.cache?.kind === "slot" || event.cache?.kind === "branch" || event.cache?.kind === "anchor"
+            ? event.cache.kind
+            : undefined,
+          reuseScope: event.cache?.scope,
+          sideRequest: event.side,
+          donorSlot: event.cache?.donorSlot,
+          targetSlot: event.cache?.targetSlot,
+          cacheDecisionUs: event.cache?.decisionUs,
+          plannedReuseTokens: event.cache?.plannedTokens,
+          realizedReuseTokens: event.cache?.realizedTokens,
+          cacheFallback: event.cache?.fallback,
+          timing: event.timing,
+          finishReason: event.finishReason,
+          cacheOutcome: persistedOutcome(event, firstIds),
+          historical: persistedHistorical(event, warmWorkers),
+        };
+      });
     return {
       server: {
         version: clapVersion,
@@ -414,35 +494,56 @@ export function createServer(
 
   app.get("/clap/v1/dashboard/requests/:id", (c) => {
     const record = metrics.request(c.req.param("id"));
-    if (record) return c.json(record);
+    if (record) return c.json({ ...record, historical: false });
     const persisted = cacheEvents.get(c.req.param("id"));
-    if (persisted) return c.json({
-      source: "persisted",
-      id: persisted.requestId,
-      startedAt: persisted.timestamp - (persisted.durationMs ?? 0),
-      endedAt: persisted.timestamp,
-      durationMs: persisted.durationMs,
-      ttftMs: persisted.ttftMs,
-      model: persisted.model,
-      endpoint: persisted.endpoint ?? "/v1/chat/completions",
-      stream: false,
-      status: persisted.status,
-      phase: "done",
-      promptTokens: persisted.promptTokenCount,
-      cacheHit: persisted.cache?.hit,
-      reusedTokens: persisted.cache?.reusedTokens,
-      reuseKind: persisted.cache?.kind,
-      reuseScope: persisted.cache?.scope,
-      sideRequest: persisted.side,
-      donorSlot: persisted.cache?.donorSlot,
-      targetSlot: persisted.cache?.targetSlot,
-      cacheDecisionUs: persisted.cache?.decisionUs,
-      plannedReuseTokens: persisted.cache?.plannedTokens,
-      realizedReuseTokens: persisted.cache?.realizedTokens,
-      cacheFallback: persisted.cache?.fallback,
-      finishReason: persisted.finishReason,
-      cacheDiagnostics: persisted,
-    });
+    if (persisted) {
+      const warmWorkers = warmWorkerLaunchIds();
+      // Authority over the same model+worker domain for cold classification.
+      const domainPeers = cacheEvents.list({ model: persisted.model }, 200).items
+        .filter((event) => event.workerLaunchId === persisted.workerLaunchId);
+      const firstIds = firstDecisionAuthority(
+        domainPeers.length ? domainPeers : [persisted],
+      );
+      const identity = persistedIdentity(persisted);
+      return c.json({
+        source: "persisted",
+        id: persisted.requestId,
+        startedAt: persisted.timestamp - (persisted.durationMs ?? 0),
+        endedAt: persisted.timestamp,
+        durationMs: persisted.durationMs,
+        ttftMs: persisted.ttftMs,
+        model: persisted.model,
+        endpoint: persisted.endpoint ?? "/v1/chat/completions",
+        stream: false,
+        status: persisted.status,
+        phase: "done",
+        promptTokens: persisted.promptTokenCount,
+        conversation: identity.promptPrefixId,
+        sessionDisplayId: identity.sessionDisplayId,
+        sessionIdentityKind: identity.sessionIdentityKind,
+        sessionFingerprint: identity.sessionFingerprint,
+        cacheHit: persisted.cache?.hit,
+        reusedTokens: persisted.cache?.reusedTokens,
+        reuseKind: persisted.cache?.kind === "slot" || persisted.cache?.kind === "branch" || persisted.cache?.kind === "anchor"
+          ? persisted.cache.kind
+          : undefined,
+        reuseScope: persisted.cache?.scope,
+        sideRequest: persisted.side,
+        donorSlot: persisted.cache?.donorSlot,
+        targetSlot: persisted.cache?.targetSlot,
+        cacheDecisionUs: persisted.cache?.decisionUs,
+        plannedReuseTokens: persisted.cache?.plannedTokens,
+        realizedReuseTokens: persisted.cache?.realizedTokens,
+        cacheFallback: persisted.cache?.fallback,
+        timing: persisted.timing,
+        finishReason: persisted.finishReason,
+        cacheOutcome: persistedOutcome(persisted, firstIds),
+        historical: persistedHistorical(persisted, warmWorkers),
+        // Full raw persisted event is preserved for diagnostics; outcome is
+        // derived/read-only and never rewrites the stored telemetry.
+        cacheDiagnostics: persisted,
+      });
+    }
     return c.json({ error: { message: "request not found", type: "invalid_request_error" } }, 404);
   });
 
@@ -876,6 +977,12 @@ export function createServer(
 function chatRequestFromResponse(request: ResponseRequest): ChatCompletionRequest {
   const messages = responseInputMessages(request);
   if (request.instructions) messages.unshift({ role: "system", content: request.instructions });
+  const cache = request.cache ? {
+    ...request.cache,
+    boundaries: request.cache.boundaries?.map((boundary) => boundary.kind === "messages" && request.instructions
+      ? { ...boundary, through_message: boundary.through_message + 1 }
+      : boundary),
+  } : undefined;
   return {
     model: request.model,
     messages,
@@ -887,6 +994,7 @@ function chatRequestFromResponse(request: ResponseRequest): ChatCompletionReques
     temperature: request.temperature,
     top_p: request.top_p,
     max_tokens: request.max_output_tokens,
+    cache,
   };
 }
 
@@ -1534,9 +1642,11 @@ function workerResultMetrics(result?: ResidentChatResult) {
     stableBoundaryTokenHash: result?.cache?.stableBoundaryTokenHash,
     stableBoundaryTokenCount: result?.cache?.stableBoundaryTokenCount,
     stableBoundaryKind: result?.cache?.stableBoundaryKind,
+    stableBoundaries: result?.cache?.stableBoundaries,
     promptTokenHash: result?.cache?.promptTokenHash,
     promptTokenCount: result?.cache?.promptTokenCount,
-    prefillMs: result?.cache?.prefillMs,
+    prefillMs: result?.timing?.prefillMs ?? result?.cache?.prefillMs,
+    timing: result?.timing,
     finishReason: result?.finishReason,
   };
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchRequestDetail, type DashboardRequest } from "@/lib/api";
 import { fmtClock, fmtDuration, fmtTokens } from "@/lib/format";
-import { cacheReusePercent } from "./RequestTables";
+import { CACHE_OUTCOME_LABELS, cacheOutcomeLabel, cacheReusePercent, HistoricalTag, IdentityTag } from "./RequestTables";
 import { Tag } from "./Shared";
 
 const roleColor: Record<string, string> = {
@@ -33,12 +33,26 @@ export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
   const pct = cacheReusePercent(record);
   const reused = record.reusedTokens ?? (record.cacheHit === false ? 0 : undefined);
   const diagnostics = record.cacheDiagnostics;
+  const outcome = record.cacheOutcome;
+  const skippedBoundaries = diagnostics?.stableBoundaries?.filter((boundary) => boundary.status === "skipped")
+    ?? (outcome?.boundariesSkipped ? Array.from({ length: outcome.boundariesSkipped }) : []);
   return (
     <div>
       <div className="text-[0.68rem] uppercase tracking-[0.08em] text-muted">cache decision</div>
-      <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <Field label="decision">
-          {record.cacheHit === true ? (
+      <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="outcome">
+          {outcome ? (
+            <span className="inline-flex flex-wrap items-center gap-1">
+              <Tag
+                tone={outcome.category === "hit" ? "hit" : outcome.category === "cache_error" || outcome.category === "unexplained_miss" ? "err" : outcome.category === "donor_busy" ? "warn" : outcome.category === "isolated" ? "pin" : "default"}
+                title={outcome.reason}
+                ariaLabel={`cache outcome ${cacheOutcomeLabel(outcome)}`}
+              >
+                {cacheOutcomeLabel(outcome)}
+              </Tag>
+              <HistoricalTag historical={record.historical} />
+            </span>
+          ) : record.cacheHit === true ? (
             <Tag tone="hit" title="prefix cache hit: reused tokens came from the KV cache instead of being re-prefilled">hit</Tag>
           ) : record.cacheHit === false ? (
             <Tag title="prefix cache miss: the full prompt was prefilled">miss</Tag>
@@ -48,6 +62,15 @@ export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
           {record.status !== "ok" && record.status !== "active" ? (
             <span className="ml-2 text-muted">· from {record.status} request</span>
           ) : null}
+        </Field>
+        <Field label="raw decision">
+          {record.cacheHit === true ? (
+            <Tag tone="hit" title="raw telemetry: hit">hit</Tag>
+          ) : record.cacheHit === false ? (
+            <Tag title="raw telemetry: miss">miss</Tag>
+          ) : (
+            unavailable
+          )}
         </Field>
         <Field label="intent">
           {record.sideRequest ? (
@@ -83,7 +106,66 @@ export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
         <Field label="decision latency">
           {record.cacheDecisionUs !== undefined ? fmtDecisionLatency(record.cacheDecisionUs) : unavailable}
         </Field>
+        <Field label="boundaries skipped">
+          {outcome?.boundariesSkipped !== undefined
+            ? outcome.boundariesSkipped
+            : skippedBoundaries.length
+              ? skippedBoundaries.length
+              : diagnostics?.stableBoundaries
+                ? 0
+                : unavailable}
+        </Field>
+        <Field label="blocked prefix">
+          {outcome?.maxBlockedPrefixTokens !== undefined
+            ? `${fmtTokens(outcome.maxBlockedPrefixTokens)} tok`
+            : unavailable}
+        </Field>
       </div>
+      {outcome ? (
+        <div className="mt-2 border border-soft-border bg-panel-strong p-2">
+          <div className="text-[0.64rem] uppercase tracking-[0.07em] text-muted">
+            classification · {CACHE_OUTCOME_LABELS[outcome.category]}
+            {outcome.hitKind ? ` · ${outcome.hitKind}` : ""}
+          </div>
+          <div className="mt-1 text-[0.74rem]" title={outcome.reason}>{outcome.reason}</div>
+          {outcome.evidence.length ? (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {outcome.evidence.map((item) => (
+                <Tag key={item} title={item} ariaLabel={item}>{item}</Tag>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {record.timing ? (
+        <div className="mt-2">
+          <div className="text-[0.68rem] uppercase tracking-[0.08em] text-muted">MLX phase timing</div>
+          <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="prefill compute">{record.timing.prefillMs !== undefined ? fmtDuration(record.timing.prefillMs) : unavailable}</Field>
+            <Field label="scheduler wait">{record.timing.schedulerWaitMs !== undefined ? fmtDuration(record.timing.schedulerWaitMs) : unavailable}</Field>
+            <Field label="cache materialize">{record.timing.cacheMaterializeMs !== undefined ? fmtDuration(record.timing.cacheMaterializeMs) : unavailable}</Field>
+            <Field label="first decode">{record.timing.firstDecodeMs !== undefined ? fmtDuration(record.timing.firstDecodeMs) : unavailable}</Field>
+            <Field label="template + tokenize">{record.timing.templateTokenizeMs !== undefined ? fmtDuration(record.timing.templateTokenizeMs) : unavailable}</Field>
+            <Field label="received → admitted">{record.timing.receivedToAdmittedMs !== undefined ? fmtDuration(record.timing.receivedToAdmittedMs) : unavailable}</Field>
+            <Field label="coordinator wait">{record.timing.coordinatorWaitMs !== undefined ? fmtDuration(record.timing.coordinatorWaitMs) : unavailable}</Field>
+            <Field label="coordinator plan / apply">
+              {record.timing.coordinatorPlanMs !== undefined || record.timing.coordinatorApplyMs !== undefined
+                ? `${fmtDuration(record.timing.coordinatorPlanMs ?? 0)} / ${fmtDuration(record.timing.coordinatorApplyMs ?? 0)}`
+                : unavailable}
+            </Field>
+            <Field label="residual prefill">
+              {record.timing.residualPrefillTokens !== undefined
+                ? `${fmtTokens(record.timing.residualPrefillTokens)} tok · ${record.timing.prefillChunks ?? 0} chunks`
+                : unavailable}
+            </Field>
+            <Field label="prefill quantum">
+              {record.timing.normalPrefillQuantum !== undefined && record.timing.contendedPrefillQuantum !== undefined
+                ? `${record.timing.normalPrefillQuantum} alone / ${record.timing.contendedPrefillQuantum} contended`
+                : unavailable}
+            </Field>
+          </div>
+        </div>
+      ) : null}
       {diagnostics ? (
         <div className="mt-2 border border-soft-border bg-panel-strong p-2">
           <div className="text-[0.64rem] uppercase tracking-[0.07em] text-muted">privacy-safe persisted diagnostics</div>
@@ -93,6 +175,23 @@ export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
             {diagnostics.cache?.missReason ? ` · miss ${diagnostics.cache.missReason}` : ""}
             {diagnostics.errorCode ? ` · error ${diagnostics.errorCode}` : ""}
           </div>
+          {diagnostics.stableBoundaries?.length ? (
+            <div className="mt-1.5 grid gap-1">
+              {diagnostics.stableBoundaries.map((boundary, index) => (
+                <div key={`${boundary.tokenCount ?? "skipped"}-${index}`} className="text-[0.7rem]">
+                  boundary {index + 1} · {boundary.kind}
+                  {boundary.label ? ` · ${boundary.label}` : " · automatic"}
+                  {boundary.tokenCount !== undefined ? ` · ${fmtTokens(boundary.tokenCount)} tok` : ""}
+                  {boundary.requested ? " · requested" : ""}
+                  {` · ${boundary.status}`}
+                  {boundary.skipReason ? ` · ${boundary.skipReason}` : ""}
+                  {boundary.materialized ? " · materialized" : ""}
+                  {diagnostics.stableBoundaryTokenCount === boundary.tokenCount ? " · selected anchor" : ""}
+                  {boundary.tokenHash ? ` · hash ${boundary.tokenHash.slice(0, 12)}` : ""}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {diagnostics.cache?.candidates?.length ? (
             <div className="mt-1.5 grid gap-1">
               {diagnostics.cache.candidates.map((candidate, index) => (
@@ -219,6 +318,9 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
               <Field label="tokens">
                 in {fmtTokens(record.promptTokens)} · out {fmtTokens(record.completionTokens)}
                 {record.tokensPerSecond ? ` · ${record.tokensPerSecond} tok/s` : ""}
+              </Field>
+              <Field label="session / prefix">
+                <IdentityTag request={record} />
               </Field>
               <Field label="intent">
                 {record.sideRequest ? (

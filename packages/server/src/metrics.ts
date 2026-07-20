@@ -1,5 +1,7 @@
 import { makeRequestHistograms } from "./prometheus";
 import { CacheEventStore, type CacheCandidateDiagnostic, type PersistedCacheDecision } from "./cache-event-store";
+import { classifyCacheOutcome, type CacheOutcome } from "./cache-outcome";
+import { sessionDisplayIdentity } from "./dashboard-identity";
 
 export type RequestStatus = "active" | "ok" | "error" | "cancelled";
 
@@ -10,6 +12,24 @@ export type DetailMessage = {
   content: string;
   truncated?: boolean;
   toolCalls?: Array<{ name: string; arguments: string }>;
+};
+
+export type RequestTiming = {
+  receivedToAdmittedMs?: number;
+  templateTokenizeMs?: number;
+  coordinatorWaitMs?: number;
+  coordinatorPlanMs?: number;
+  coordinatorApplyMs?: number;
+  schedulerWaitMs?: number;
+  cacheMaterializeMs?: number;
+  prefillMs?: number;
+  residualPrefillTokens?: number;
+  prefillTokens?: number;
+  prefillChunks?: number;
+  firstDecodeMs?: number;
+  firstEmitMs?: number;
+  normalPrefillQuantum?: number;
+  contendedPrefillQuantum?: number;
 };
 
 export type RequestDetail = {
@@ -47,7 +67,13 @@ export type RequestRecord = {
   phase: RequestPhase;
   prefillDone?: number;
   prefillTotal?: number;
+  // Prompt-prefix grouping id (model+system+first-user hash). Not a session.
   conversation?: string;
+  // Privacy-safe dashboard identity: installation-keyed session fingerprint
+  // when cache.session was set, else the prompt-prefix id labeled as such.
+  sessionDisplayId?: string;
+  sessionIdentityKind?: "cache_session" | "prompt_prefix";
+  sessionFingerprint?: string;
   promptTokens?: number;
   completionTokens?: number;
   tokensPerSecond?: number;
@@ -66,6 +92,8 @@ export type RequestRecord = {
   realizedReuseTokens?: number;
   cacheFallback?: string;
   finishReason?: string;
+  cacheOutcome?: CacheOutcome;
+  timing?: RequestTiming;
   toolCalls?: number;
   messageCount?: number;
   error?: string;
@@ -124,9 +152,20 @@ export type RequestFinish = {
   stableBoundaryTokenHash?: string;
   stableBoundaryTokenCount?: number;
   stableBoundaryKind?: string;
+  stableBoundaries?: Array<{
+    tokenHash?: string;
+    tokenCount?: number;
+    kind: string;
+    label?: string;
+    requested: boolean;
+    status: "resolved" | "authorized" | "skipped";
+    skipReason?: "unsupported_template_boundary" | "non_prefix_template_boundary";
+    materialized?: boolean;
+  }>;
   promptTokenHash?: string;
   promptTokenCount?: number;
   prefillMs?: number;
+  timing?: RequestTiming;
   finishReason?: string;
   errorCode?: string;
   toolCalls?: number;
@@ -187,11 +226,10 @@ function contentToString(content: unknown): string {
   }
 }
 
-// Short stable fingerprint of the conversation identity (model + system
-// prompt + first user message) so the dashboard can group requests belonging
-// to the same session: multi-turn agent loops share one tag while unrelated
-// side requests (title generation, other tools) get their own.
-function conversationFingerprint(model: string, messages: ChatLikeRequest["messages"]): string | undefined {
+// Short stable fingerprint of the prompt prefix (model + system + first user
+// message). Used only as a non-session grouping fallback when cache.session is
+// absent — multi-turn loops sharing the same opening prompt collide by design.
+function promptPrefixFingerprint(model: string, messages: ChatLikeRequest["messages"]): string | undefined {
   const list = messages ?? [];
   const system = list.find((message) => message.role === "system");
   const user = list.find((message) => message.role === "user");
@@ -210,12 +248,18 @@ export class MetricsCollector {
   private readonly active = new Map<string, RequestRecord>();
   private readonly byId = new Map<string, RequestRecord>();
   private readonly eventLog: ServerEvent[] = [];
+  // First cache decision per model + worker launch domain. Empty candidates is
+  // only classified as cold when this set says the decision is first.
+  private readonly seenCacheDomains = new Set<string>();
   private sequence = 0;
   private eventSequence = 0;
   readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
 
-  constructor(readonly cacheEvents?: CacheEventStore) {}
+  constructor(
+    readonly cacheEvents?: CacheEventStore,
+    private readonly options: { checkpointMinimumTokens?: () => number } = {},
+  ) {}
 
   readonly totals: MetricsTotals = {
     requests: 0,
@@ -264,7 +308,7 @@ export class MetricsCollector {
     let finished = false;
     let durableIdentity: Pick<PersistedCacheDecision,
       "backend" | "namespaceFingerprint" | "sessionIdentitySource" | "sessionFingerprint" |
-      "projectFingerprint" | "agentFingerprint" | "harnessFingerprint" | "systemTokenHash" |
+      "promptPrefixId" | "projectFingerprint" | "agentFingerprint" | "harnessFingerprint" | "systemTokenHash" |
       "toolsTokenHash" | "promptTokenHash" | "priority" | "side"> = {};
     // Queue accounting: a request may wait behind others on the same serial
     // worker. Time spent in the "queued" phase is tracked separately so TTFT
@@ -293,11 +337,16 @@ export class MetricsCollector {
           tool_calls: message.tool_calls,
         }));
         const identity = request.cache;
+        const promptPrefixId = promptPrefixFingerprint(record.model, messages);
+        const sessionFingerprint = this.cacheEvents?.fingerprint(identity?.session);
         durableIdentity = {
           backend: request.backend,
           namespaceFingerprint: this.cacheEvents?.fingerprint(identity?.namespace ?? identity?.tenant),
           sessionIdentitySource: identity?.session ? "request.cache.session" : undefined,
-          sessionFingerprint: this.cacheEvents?.fingerprint(identity?.session),
+          sessionFingerprint,
+          // Persist prompt-prefix only when there is no explicit session so the
+          // dashboard can still group no-session traffic after restart.
+          promptPrefixId: sessionFingerprint ? undefined : promptPrefixId,
           projectFingerprint: this.cacheEvents?.fingerprint(identity?.project),
           agentFingerprint: this.cacheEvents?.fingerprint(identity?.agent),
           harnessFingerprint: this.cacheEvents?.fingerprint(identity?.harness),
@@ -308,7 +357,11 @@ export class MetricsCollector {
           side: identity?.side_request,
         };
         record.messageCount = messages.length;
-        record.conversation = conversationFingerprint(record.model, messages);
+        record.conversation = promptPrefixId;
+        const display = sessionDisplayIdentity({ sessionFingerprint, promptPrefixId });
+        record.sessionDisplayId = display.sessionDisplayId;
+        record.sessionIdentityKind = display.sessionIdentityKind;
+        record.sessionFingerprint = display.sessionFingerprint;
         record.detail = {
           params: {
             temperature: request.temperature,
@@ -385,6 +438,7 @@ export class MetricsCollector {
         record.plannedReuseTokens = result.plannedReuseTokens;
         record.realizedReuseTokens = result.realizedReuseTokens;
         record.cacheFallback = result.cacheFallback;
+        record.timing = result.timing;
         record.finishReason = result.finishReason;
         record.toolCalls = result.toolCalls;
         record.error = result.error;
@@ -422,6 +476,32 @@ export class MetricsCollector {
         } else if (result.cacheHit === false) {
           this.totals.cacheMisses += 1;
         }
+        if (result.cacheHit !== undefined) {
+          // Authoritative first-decision evidence requires a worker launch id so
+          // the domain (model + worker launch) is known. Without it, empty
+          // candidates is never guessed as cold.
+          const domainKey = result.workerLaunchId
+            ? `${result.workerLaunchId}::${record.model}`
+            : undefined;
+          const isFirstDecisionForWorkerModelDomain = domainKey !== undefined
+            ? !this.seenCacheDomains.has(domainKey)
+            : false;
+          if (domainKey) this.seenCacheDomains.add(domainKey);
+          record.cacheOutcome = classifyCacheOutcome({
+            hit: result.cacheHit,
+            reusedTokens: result.reusedTokens,
+            reuseKind: result.reuseKind,
+            plannedTokens: result.plannedReuseTokens,
+            realizedTokens: result.realizedReuseTokens,
+            donorSlot: result.donorSlot,
+            fallback: result.cacheFallback,
+            missReason: result.cacheMissReason,
+            promptTokenCount: result.promptTokenCount ?? result.promptTokens,
+            candidates: result.cacheCandidates,
+            stableBoundaries: result.stableBoundaries,
+            isFirstDecisionForWorkerModelDomain,
+          }, { checkpointMinimumTokens: this.options.checkpointMinimumTokens?.() });
+        }
         if (record.status !== "active") {
           this.cacheEvents?.append({
             schemaVersion: 2,
@@ -444,11 +524,22 @@ export class MetricsCollector {
                 stableBoundaryTokenCount: result.stableBoundaryTokenCount,
                 stableBoundaryKind: result.stableBoundaryKind,
               } : {}),
+            stableBoundaries: result.stableBoundaries?.map((boundary) => ({
+              tokenHash: boundary.tokenHash ? this.cacheEvents?.fingerprint(boundary.tokenHash) : undefined,
+              tokenCount: boundary.tokenCount,
+              kind: boundary.kind,
+              label: boundary.label,
+              requested: boundary.requested,
+              status: boundary.status,
+              skipReason: boundary.skipReason,
+              materialized: boundary.materialized,
+            })),
             promptTokenHash: result.promptTokenHash ? this.cacheEvents?.fingerprint(result.promptTokenHash) : durableIdentity.promptTokenHash,
             promptTokenCount: result.promptTokenCount ?? result.promptTokens,
             status: record.status,
             finishReason: result.finishReason,
             errorCode: result.errorCode,
+            cacheOutcome: record.cacheOutcome,
             cache: {
               hit: result.cacheHit,
               missReason: result.cacheMissReason,
@@ -468,6 +559,7 @@ export class MetricsCollector {
             },
             ttftMs: record.ttftMs,
             prefillMs: result.prefillMs,
+            timing: result.timing,
             durationMs: record.durationMs,
           });
         }

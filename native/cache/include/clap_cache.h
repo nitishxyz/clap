@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define CLAP_CACHE_ABI_VERSION 2u
+#define CLAP_CACHE_ABI_VERSION 3u
 
 #define CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM (UINT64_C(1) << 0)
 #define CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH (UINT64_C(1) << 1)
@@ -78,6 +78,14 @@ typedef struct clap_cache_config {
   uint32_t max_anchors;
   uint64_t min_reuse_tokens;
   uint64_t logical_token_capacity;
+  /* mode: 0 safe default, 1 enabled, 2 disabled. Other zero values default. */
+  uint32_t automatic_checkpoint_mode;
+  uint32_t automatic_checkpoint_max;
+  uint64_t automatic_checkpoint_min_tokens;
+  uint64_t automatic_checkpoint_interval_tokens;
+  uint32_t automatic_checkpoint_memory_basis_points;
+  uint32_t reserved;
+  uint64_t automatic_checkpoint_memory_cap_bytes;
 } clap_cache_config_t;
 
 typedef struct clap_cache_retention_config {
@@ -242,6 +250,10 @@ typedef struct clap_cache_retention_telemetry {
   uint64_t total_bytes;
   uint64_t session_bytes;
   uint64_t anchor_bytes;
+  uint32_t automatic_checkpoint_slots;
+  uint32_t reserved0;
+  uint64_t automatic_checkpoint_bytes;
+  uint64_t automatic_checkpoint_byte_budget;
   uint64_t active_bytes;
   uint64_t physical_byte_budget;
   uint64_t high_watermark_bytes;
@@ -284,6 +296,9 @@ clap_cache_status_t clap_cache_plan_evictions(const clap_cache_plan_t *plan,
                                               clap_cache_slot_ref_t *out_slots,
                                               size_t capacity,
                                               size_t *out_count);
+clap_cache_status_t clap_cache_plan_anchor_boundaries(
+    const clap_cache_plan_t *plan, uint64_t *out_boundaries,
+    size_t capacity, size_t *out_count);
 clap_cache_status_t clap_cache_plan_candidates(
     const clap_cache_plan_t *plan,
     clap_cache_candidate_evaluation_t *out_candidates,

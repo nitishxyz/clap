@@ -65,6 +65,17 @@ struct WorkerCacheCandidate: Encodable {
   let rejection: String?
 }
 
+struct WorkerCacheBoundary: Encodable {
+  let token_hash: String?
+  let token_count: Int?
+  let kind: String
+  let label: String?
+  let requested: Bool
+  let status: String
+  let skip_reason: String?
+  let materialized: Bool?
+}
+
 struct WorkerCache: Encodable {
   let hit: Bool
   let reused_tokens: Int
@@ -86,6 +97,24 @@ struct WorkerCache: Encodable {
   let stable_boundary_token_hash: String?
   let stable_boundary_token_count: Int
   let stable_boundary_kind: String?
+  let automatic_checkpoint_proposed: Int
+  let automatic_checkpoint_authorized: Int
+  let automatic_checkpoint_materialized: Int
+  let automatic_checkpoint_deduped: Int
+  let automatic_checkpoint_skipped: Int
+  let stable_boundaries: [WorkerCacheBoundary]
+}
+
+func automaticCheckpointOffsets(promptTokens: Int, environment: [String: String]) -> [Int] {
+  guard environment["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0" else { return [] }
+  let minimum = Int(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048
+  let base = Int(environment["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048
+  let maximum = Int(environment["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8
+  guard promptTokens >= minimum, promptTokens > 1, base > 0, maximum > 0 else { return [] }
+  let reusable = promptTokens - 1
+  let multiplier = max(1, ((reusable / base) + maximum - 1) / maximum)
+  let interval = base * multiplier
+  return Array(stride(from: interval, through: reusable, by: interval).prefix(maximum))
 }
 
 func tokenFingerprint(_ tokens: [Int], count: Int) -> String {
@@ -123,6 +152,24 @@ func cacheCandidateRejection(_ rejection: UInt32) -> String? {
 struct WorkerPrefill: Encodable {
   let done: Int
   let total: Int
+}
+
+struct WorkerTiming: Encodable {
+  let received_to_admitted_ms: Double
+  let template_tokenize_ms: Double
+  let coordinator_wait_ms: Double
+  let coordinator_plan_ms: Double
+  let coordinator_apply_ms: Double
+  let scheduler_wait_ms: Double
+  let cache_materialize_ms: Double
+  let prefill_ms: Double
+  let residual_prefill_tokens: Int
+  let prefill_tokens: Int
+  let prefill_chunks: Int
+  let first_decode_ms: Double
+  let first_emit_ms: Double
+  let normal_prefill_quantum: Int
+  let contended_prefill_quantum: Int
 }
 
 struct WorkerMemory: Encodable {
@@ -173,6 +220,13 @@ struct WorkerRetention: Encodable {
   let retained_bytes: UInt64
   let session_bytes: UInt64
   let anchor_bytes: UInt64
+  let automatic_checkpoint_count: Int
+  let automatic_checkpoint_bytes: UInt64
+  let automatic_checkpoint_budget_bytes: UInt64
+  let automatic_checkpoints_enabled: Bool
+  let automatic_checkpoint_minimum_tokens: Int
+  let automatic_checkpoint_interval_tokens: Int
+  let automatic_checkpoint_max: Int
   let budget_bytes: UInt64
   let high_watermark_bytes: UInt64
   let low_watermark_bytes: UInt64
@@ -230,6 +284,7 @@ struct WorkerMessage: Encodable {
   let finish_reason: String?
   let usage: WorkerUsage?
   let cache: WorkerCache?
+  let timing: WorkerTiming?
   let prefill: WorkerPrefill?
   let memory: WorkerMemory?
   let retention: WorkerRetention?
@@ -290,8 +345,8 @@ func memorySnapshot() -> WorkerMemory {
   return WorkerMemory(active_bytes: snapshot.activeMemory, cache_bytes: snapshot.cacheMemory, peak_active_bytes: snapshot.peakMemory)
 }
 
-func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, code: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, prefill: WorkerPrefill? = nil, memory: WorkerMemory? = nil, retention: WorkerRetention? = nil, tokenCapabilities: WorkerTokenCapabilities? = nil) {
-  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, code: code, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, prefill: prefill, memory: memory, retention: retention, token_capabilities: tokenCapabilities)
+func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, code: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, timing: WorkerTiming? = nil, prefill: WorkerPrefill? = nil, memory: WorkerMemory? = nil, retention: WorkerRetention? = nil, tokenCapabilities: WorkerTokenCapabilities? = nil) {
+  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, code: code, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, timing: timing, prefill: prefill, memory: memory, retention: retention, token_capabilities: tokenCapabilities)
   let data = try! JSONEncoder().encode(message)
   FileHandle.standardOutput.write(data)
   FileHandle.standardOutput.write(Data([0x0a]))
@@ -683,6 +738,15 @@ func main() async {
         retained_total: Int(telemetry.total_slots), retained_sessions: Int(telemetry.session_slots),
         retained_anchors: Int(telemetry.anchor_slots), retained_bytes: telemetry.total_bytes,
         session_bytes: telemetry.session_bytes, anchor_bytes: telemetry.anchor_bytes,
+        automatic_checkpoint_count: Int(telemetry.automatic_checkpoint_slots),
+        automatic_checkpoint_bytes: telemetry.automatic_checkpoint_bytes,
+        automatic_checkpoint_budget_bytes: telemetry.automatic_checkpoint_byte_budget,
+        automatic_checkpoints_enabled: env["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0",
+        automatic_checkpoint_minimum_tokens:
+          Int(env["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048,
+        automatic_checkpoint_interval_tokens:
+          Int(env["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048,
+        automatic_checkpoint_max: Int(env["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8,
         budget_bytes: telemetry.physical_byte_budget,
         high_watermark_bytes: telemetry.high_watermark_bytes,
         low_watermark_bytes: telemetry.low_watermark_bytes,
@@ -784,11 +848,19 @@ func main() async {
     // sequences one at a time on Metal (no fused multi-sequence batch yet),
     // so aggregate throughput is shared — but head-of-line blocking is gone.
 
-    let prefillChunk = 512
     let decodeStepsPerPass = 6
 
     final class ActiveRequest {
+      struct BoundaryInfo {
+        let tokenCount: Int?
+        let kind: String
+        let label: String?
+        let requested: Bool
+        let status: String
+        let skipReason: String?
+      }
       let id: String?
+      let admissionOrder: UInt64
       let streaming: Bool
       let maxTokens: Int
       let promptTokens: [Int]
@@ -819,18 +891,42 @@ func main() async {
       var cancelled = false
       var completed = false
       var failed = false
-      // Absolute prompt index where a prefix anchor should be captured
-      // during this request's prefill (set when a donor existed but its
-      // caches could not rewind to the shared boundary).
-      var anchorPlantAt: Int? = nil
-      var anchorPlantScope: String? = nil
-      var anchorPlanted = false
+      // Exact prompt indices authorized by Rust for physical snapshotting.
+      var anchorPlantAt: [Int] = []
+      var anchorPlantScopes: [Int: UInt32] = [:]
+      var resolvedBoundaries: [Int: BoundaryInfo] = [:]
+      var boundaryTelemetry: [BoundaryInfo] = []
+      var anchorPlanted: Set<Int> = []
+      var materializedAnchors: Set<Int> = []
+      var automaticCheckpointProposed = 0
+      var automaticCheckpointDeduped = 0
+      let admittedNs: UInt64
+      let receivedToAdmittedMs: Double
+      let templateTokenizeMs: Double
+      let coordinatorPlanMs: Double
+      let coordinatorApplyMs: Double
+      var schedulerWaitMs = 0.0
+      var cacheMaterializeMs = 0.0
+      var prefillMs = 0.0
+      var prefillTokens = 0
+      var prefillChunks = 0
+      var firstDecodeMs = 0.0
+      var firstEmitMs = 0.0
+      var lastStepFinishedNs: UInt64
       let parameters: GenerateParameters
       let stops: [String]
       let holdback: Int
 
-      init(id: String?, streaming: Bool, maxTokens: Int, promptTokens: [Int], reusedTokens: Int, reuseKind: String?, reuseScope: String?, cacheIdentity: CacheIdentity, cacheDecision: CacheDecision?, cacheCandidates: [CacheCandidateEvaluation], cacheEvictions: [Int], cacheFallback: String?, slotIndex: Int, slot: KVSlot, caches: [KVCache], fedTokens: [Int], suffix: [Int], detokenizer: NaiveStreamingDetokenizer, parameters: GenerateParameters, stops: [String]) {
+      init(id: String?, admissionOrder: UInt64, admittedNs: UInt64, receivedToAdmittedMs: Double, templateTokenizeMs: Double, coordinatorPlanMs: Double, coordinatorApplyMs: Double, cacheMaterializeMs: Double, streaming: Bool, maxTokens: Int, promptTokens: [Int], reusedTokens: Int, reuseKind: String?, reuseScope: String?, cacheIdentity: CacheIdentity, cacheDecision: CacheDecision?, cacheCandidates: [CacheCandidateEvaluation], cacheEvictions: [Int], cacheFallback: String?, slotIndex: Int, slot: KVSlot, caches: [KVCache], fedTokens: [Int], suffix: [Int], detokenizer: NaiveStreamingDetokenizer, parameters: GenerateParameters, stops: [String]) {
         self.id = id
+        self.admissionOrder = admissionOrder
+        self.admittedNs = admittedNs
+        self.receivedToAdmittedMs = receivedToAdmittedMs
+        self.templateTokenizeMs = templateTokenizeMs
+        self.coordinatorPlanMs = coordinatorPlanMs
+        self.coordinatorApplyMs = coordinatorApplyMs
+        self.cacheMaterializeMs = cacheMaterializeMs
+        self.lastStepFinishedNs = admittedNs
         self.streaming = streaming
         self.maxTokens = maxTokens
         self.promptTokens = promptTokens
@@ -855,9 +951,10 @@ func main() async {
     }
 
     var active: [ActiveRequest] = []
-    var pendingChats: [(id: String?, control: ControlRequest, data: Data)] = []
+    var pendingChats: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
     var controlBacklog: [String] = []
     var allocatorNeedsIdleClear = false
+    var nextAdmissionOrder: UInt64 = 0
 
     // Recurrent caches such as Mamba keep state but intentionally report an
     // offset of zero. Hybrid models still have attention caches whose maximum
@@ -940,6 +1037,22 @@ func main() async {
         emit(id: req.id, content: req.collected)
       }
       let usage = WorkerUsage(prompt_tokens: req.promptTokens.count, completion_tokens: req.generatedCount)
+      let timing = WorkerTiming(
+        received_to_admitted_ms: req.receivedToAdmittedMs,
+        template_tokenize_ms: req.templateTokenizeMs,
+        coordinator_wait_ms: req.receivedToAdmittedMs,
+        coordinator_plan_ms: req.coordinatorPlanMs,
+        coordinator_apply_ms: req.coordinatorApplyMs,
+        scheduler_wait_ms: req.schedulerWaitMs,
+        cache_materialize_ms: req.cacheMaterializeMs,
+        prefill_ms: req.prefillMs,
+        residual_prefill_tokens: req.promptTokens.count - req.reusedTokens,
+        prefill_tokens: req.prefillTokens,
+        prefill_chunks: req.prefillChunks,
+        first_decode_ms: req.firstDecodeMs,
+        first_emit_ms: req.firstEmitMs,
+        normal_prefill_quantum: LatencyScheduler.normalPrefillQuantum,
+        contended_prefill_quantum: LatencyScheduler.contendedPrefillQuantum)
       let cacheInfo = WorkerCache(
         hit: req.reusedTokens > 0,
         reused_tokens: req.reusedTokens,
@@ -974,17 +1087,45 @@ func main() async {
         },
         prompt_token_hash: tokenFingerprint(req.promptTokens, count: req.promptTokens.count),
         prompt_token_count: req.promptTokens.count,
-        stable_boundary_token_hash: req.anchorPlantAt.map {
+        stable_boundary_token_hash: req.materializedAnchors.max().map {
           tokenFingerprint(req.promptTokens, count: $0)
         },
-        stable_boundary_token_count: req.anchorPlantAt ?? 0,
-        stable_boundary_kind: req.anchorPlantAt == nil ? nil : "prompt"
+        stable_boundary_token_count: req.materializedAnchors.max() ?? 0,
+        stable_boundary_kind: req.materializedAnchors.isEmpty ? nil : "prompt",
+        automatic_checkpoint_proposed: req.automaticCheckpointProposed,
+        automatic_checkpoint_authorized: req.anchorPlantAt.filter {
+          req.resolvedBoundaries[$0]?.kind == "automatic_token"
+        }.count,
+        automatic_checkpoint_materialized: req.materializedAnchors.filter {
+          req.resolvedBoundaries[$0]?.kind == "automatic_token"
+        }.count,
+        automatic_checkpoint_deduped: req.automaticCheckpointDeduped,
+        automatic_checkpoint_skipped: max(0, req.automaticCheckpointProposed
+          - req.automaticCheckpointDeduped - req.anchorPlantAt.filter {
+            req.resolvedBoundaries[$0]?.kind == "automatic_token"
+          }.count),
+        stable_boundaries: req.boundaryTelemetry.map { boundary in
+          return WorkerCacheBoundary(
+            token_hash: boundary.tokenCount.map { tokenFingerprint(req.promptTokens, count: $0) },
+            token_count: boundary.tokenCount,
+            kind: boundary.kind,
+            label: boundary.label,
+            requested: boundary.requested,
+            status: boundary.status,
+            skip_reason: boundary.skipReason,
+            materialized: boundary.tokenCount.map { req.materializedAnchors.contains($0) })
+        }
       )
-      emit(id: req.id, done: true, cancelled: req.cancelled ? true : nil, finishReason: req.cancelled ? "cancel" : req.finishReason, usage: usage, cache: cacheInfo)
+      emit(id: req.id, done: true, cancelled: req.cancelled ? true : nil, finishReason: req.cancelled ? "cancel" : req.finishReason, usage: usage, cache: cacheInfo, timing: timing)
     }
 
-    func prepareRequest(id: String?, control: ControlRequest, data: Data) async -> ActiveRequest? {
+    func prepareRequest(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64) async -> ActiveRequest? {
       do {
+        nextAdmissionOrder &+= 1
+        let admissionOrder = nextAdmissionOrder
+        let admittedNs = DispatchTime.now().uptimeNanoseconds
+        let receivedToAdmittedMs = Double(admittedNs - receivedNs) / 1_000_000
+        let templateStartNs = admittedNs
         guard let model = control.model else {
           emit(id: id, error: "chat.model is required")
           return nil
@@ -1083,6 +1224,7 @@ func main() async {
         if ProcessInfo.processInfo.environment["CLAP_MLX_DEBUG_PROMPT"] != nil {
           debugLog("prompt (\(promptTokens.count) tokens): \(tok.decode(tokenIds: promptTokens, skipSpecialTokens: false))")
         }
+        let templateTokenizeMs = Double(DispatchTime.now().uptimeNanoseconds - templateStartNs) / 1_000_000
 
         // Admission control (parity with the llama worker): reject oversized
         // prompts before any prefill with a structured code the server maps
@@ -1122,23 +1264,106 @@ func main() async {
 
         let cacheIdentity = CacheIdentity(domain: cacheDomain, requestId: id, intent: control.cache)
         let physicalIdentity = PhysicalCacheIdentity(fingerprint: cacheIdentity.fingerprint)
+        let automaticProposals = automaticCheckpointOffsets(
+          promptTokens: promptTokens.count, environment: env)
+        let automaticDeduped = automaticProposals.filter { checkpoint in
+          kvSlots.contains { slot in
+            slot.isAnchor && slot.cacheIdentity?.isCompatible(with: physicalIdentity) == true &&
+              slot.tokens.count == checkpoint &&
+              slot.tokens.elementsEqual(promptTokens.prefix(checkpoint))
+          }
+        }.count
         var stableBoundaries: [Int] = []
+        var stableBoundaryScopes: [Int: UInt32] = [:]
+        var resolvedBoundaries: [Int: ActiveRequest.BoundaryInfo] = [:]
+        var boundaryTelemetry: [ActiveRequest.BoundaryInfo] = []
+        func resolveBoundary(messages: [[String: any Sendable]], tools: [ToolSpec]?, kind: String,
+                             label: String?, requested: Bool) {
+          guard !messages.isEmpty else {
+            if requested {
+              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
+                requested: true, status: "skipped", skipReason: "unsupported_template_boundary"))
+            }
+            return
+          }
+          let rendered: [Int]
+          do {
+            rendered = try tok.applyChatTemplate(
+              messages: messages, tools: tools,
+              additionalContext: ["add_generation_prompt": false])
+          } catch {
+            if requested {
+              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
+                requested: true, status: "skipped", skipReason: "unsupported_template_boundary"))
+            }
+            return
+          }
+          guard let boundary = exactTemplateBoundary(
+            prefix: rendered, final: promptTokens, eosToken: tok.eosTokenId) else {
+            if requested {
+              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
+                requested: true, status: "skipped", skipReason: "non_prefix_template_boundary"))
+            }
+            return
+          }
+          stableBoundaries.append(boundary)
+          stableBoundaryScopes[boundary] = cacheIdentity.scope
+          if resolvedBoundaries[boundary] == nil || requested {
+            resolvedBoundaries[boundary] = .init(tokenCount: boundary, kind: kind, label: label,
+              requested: requested, status: "resolved", skipReason: nil)
+          }
+          if requested {
+            boundaryTelemetry.append(.init(tokenCount: boundary, kind: kind, label: label,
+              requested: true, status: "resolved", skipReason: nil))
+          }
+        }
         if !usesFallback {
           let leadingSystemCount = structuredMessages.prefix { ($0["role"] as? String) == "system" }.count
           let systemPrefixCounts = leadingSystemCount > 0 ? Array(1...leadingSystemCount) : []
-          let prefixCounts = (toolSpecs?.isEmpty == false ? [0] : []) + systemPrefixCounts
-          for count in prefixCounts {
+          for count in systemPrefixCounts {
             let prefixMessages = Array(structuredMessages.prefix(count))
-            if let rendered = try? tok.applyChatTemplate(messages: prefixMessages, tools: toolSpecs) {
-              let boundary = zip(rendered, promptTokens).prefix { $0.0 == $0.1 }.count
-              if boundary >= 16 && boundary < promptTokens.count {
-                stableBoundaries.append(boundary)
-              }
-            }
+            resolveBoundary(messages: prefixMessages, tools: toolSpecs,
+              kind: "messages", label: nil, requested: false)
+          }
+          stableBoundaries = Array(Set(stableBoundaries)).sorted()
+        }
+        for descriptor in control.cache?.boundaries ?? [] {
+          guard !usesFallback else {
+            boundaryTelemetry.append(.init(tokenCount: nil, kind: descriptor.kind,
+              label: descriptor.label, requested: true, status: "skipped",
+              skipReason: "unsupported_template_boundary"))
+            continue
+          }
+          if descriptor.kind == "tools" {
+            // MLX's tokenizer bridge cannot render tools independently from
+            // messages or expose a tools-end offset. Rendering with a first
+            // message would incorrectly include message content, so fail the
+            // optimization closed without invoking an empty-message template.
+            boundaryTelemetry.append(.init(tokenCount: nil, kind: descriptor.kind,
+              label: descriptor.label, requested: true, status: "skipped",
+              skipReason: "unsupported_template_boundary"))
+          } else if descriptor.kind == "messages", let index = descriptor.through_message,
+                    index >= 0, index < structuredMessages.count {
+            resolveBoundary(messages: Array(structuredMessages.prefix(index + 1)), tools: toolSpecs,
+              kind: "messages", label: descriptor.label, requested: true)
+          }
+        }
+        let promptBoundary = promptTokens.count - 1
+        if promptBoundary >= 16 {
+          stableBoundaries.append(promptBoundary)
+          if stableBoundaryScopes[promptBoundary] == nil {
+            stableBoundaryScopes[promptBoundary] = cacheIdentity.scope
+          }
+          if resolvedBoundaries[promptBoundary] == nil {
+            resolvedBoundaries[promptBoundary] = .init(tokenCount: promptBoundary, kind: "prompt",
+              label: nil, requested: false, status: "resolved", skipReason: nil)
           }
           stableBoundaries = Array(Set(stableBoundaries)).sorted()
         }
         var coordinatorPlan: CachePlan? = nil
+        var coordinatorPlanMs = 0.0
+        var coordinatorApplyStartedNs = DispatchTime.now().uptimeNanoseconds
+        var cacheMaterializeMs = 0.0
         var cacheFallback: String? = cacheCoordinator == nil ? "coordinator_unavailable_no_cache" : nil
         if let coordinator = cacheCoordinator {
           try ensureAdmissionSlot()
@@ -1183,13 +1408,26 @@ func main() async {
             capabilities |= UInt64(CC_CAP_SLIDING_WINDOW) | UInt64(CC_CAP_RECURRENT_OR_HYBRID)
           }
           if kvBits != nil { capabilities |= UInt64(CC_CAP_KV_QUANTIZED) }
+          let estimatedBytesPerToken = kvSlots.compactMap { slot -> UInt64? in
+            guard !slot.tokens.isEmpty, !slot.caches.isEmpty else { return nil }
+            return physicalCacheBytes(slot.caches) / UInt64(slot.tokens.count)
+          }.max() ?? 0
           do {
+            let planStartedNs = DispatchTime.now().uptimeNanoseconds
             coordinatorPlan = try coordinator.plan(tokens: promptTokens, identity: cacheIdentity,
               capabilities: capabilities, slots: slotMaterializations,
-              stableBoundaries: stableBoundaries, outputReserve: outputReserve)
+              stableBoundaries: stableBoundaries, outputReserve: outputReserve,
+              estimatedBytesPerToken: estimatedBytesPerToken)
+            coordinatorPlanMs += Double(DispatchTime.now().uptimeNanoseconds - planStartedNs) / 1_000_000
+            coordinatorApplyStartedNs = DispatchTime.now().uptimeNanoseconds
             if let view = coordinatorPlan?.view {
               debugLog("cache coordinator plan: operation=\(view.operation) reuse=\(view.reuseTokens) donor=\(view.donor.map(String.init) ?? "none") target=\(view.target)")
             }
+          } catch CacheCoordinatorError.status(_, let status)
+              where status == CC_NO_CAPACITY || status == CC_SLOT_BUSY {
+            pendingChats.insert((id: id, control: control, data: data, receivedNs: receivedNs), at: 0)
+            debugLog("cache admission deferred: coordinator status=\(status)")
+            return nil
           } catch {
             cacheFallback = "coordinator_plan_failed_closed"
             debugLog("cache coordinator plan failed closed: \(error)")
@@ -1206,7 +1444,6 @@ func main() async {
         // Rust is the sole cache policy authority. These variables describe
         // only the coordinator-selected physical operation.
         var bestPrefix = 0
-        let anchorCandidate = coordinatorPlan?.view.anchorTokens ?? 0
         var branchDonor: KVSlot? = nil
         var branchPrefix = bestPrefix
         if let planned = coordinatorPlan {
@@ -1272,6 +1509,7 @@ func main() async {
         var reuseScope: String? = nil
         var branched = false
         if let donor = branchDonor {
+          let materializeStartedNs = DispatchTime.now().uptimeNanoseconds
           var sharedPrefix = branchPrefix
           if sharedPrefix == promptTokens.count { sharedPrefix -= 1 }
           let cloned = donor.caches.map { $0.copy() }
@@ -1287,6 +1525,7 @@ func main() async {
           reuseScope = donor.anchorScope
           prefix = sharedPrefix
           branched = true
+          cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - materializeStartedNs) / 1_000_000
           debugLog("kv prefix branch: cloned \(sharedPrefix)/\(promptTokens.count) shared tokens from \(donor.isAnchor ? "an anchor" : "another slot"), prefilling \(suffix.count)")
         } else {
           caches = []
@@ -1298,9 +1537,11 @@ func main() async {
         if branched {
           // cache assignment handled above
         } else if prefix > 0 {
+          let materializeStartedNs = DispatchTime.now().uptimeNanoseconds
           if trimNeeded > 0 {
             for cache in slot.caches { cache.trim(trimNeeded) }
           }
+          cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - materializeStartedNs) / 1_000_000
           caches = slot.caches
           fedTokens = Array(promptTokens.prefix(prefix))
           suffix = Array(promptTokens.dropFirst(prefix))
@@ -1352,8 +1593,20 @@ func main() async {
           }
         }
 
+        for checkpoint in coordinatorPlan?.view.anchorBoundaries ?? []
+          where resolvedBoundaries[checkpoint] == nil {
+          resolvedBoundaries[checkpoint] = .init(tokenCount: checkpoint, kind: "automatic_token",
+            label: nil, requested: false, status: "authorized", skipReason: nil)
+        }
         let request = ActiveRequest(
           id: id,
+          admissionOrder: admissionOrder,
+          admittedNs: admittedNs,
+          receivedToAdmittedMs: receivedToAdmittedMs,
+          templateTokenizeMs: templateTokenizeMs,
+          coordinatorPlanMs: coordinatorPlanMs,
+          coordinatorApplyMs: Double(DispatchTime.now().uptimeNanoseconds - coordinatorApplyStartedNs) / 1_000_000,
+          cacheMaterializeMs: cacheMaterializeMs,
           streaming: control.stream ?? true,
           maxTokens: maxTokens,
           promptTokens: promptTokens,
@@ -1374,11 +1627,13 @@ func main() async {
           parameters: generateParameters,
           stops: control.stop?.values ?? []
         )
-        // Plant only the exact shared boundary selected by Rust.
-        if reusedTokens == 0, anchorCandidate >= 16, anchorCandidate < promptTokens.count {
-          request.anchorPlantAt = anchorCandidate
-          request.anchorPlantScope = "shared"
-        }
+        request.anchorPlantAt = coordinatorPlan?.view.anchorBoundaries ?? []
+        request.anchorPlantScopes = stableBoundaryScopes
+        request.resolvedBoundaries = resolvedBoundaries
+        request.automaticCheckpointProposed = automaticProposals.count
+        request.automaticCheckpointDeduped = automaticDeduped
+        request.boundaryTelemetry = boundaryTelemetry + resolvedBoundaries.values
+          .filter { !$0.requested }.sorted { ($0.tokenCount ?? 0) < ($1.tokenCount ?? 0) }
         return request
       } catch {
         emit(id: id, error: String(describing: error))
@@ -1411,7 +1666,9 @@ func main() async {
         anchorPlan = try coordinator.plan(tokens: boundary, identity: req.cacheIdentity,
           capabilities: UInt64(CC_CAP_WHOLE_STATE_COPY) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT),
           slots: slotMaterializations,
-          outputReserve: 0, state: UInt32(CC_SLOT_ANCHOR))
+          outputReserve: 0, state: UInt32(CC_SLOT_ANCHOR),
+          scope: req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope,
+          estimatedBytesPerToken: physicalCacheBytes(req.caches) / UInt64(max(plant, 1)))
         guard anchorPlan.view.target < kvSlots.count,
               !kvSlots[anchorPlan.view.target].busy else {
           try? anchorPlan.abort()
@@ -1435,8 +1692,13 @@ func main() async {
         }
       }
       anchor.isAnchor = true
-      anchor.anchorScope = req.anchorPlantScope
+      let structural = req.resolvedBoundaries[plant].map {
+        $0.kind != "prompt" && $0.kind != "automatic_token"
+      } ?? false
+      anchor.anchorScope = cacheScopeName(req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope)
+      let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
       anchor.caches = req.caches.map { $0.copy() }
+      req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
       anchor.tokens = boundary
       anchor.cacheIdentity = PhysicalCacheIdentity(fingerprint: req.cacheIdentity.fingerprint)
       do {
@@ -1447,6 +1709,10 @@ func main() async {
           physicalBytes: physicalCacheBytes(anchor.caches))
         let logical = try coordinator.slot(index)
         anchor.coordinatorGeneration = logical.generation
+        if structural {
+          try coordinator.setAnchorProtected(slot: index,
+            generation: logical.generation, protected: true)
+        }
         retainedRegistry.reconcileEvictions(victims) { _, victim in
           clearPhysicalSlot(victim)
         }
@@ -1471,9 +1737,12 @@ func main() async {
     }
 
     func plantAnchor(_ req: ActiveRequest) {
-      guard !req.anchorPlanted, let plant = req.anchorPlantAt else { return }
-      req.anchorPlanted = true
-      _ = snapshotAnchor(req, at: plant, reason: "prefix")
+      for plant in req.anchorPlantAt where plant == req.fedTokens.count && !req.anchorPlanted.contains(plant) {
+        req.anchorPlanted.insert(plant)
+        if snapshotAnchor(req, at: plant, reason: "prefix") {
+          req.materializedAnchors.insert(plant)
+        }
+      }
     }
 
     func captureContinuationBoundary(_ req: ActiveRequest) {
@@ -1486,7 +1755,9 @@ func main() async {
         debugLog("rolling conversation anchor skipped: fed=\(req.fedTokens.count) offset=\(offset) boundary=\(boundary)")
         return
       }
+      let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
       req.continuationBoundaryCaches = req.caches.map { $0.copy() }
+      req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
       debugLog("captured rolling conversation anchor: \(boundary) tokens")
     }
 
@@ -1508,14 +1779,17 @@ func main() async {
       }
     }
 
-    func step(_ req: ActiveRequest) {
+    func step(_ req: ActiveRequest, prefillQuantum: Int) {
       guard !req.cancelled, !req.completed, !req.failed, let lm = languageModel else { return }
+      let stepStartedNs = DispatchTime.now().uptimeNanoseconds
+      req.schedulerWaitMs += Double(stepStartedNs - req.lastStepFinishedNs) / 1_000_000
+      defer { req.lastStepFinishedNs = DispatchTime.now().uptimeNanoseconds }
       do {
         if req.iterator == nil {
-          // Split chunk boundaries at the anchor plant point so the cache
-          // state exactly at the shared boundary exists for snapshotting.
-          var chunkEnd = min(req.pos + prefillChunk, req.suffix.count)
-          if let plant = req.anchorPlantAt, !req.anchorPlanted {
+          // Split chunks at every Rust-authorized boundary so physical state
+          // exists at each exact nested prefix.
+          var chunkEnd = min(req.pos + prefillQuantum, req.suffix.count)
+          if let plant = req.anchorPlantAt.first(where: { !req.anchorPlanted.contains($0) && $0 > req.reusedTokens + req.pos }) {
             let rel = plant - req.reusedTokens
             if req.pos < rel && rel < chunkEnd { chunkEnd = rel }
           }
@@ -1527,27 +1801,31 @@ func main() async {
             // Creating the iterator prefills the chunk into the shared cache;
             // the sampled token is discarded.
             let chunk = Array(req.suffix[req.pos ..< chunkEnd])
+            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
             _ = try TokenIterator(input: LMInput(tokens: MLXArray(chunk)), model: lm, cache: req.caches, parameters: req.parameters)
+            req.prefillMs += Double(DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000
+            req.prefillTokens += chunk.count
+            req.prefillChunks += 1
             req.pos = chunkEnd
             req.fedTokens.append(contentsOf: chunk)
             req.slot.tokens = req.fedTokens
             advanceCoordinator(req, tokens: chunk)
             emit(id: req.id, prefill: WorkerPrefill(done: req.reusedTokens + req.pos, total: req.promptTokens.count))
-            if let plant = req.anchorPlantAt, !req.anchorPlanted, plant - req.reusedTokens == req.pos {
-              plantAnchor(req)
-            }
+            plantAnchor(req)
             if let boundary = req.continuationBoundary, boundary - req.reusedTokens == req.pos {
               captureContinuationBoundary(req)
             }
           } else {
-            if let plant = req.anchorPlantAt, !req.anchorPlanted, plant - req.reusedTokens == req.pos {
-              plantAnchor(req)
-            }
+            plantAnchor(req)
             if let boundary = req.continuationBoundary, boundary - req.reusedTokens == req.pos {
               captureContinuationBoundary(req)
             }
             let tail = Array(req.suffix.dropFirst(req.pos))
+            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
             req.iterator = try TokenIterator(input: LMInput(tokens: MLXArray(tail)), model: lm, cache: req.caches, parameters: req.parameters)
+            req.prefillMs += Double(DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000
+            req.prefillTokens += tail.count
+            req.prefillChunks += 1
             req.pos = req.suffix.count
             req.fedTokens.append(contentsOf: tail)
             req.slot.tokens = req.fedTokens
@@ -1559,7 +1837,9 @@ func main() async {
             if req.continuationBoundaryCaches == nil && req.caches.contains(where: { !$0.isTrimmable }) {
               let offset = cacheSequenceLength(req.caches, fallback: req.fedTokens.count)
               if offset == req.promptTokens.count {
+                let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
                 req.promptBoundaryCaches = req.caches.map { $0.copy() }
+                req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
                 debugLog("captured prompt-boundary anchor in slot \(kvSlots.firstIndex(where: { $0 === req.slot }) ?? -1): \(req.promptTokens.count) tokens")
               } else {
                 debugLog("prompt-boundary anchor skipped: cache offset \(offset), prompt \(req.promptTokens.count)")
@@ -1571,9 +1851,14 @@ func main() async {
         guard var it = req.iterator else { return }
         var steps = 0
         while steps < decodeStepsPerPass {
+          let firstDecodeStartedNs = req.generatedCount == 0
+            ? DispatchTime.now().uptimeNanoseconds : 0
           guard let token = it.next() else {
             req.completed = true
             break
+          }
+          if firstDecodeStartedNs != 0 && req.firstDecodeMs == 0 {
+            req.firstDecodeMs = Double(DispatchTime.now().uptimeNanoseconds - firstDecodeStartedNs) / 1_000_000
           }
           steps += 1
           req.sampledTokens.append(token)
@@ -1619,11 +1904,17 @@ func main() async {
             }
             if req.streaming {
               if req.stops.isEmpty {
+                if req.firstEmitMs == 0 {
+                  req.firstEmitMs = Double(DispatchTime.now().uptimeNanoseconds - req.admittedNs) / 1_000_000
+                }
                 emit(id: req.id, token: chunk)
                 req.emitted = req.collected.count
               } else {
                 let safe = max(req.emitted, req.collected.count - req.holdback)
                 if safe > req.emitted {
+                  if req.firstEmitMs == 0 {
+                    req.firstEmitMs = Double(DispatchTime.now().uptimeNanoseconds - req.admittedNs) / 1_000_000
+                  }
                   let start = req.collected.index(req.collected.startIndex, offsetBy: req.emitted)
                   let end = req.collected.index(req.collected.startIndex, offsetBy: safe)
                   emit(id: req.id, token: String(req.collected[start..<end]))
@@ -1672,7 +1963,7 @@ func main() async {
         for req in active where matchesAll || req.id == target {
           req.cancelled = true
         }
-        var remaining: [(id: String?, control: ControlRequest, data: Data)] = []
+        var remaining: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
         for pending in pendingChats {
           if matchesAll || pending.id == target {
             emit(id: pending.id, done: true, cancelled: true, finishReason: "cancel", usage: nil, cache: nil)
@@ -1746,7 +2037,8 @@ func main() async {
         return false
       }
 
-      pendingChats.append((id: id, control: control, data: data))
+      pendingChats.append((id: id, control: control, data: data,
+        receivedNs: DispatchTime.now().uptimeNanoseconds))
       emit(retention: retentionSnapshot(queued: pendingChats.count))
       return false
     }
@@ -1776,16 +2068,32 @@ func main() async {
         if needsLoad && !active.isEmpty { break }
         pendingChats.removeFirst()
         emit(id: candidate.id, started: true)
-        if let request = await prepareRequest(id: candidate.id, control: candidate.control, data: candidate.data) {
+        if let request = await prepareRequest(id: candidate.id, control: candidate.control,
+          data: candidate.data, receivedNs: candidate.receivedNs) {
           active.append(request)
           allocatorNeedsIdleClear = true
           emit(retention: retentionSnapshot(queued: pendingChats.count))
+        } else if pendingChats.first?.id == candidate.id {
+          break
         }
       }
 
-      // Round-robin: one prefill chunk or a few decode tokens per request.
-      for request in active {
-        step(request)
+      // Every runnable request gets one bounded Metal turn per round. Short
+      // not-yet-emitting requests run first, while all requests remain present
+      // exactly once so the priority boost cannot starve long prefills.
+      let schedule = LatencyScheduler.round(active.map { request in
+        LatencySchedulerRequest(
+          id: String(request.admissionOrder), admissionOrder: request.admissionOrder,
+          residualPrefillTokens: max(0, request.suffix.count - request.pos),
+          decoding: request.iterator != nil, emittedFirstToken: request.emitted > 0,
+          cancelled: request.cancelled)
+      })
+      for turn in schedule {
+        if let request = active.first(where: { String($0.admissionOrder) == turn.id }) {
+          for _ in 0..<turn.turns where !request.completed && !request.cancelled && !request.failed {
+            step(request, prefillQuantum: turn.prefillQuantum)
+          }
+        }
       }
       for request in active where request.completed || request.cancelled || request.failed {
         finalize(request)
@@ -1797,6 +2105,9 @@ func main() async {
         debugLog("mlx memory after idle clear: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
         emit(memory: memory, retention: retentionSnapshot())
         allocatorNeedsIdleClear = false
+      }
+      if !pendingChats.isEmpty {
+        try? await Task.sleep(nanoseconds: 10_000_000)
       }
     }
 }

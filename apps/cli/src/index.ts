@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { ClapApiError, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
+import { ClapApiError, clapVersion, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
 import { configPaths, createApiKey, keysFilePath, listApiKeys, loadClapConfig, revokeApiKey, startServer } from "@clap/server";
 import { ensureCudaWorker } from "./cuda-worker";
@@ -32,6 +32,11 @@ import {
 
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
+
+if (command === "version" || command === "--version" || command === "-v") {
+  console.log(clapVersion);
+  process.exit(0);
+}
 
 // Only the serving process needs inference workers; management commands like
 // `server stop` must never block on a CUDA worker download. Commands that
@@ -847,6 +852,7 @@ function printError(error: unknown) {
 
 function help() {
   console.log(`Usage:
+  clap --version
   clap serve [--network]
   clap auth login|logout|status
   clap keys create <name> | list | revoke <id>

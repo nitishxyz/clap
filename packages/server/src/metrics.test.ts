@@ -1,7 +1,20 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CacheEventStore } from "./cache-event-store";
 import { MetricsCollector } from "./metrics";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const tempRoots: string[] = [];
+afterEach(() => {
+  for (const path of tempRoots.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+function tempDir(): string {
+  const path = mkdtempSync(join(tmpdir(), "clap-metrics-"));
+  tempRoots.push(path);
+  return path;
+}
 
 describe("metrics queue accounting", () => {
   test("time waiting in queue is tracked separately from ttft", async () => {
@@ -75,5 +88,94 @@ describe("metrics queue accounting", () => {
       realizedReuseTokens: 42,
       cacheFallback: "copy_retry",
     });
+  });
+
+  test("classifies cold only for the first decision of a model+worker domain", () => {
+    const metrics = new MetricsCollector(undefined, { checkpointMinimumTokens: () => 2048 });
+    const first = metrics.start("model-a", "/v1/chat/completions", false);
+    first.finish({
+      status: "ok",
+      cacheHit: false,
+      reusedTokens: 0,
+      workerLaunchId: "worker-1",
+      cacheCandidates: [],
+      promptTokenCount: 4096,
+    });
+    expect(first.record.cacheOutcome?.category).toBe("cold");
+    expect(first.record.cacheOutcome?.evidence).toContain("isFirstDecisionForWorkerModelDomain=true");
+
+    const second = metrics.start("model-a", "/v1/chat/completions", false);
+    second.finish({
+      status: "ok",
+      cacheHit: false,
+      reusedTokens: 0,
+      workerLaunchId: "worker-1",
+      cacheCandidates: [],
+      promptTokenCount: 4096,
+    });
+    expect(second.record.cacheOutcome?.category).toBe("miss_reason_unavailable");
+
+    const otherDomain = metrics.start("model-b", "/v1/chat/completions", false);
+    otherDomain.finish({
+      status: "ok",
+      cacheHit: false,
+      reusedTokens: 0,
+      workerLaunchId: "worker-1",
+      cacheCandidates: [],
+      promptTokenCount: 4096,
+    });
+    expect(otherDomain.record.cacheOutcome?.category).toBe("cold");
+  });
+
+  test("does not guess cold without a worker launch id", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("model-a", "/v1/chat/completions", false);
+    handle.finish({
+      status: "ok",
+      cacheHit: false,
+      reusedTokens: 0,
+      cacheCandidates: [],
+      promptTokenCount: 4096,
+    });
+    expect(handle.record.cacheOutcome?.category).toBe("miss_reason_unavailable");
+  });
+
+  test("exposes session display identity from cache.session fingerprint", () => {
+    const store = new CacheEventStore({ directory: tempDir() });
+    const metrics = new MetricsCollector(store);
+    const sessions = ["S1-session", "S2-session", "S3-session", "S4-session"];
+    const displays: string[] = [];
+    let sharedPrefix: string | undefined;
+    for (const session of sessions) {
+      const handle = metrics.start("model-a", "/v1/chat/completions", false);
+      handle.capture({
+        messages: [{ role: "system", content: "same system" }, { role: "user", content: "same first user" }],
+        cache: { session, namespace: "tenant" },
+      });
+      handle.finish({ status: "ok", cacheHit: false, reusedTokens: 0, workerLaunchId: "w", cacheCandidates: [] });
+      expect(handle.record.sessionIdentityKind).toBe("cache_session");
+      expect(handle.record.sessionDisplayId).toBeDefined();
+      expect(handle.record.sessionFingerprint).toBeDefined();
+      expect(handle.record.sessionDisplayId).toBe(handle.record.sessionFingerprint!.slice(0, 8));
+      displays.push(handle.record.sessionDisplayId!);
+      // Same prompt prefix for all four.
+      expect(handle.record.conversation).toBeDefined();
+      if (!sharedPrefix) sharedPrefix = handle.record.conversation;
+      else expect(handle.record.conversation).toBe(sharedPrefix);
+    }
+    expect(new Set(displays).size).toBe(4);
+    // Shared prompt prefix must not be used as the session display id.
+    expect(sharedPrefix).toBeDefined();
+    for (const display of displays) expect(display).not.toBe(sharedPrefix);
+  });
+
+  test("no-session requests label identity as prompt_prefix", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("model-a", "/v1/chat/completions", false);
+    handle.capture({ messages: [{ role: "user", content: "hello" }] });
+    handle.finish({ status: "ok" });
+    expect(handle.record.sessionIdentityKind).toBe("prompt_prefix");
+    expect(handle.record.sessionDisplayId).toBe(handle.record.conversation);
+    expect(handle.record.sessionFingerprint).toBeUndefined();
   });
 });

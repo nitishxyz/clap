@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const clapVersion = "0.1.2";
+export const clapVersion = "0.2.0";
 export const defaultBaseURL = "http://localhost:11435";
 
 export const ErrorResponseSchema = z.object({
@@ -238,6 +238,13 @@ export const LoadedModelSchema = z.object({
       retainedBytes: z.number().int().nonnegative(),
       sessionBytes: z.number().int().nonnegative(),
       anchorBytes: z.number().int().nonnegative(),
+      automaticCheckpointCount: z.number().int().nonnegative().optional(),
+      automaticCheckpointBytes: z.number().int().nonnegative().optional(),
+      automaticCheckpointBudgetBytes: z.number().int().nonnegative().optional(),
+      automaticCheckpointsEnabled: z.boolean().optional(),
+      automaticCheckpointMinimumTokens: z.number().int().positive().optional(),
+      automaticCheckpointIntervalTokens: z.number().int().positive().optional(),
+      automaticCheckpointMax: z.number().int().positive().optional(),
       budgetBytes: z.number().int().nonnegative(),
       highWatermarkBytes: z.number().int().nonnegative(),
       lowWatermarkBytes: z.number().int().nonnegative(),
@@ -327,6 +334,30 @@ export const ResponseFormatSchema = z.union([
   }),
 ]);
 
+export const CacheBoundaryLabelSchema = z.string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "label must start with an alphanumeric character and contain only alphanumerics, '.', '_', ':', or '-'");
+
+// `through_message` is a zero-based, inclusive index into the request's
+// messages array (or the Responses API input array). Descriptors are ordered
+// by rendered request structure: tools first, then strictly increasing message
+// indexes. Callers can create arbitrary stable slices by structuring sections
+// as ordered messages. Labels are optional caller metadata with no built-in
+// semantics and never affect isolation, reuse, ranking, or eviction. Workers,
+// not clients or the control plane, resolve and validate exact token prefixes.
+export const CacheBoundarySchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("tools"),
+    label: CacheBoundaryLabelSchema.optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("messages"),
+    through_message: z.number().int().nonnegative(),
+    label: CacheBoundaryLabelSchema.optional(),
+  }).strict(),
+]);
+
 export const CacheIntentSchema = z.object({
   namespace: z.string().min(1).optional(),
   tenant: z.string().min(1).optional(),
@@ -336,9 +367,40 @@ export const CacheIntentSchema = z.object({
   session: z.string().min(1).optional(),
   priority: z.enum(["interactive", "background"]).optional(),
   side_request: z.boolean().optional(),
+  boundaries: z.array(CacheBoundarySchema).max(8).optional(),
 }).refine((value) => value.namespace || value.tenant, {
   message: "cache intent requires namespace or tenant",
 });
+
+function validateCacheBoundaries(
+  value: { cache?: { boundaries?: Array<z.infer<typeof CacheBoundarySchema>> }; tools?: unknown[] },
+  messageCount: number,
+  ctx: z.RefinementCtx,
+): void {
+  const boundaries = value.cache?.boundaries ?? [];
+  let sawMessages = false;
+  let previousMessage = -1;
+  for (let index = 0; index < boundaries.length; index += 1) {
+    const boundary = boundaries[index]!;
+    if (boundary.kind === "tools") {
+      if (!value.tools?.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cache", "boundaries", index], message: "tools boundary requires a non-empty tools array" });
+      }
+      if (sawMessages || boundaries.slice(0, index).some((candidate) => candidate.kind === "tools")) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cache", "boundaries", index], message: "cache boundaries must be unique and ordered: tools before messages" });
+      }
+      continue;
+    }
+    sawMessages = true;
+    if (boundary.through_message >= messageCount) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cache", "boundaries", index, "through_message"], message: `through_message must be a zero-based index below ${messageCount}` });
+    }
+    if (boundary.through_message <= previousMessage) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cache", "boundaries", index, "through_message"], message: "message boundaries must be unique and strictly increasing" });
+    }
+    previousMessage = boundary.through_message;
+  }
+}
 
 export const ChatCompletionRequestSchema = z.object({
   model: z.string().min(1),
@@ -357,7 +419,7 @@ export const ChatCompletionRequestSchema = z.object({
   presence_penalty: z.number().min(-2).max(2).optional(),
   frequency_penalty: z.number().min(-2).max(2).optional(),
   cache: CacheIntentSchema.optional(),
-});
+}).superRefine((value, ctx) => validateCacheBoundaries(value, value.messages.length, ctx));
 
 export const ChatCompletionChoiceSchema = z.object({
   index: z.number(),
@@ -437,7 +499,8 @@ export const ResponseRequestSchema = z.object({
   max_output_tokens: z.number().int().positive().optional(),
   metadata: z.record(z.unknown()).optional(),
   previous_response_id: z.string().optional(),
-});
+  cache: CacheIntentSchema.optional(),
+}).superRefine((value, ctx) => validateCacheBoundaries(value, typeof value.input === "string" ? 1 : value.input.length, ctx));
 
 export const ResponseOutputItemSchema = z.union([
   z.object({
@@ -562,6 +625,8 @@ export type UnloadModelResponse = z.infer<typeof UnloadModelResponseSchema>;
 export type OpenAIModelsResponse = z.infer<typeof OpenAIModelsResponseSchema>;
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 export type ChatToolCall = z.infer<typeof ChatToolCallSchema>;
+export type CacheBoundary = z.infer<typeof CacheBoundarySchema>;
+export type CacheIntent = z.infer<typeof CacheIntentSchema>;
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
 export type ChatCompletionResponse = z.infer<typeof ChatCompletionResponseSchema>;
 export type ChatCompletionChunk = z.infer<typeof ChatCompletionChunkSchema>;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,7 +35,7 @@ describe("install.sh", () => {
     for (const command of ["tar", "shasum", "awk", "mkdir", "mktemp", "install", "rm", "cp"]) {
       const location = Bun.which(command);
       expect(location).not.toBeNull();
-      await cp(location!, join(bin, command));
+      await symlink(await realpath(location!), join(bin, command));
     }
 
     const process = Bun.spawn(["/bin/sh", "install.sh"], {
@@ -53,7 +53,7 @@ describe("install.sh", () => {
     const output = await new Response(process.stdout).text();
     const error = await new Response(process.stderr).text();
     expect(await process.exited, error).toBe(0);
-    expect(output).toContain("clap-v0.2.0-darwin-arm64.tar.gz");
+    expect(output).toContain("downloading clap v0.2.0 (darwin-arm64)");
     expect(await readFile(join(installDir, "clap"), "utf8")).toContain("installed");
   });
 });

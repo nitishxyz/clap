@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use clap_cache_core::{
     CacheManager, Capabilities, Commit, Config, Error, Labels, Namespace, PlanRequest, Priority,
     RetentionConfig, Scope, SlotState,
@@ -27,6 +29,7 @@ fn manager(initial: u32, hard_max: u32) -> CacheManager {
             min_reuse_tokens: 2,
             logical_token_capacity: 1,
             max_anchors: hard_max,
+            automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
             hard_max_retained_entries: hard_max,
@@ -217,6 +220,7 @@ fn busy_and_protected_anchors_are_ineligible_pressure_victims() {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 6,
+            automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
             hard_max_retained_entries: 6,
@@ -284,4 +288,121 @@ fn physical_bytes_follow_commit_advance_invalidate_and_reset() {
     cache.reset();
     assert_eq!(cache.telemetry().physical_bytes, 0);
     assert_eq!(cache.telemetry().active_slots, 0);
+}
+
+#[test]
+fn branch_pressure_preserves_the_only_lower_depth_band_donor() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 10,
+            min_reuse_tokens: 16,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 10,
+            automatic_checkpoints: Default::default(),
+        },
+        RetentionConfig {
+            hard_max_retained_entries: 12,
+            physical_byte_budget: Some(200_000),
+            high_watermark_bytes: 160_000,
+            low_watermark_bytes: 110_000,
+        },
+    )
+    .unwrap();
+    let seed_tokens: Vec<i32> = (0..17_021).collect();
+    let mut anchors = BTreeMap::new();
+    for offset in (2_048..=16_384).step_by(2_048) {
+        let mut anchor_request =
+            request(&seed_tokens[..offset], namespace(1), 0, SlotState::Anchor);
+        anchor_request.estimated_bytes_per_token = 0;
+        let anchor = cache.plan(anchor_request).unwrap();
+        let slot = anchor.target.slot;
+        cache
+            .commit(
+                anchor.id,
+                Commit {
+                    resident_tokens: offset,
+                    actual_state: SlotState::Anchor,
+                    physical_bytes: 20_000,
+                    prefill_us_saved: 0,
+                },
+            )
+            .unwrap();
+        anchors.insert(offset, slot);
+    }
+
+    let mut branch = seed_tokens[..14_408].to_vec();
+    branch.push(-1);
+    let mut branch_request = request(&branch, namespace(1), 2, SlotState::Session);
+    branch_request.capabilities =
+        Capabilities(Capabilities::WHOLE_STATE_COPY | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS);
+    let plan = cache.plan(branch_request).unwrap();
+    assert_eq!(plan.reuse_tokens, 14_336);
+    assert!(!plan
+        .evictions
+        .iter()
+        .any(|victim| victim.slot == anchors[&8_192]));
+    cache
+        .commit(
+            plan.id,
+            Commit {
+                resident_tokens: 14_336,
+                actual_state: SlotState::Session,
+                physical_bytes: 8_508,
+                prefill_us_saved: 0,
+            },
+        )
+        .unwrap();
+
+    let mut lower_branch = seed_tokens[..8_508].to_vec();
+    lower_branch.push(-2);
+    let mut lower_request = request(&lower_branch, namespace(1), 3, SlotState::Session);
+    lower_request.capabilities =
+        Capabilities(Capabilities::WHOLE_STATE_COPY | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS);
+    let lower = cache.plan(lower_request).unwrap();
+    assert_eq!(lower.reuse_tokens, 8_192);
+    assert_eq!(lower.donor.unwrap().slot, anchors[&8_192]);
+    cache.abort(lower.id).unwrap();
+}
+
+#[test]
+fn retained_pressure_cannot_reject_an_executable_session_target() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 3,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 2,
+            automatic_checkpoints: Default::default(),
+        },
+        RetentionConfig {
+            hard_max_retained_entries: 3,
+            physical_byte_budget: Some(100),
+            high_watermark_bytes: 80,
+            low_watermark_bytes: 50,
+        },
+    )
+    .unwrap();
+    for suffix in [10, 20] {
+        let tokens = [1, suffix];
+        let mut anchor_request = request(&tokens, namespace(1), 0, SlotState::Anchor);
+        anchor_request.labels.scope = Scope::Harness;
+        anchor_request.estimated_bytes_per_token = 0;
+        let anchor = cache.plan(anchor_request).unwrap();
+        cache
+            .commit(
+                anchor.id,
+                Commit {
+                    resident_tokens: tokens.len(),
+                    actual_state: SlotState::Anchor,
+                    physical_bytes: 45,
+                    prefill_us_saved: 0,
+                },
+            )
+            .unwrap();
+    }
+    let mut incoming = request(&[99; 17_000], namespace(1), 7, SlotState::Session);
+    incoming.estimated_bytes_per_token = 1_000;
+    let plan = cache.plan(incoming).unwrap();
+    assert_eq!(plan.operation, clap_cache_core::Operation::Fresh);
+    cache.abort(plan.id).unwrap();
 }

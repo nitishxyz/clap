@@ -9,6 +9,15 @@ import { z } from "zod";
 
 const KvTypeSchema = z.enum(["f16", "q8_0", "q4_0"]);
 
+export const CheckpointConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  minimum_tokens: z.number().int().min(16).max(1_048_576).default(2_048),
+  interval_tokens: z.number().int().min(16).max(1_048_576).default(2_048),
+  max_checkpoints: z.number().int().min(1).max(64).default(8),
+  budget_fraction: z.number().min(0).max(1).default(0.25),
+  budget_bytes: z.number().int().nonnegative().default(0),
+});
+
 const LlamaSectionSchema = z.object({
   retained_max: z.number().int().positive().optional(),
   context: z.number().int().positive().optional(),
@@ -53,6 +62,9 @@ export const ClapConfigSchema = z.object({
     queue_depth: z.number().int().positive().optional(),
     max_active: z.number().int().positive().optional(),
   }).partial().default({}),
+  cache: z.object({
+    checkpoints: CheckpointConfigSchema.default({}),
+  }).default({ checkpoints: {} }),
   telemetry: z.object({
     cache_decisions_enabled: z.boolean().optional().default(true),
     cache_decisions_max_mib: z.number().int().min(1).max(1024).optional().default(32),
@@ -184,6 +196,18 @@ const MLX_ENV_MAP: Array<[keyof z.infer<typeof MlxSectionSchema>, string]> = [
 export function applyConfigToEnv(config: ClapConfig): void {
   if (config.limits.max_active !== undefined && process.env.CLAP_MAX_ACTIVE === undefined) {
     process.env.CLAP_MAX_ACTIVE = String(config.limits.max_active);
+  }
+  const checkpoints = config.cache.checkpoints;
+  const checkpointEnv: Record<string, string> = {
+    CLAP_CACHE_CHECKPOINTS_ENABLED: checkpoints.enabled ? "1" : "0",
+    CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS: String(checkpoints.minimum_tokens),
+    CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS: String(checkpoints.interval_tokens),
+    CLAP_CACHE_CHECKPOINT_MAX: String(checkpoints.max_checkpoints),
+    CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS: String(Math.round(checkpoints.budget_fraction * 10_000)),
+    CLAP_CACHE_CHECKPOINT_BUDGET_BYTES: String(checkpoints.budget_bytes),
+  };
+  for (const [name, value] of Object.entries(checkpointEnv)) {
+    if (process.env[name] === undefined) process.env[name] = value;
   }
   for (const [key, envName] of LLAMA_ENV_MAP) {
     const value = config.llama[key];

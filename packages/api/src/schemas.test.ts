@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ChatCompletionRequestSchema, LoadedModelSchema } from "./schemas";
+import { ChatCompletionRequestSchema, LoadedModelSchema, ResponseRequestSchema } from "./schemas";
 
 describe("loaded model retention schema", () => {
   const model = {
@@ -61,5 +61,84 @@ describe("cache intent schema", () => {
       messages: [{ role: "user", content: "hello" }],
       cache: { project: "payments" },
     })).toThrow();
+  });
+
+  test("accepts ordered generic slices with zero-based inclusive message indexes", () => {
+    const request = ChatCompletionRequestSchema.parse({
+      model: "org/model",
+      messages: [
+        { role: "system", content: "stable section zero" },
+        { role: "user", content: "stable section one" },
+        { role: "user", content: "changing suffix" },
+      ],
+      tools: [{ type: "function", function: { name: "lookup" } }],
+      cache: {
+        tenant: "acme",
+        boundaries: [
+          { kind: "tools", label: "slice:tools-v2" },
+          { kind: "messages", through_message: 0, label: "prefix-0" },
+          { kind: "messages", through_message: 1, label: "checkpoint.alpha" },
+        ],
+      },
+    });
+    expect(request.cache?.boundaries).toEqual([
+      { kind: "tools", label: "slice:tools-v2" },
+      { kind: "messages", through_message: 0, label: "prefix-0" },
+      { kind: "messages", through_message: 1, label: "checkpoint.alpha" },
+    ]);
+  });
+
+  test("labels are optional domain-neutral telemetry and cannot change structural resolution", () => {
+    const base = {
+      model: "org/model",
+      messages: [{ role: "user" as const, content: "stable slice" }],
+      cache: { tenant: "acme" },
+    };
+    const unlabeled = ChatCompletionRequestSchema.parse({
+      ...base, cache: { ...base.cache, boundaries: [{ kind: "messages", through_message: 0 }] },
+    });
+    const first = ChatCompletionRequestSchema.parse({
+      ...base, cache: { ...base.cache, boundaries: [{ kind: "messages", through_message: 0, label: "prefix-0" }] },
+    });
+    const second = ChatCompletionRequestSchema.parse({
+      ...base, cache: { ...base.cache, boundaries: [{ kind: "messages", through_message: 0, label: "checkpoint.alpha" }] },
+    });
+    expect(unlabeled.cache?.boundaries).toEqual([{ kind: "messages", through_message: 0 }]);
+    expect(first.cache?.boundaries?.map(({ label: _label, ...boundary }) => boundary)).toEqual(
+      second.cache?.boundaries?.map(({ label: _label, ...boundary }) => boundary),
+    );
+  });
+
+  test("rejects empty, oversized, or unsafe boundary labels", () => {
+    const base = { model: "org/model", messages: [{ role: "user", content: "hello" }] };
+    for (const label of ["", "contains space", "raw/path", `x${"a".repeat(64)}`]) {
+      expect(ChatCompletionRequestSchema.safeParse({
+        ...base,
+        cache: { tenant: "acme", boundaries: [{ kind: "messages", through_message: 0, label }] },
+      }).success).toBe(false);
+    }
+  });
+
+  test("rejects out-of-range, duplicate, unordered, unsafe tools, and more than eight boundaries", () => {
+    const base = { model: "org/model", messages: [{ role: "user", content: "hello" }] };
+    const invalid = [
+      [{ kind: "messages", through_message: 1 }],
+      [{ kind: "messages", through_message: 0 }, { kind: "messages", through_message: 0 }],
+      [{ kind: "messages", through_message: 0 }, { kind: "tools" }],
+      [{ kind: "tools" }],
+      Array.from({ length: 9 }, (_, through_message) => ({ kind: "messages", through_message })),
+    ];
+    for (const boundaries of invalid) {
+      expect(ChatCompletionRequestSchema.safeParse({ ...base, cache: { tenant: "acme", boundaries } }).success).toBe(false);
+    }
+  });
+
+  test("supports the same current-request contract on Responses cache intent", () => {
+    const parsed = ResponseRequestSchema.parse({
+      model: "org/model",
+      input: [{ role: "user", content: "hello" }],
+      cache: { tenant: "acme", boundaries: [{ kind: "messages", through_message: 0, label: "checkpoint.alpha" }] },
+    });
+    expect(parsed.cache?.boundaries?.[0]).toEqual({ kind: "messages", through_message: 0, label: "checkpoint.alpha" });
   });
 });

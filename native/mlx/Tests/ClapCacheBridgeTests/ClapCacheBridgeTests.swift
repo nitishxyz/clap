@@ -3,18 +3,19 @@ import XCTest
 
 final class ClapCacheBridgeTests: XCTestCase {
   func testPlanCommitBranchInvalidateAndReset() throws {
-    let manager = try XCTUnwrap(cc_manager_create_with_retention(3, 2, 64, 2, 3, 0, 0, 0))
+    let manager = try XCTUnwrap(cc_manager_create_with_retention(
+      3, 2, 64, 2, 3, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0))
     defer { cc_manager_destroy(manager) }
     let namespace = [UInt8](repeating: 7, count: 32)
     let firstTokens: [Int32] = [1, 2, 3, 4]
-    let stableBoundaries: [UInt64] = [2]
+    let stableBoundaries: [UInt64] = [3, 2, 2]
     let first = namespace.withUnsafeBufferPointer { namespace in
       firstTokens.withUnsafeBufferPointer { tokens in
         stableBoundaries.withUnsafeBufferPointer { boundaries in
           cc_manager_plan(manager, tokens.baseAddress, tokens.count, namespace.baseAddress,
             1, 2, 3, 4, 10, UInt32(CC_SCOPE_SESSION), UInt32(CC_PRIORITY_INTERACTIVE),
             0, UInt64(CC_CAP_PARTIAL_PREFIX_BRANCH) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT),
-            nil, 0, boundaries.baseAddress, boundaries.count, 0, UInt32(CC_SLOT_SESSION))
+            nil, 0, boundaries.baseAddress, boundaries.count, 0, 0, UInt32(CC_SLOT_SESSION))
         }
       }
     }
@@ -22,7 +23,15 @@ final class ClapCacheBridgeTests: XCTestCase {
     var firstView = cc_plan_view_t()
     XCTAssertEqual(cc_plan_view(firstPlan, &firstView), Int32(CC_OK))
     XCTAssertEqual(firstView.operation, UInt32(CC_OPERATION_FRESH))
-    XCTAssertEqual(firstView.anchor_tokens, 2)
+    XCTAssertEqual(firstView.anchor_tokens, 3)
+    var anchorBoundaryCount: UInt32 = 0
+    XCTAssertEqual(cc_plan_anchor_boundary_count(firstPlan, &anchorBoundaryCount), Int32(CC_OK))
+    XCTAssertEqual(anchorBoundaryCount, 2)
+    var firstBoundary: UInt64 = 0
+    var secondBoundary: UInt64 = 0
+    XCTAssertEqual(cc_plan_anchor_boundary(firstPlan, 0, &firstBoundary), Int32(CC_OK))
+    XCTAssertEqual(cc_plan_anchor_boundary(firstPlan, 1, &secondBoundary), Int32(CC_OK))
+    XCTAssertEqual([firstBoundary, secondBoundary], [2, 3])
     var firstDecision = cc_decision_t()
     XCTAssertEqual(cc_plan_commit(firstPlan, 0, UInt32(CC_SLOT_SESSION), 0, &firstDecision), Int32(CC_OK))
     cc_plan_destroy(firstPlan)
@@ -47,7 +56,7 @@ final class ClapCacheBridgeTests: XCTestCase {
           cc_manager_plan(manager, tokens.baseAddress, tokens.count, namespace.baseAddress,
             1, 2, 3, 4, 11, UInt32(CC_SCOPE_SESSION), UInt32(CC_PRIORITY_INTERACTIVE),
             0, UInt64(CC_CAP_PARTIAL_PREFIX_BRANCH), slots.baseAddress, slots.count,
-            nil, 0, 0, UInt32(CC_SLOT_SESSION))
+            nil, 0, 0, 0, UInt32(CC_SLOT_SESSION))
         }
       }
     }
@@ -75,7 +84,7 @@ final class ClapCacheBridgeTests: XCTestCase {
           cc_manager_plan(manager, tokens.baseAddress, tokens.count, namespace.baseAddress,
             1, 2, 3, 4, 12, UInt32(CC_SCOPE_SESSION), UInt32(CC_PRIORITY_INTERACTIVE),
             0, UInt64(CC_CAP_PARTIAL_PREFIX_BRANCH), slots.baseAddress, slots.count,
-            nil, 0, 0, UInt32(CC_SLOT_SESSION))
+            nil, 0, 0, 0, UInt32(CC_SLOT_SESSION))
         }
       }
     }
@@ -94,7 +103,8 @@ final class ClapCacheBridgeTests: XCTestCase {
   }
 
   func testContextSizedPromptIsIndependentOfRetainedCapacityHint() throws {
-    let manager = try XCTUnwrap(cc_manager_create_with_retention(1, 1, 1, 1, 1, 0, 0, 0))
+    let manager = try XCTUnwrap(cc_manager_create_with_retention(
+      1, 1, 1, 1, 1, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0))
     defer { cc_manager_destroy(manager) }
     let namespace = [UInt8](repeating: 3, count: 32)
     let tooLarge: [Int32] = [1, 2]
@@ -102,7 +112,7 @@ final class ClapCacheBridgeTests: XCTestCase {
       tooLarge.withUnsafeBufferPointer { tokens in
         cc_manager_plan(manager, tokens.baseAddress, tokens.count, namespace.baseAddress,
           1, 0, 0, 0, 1, UInt32(CC_SCOPE_SESSION), UInt32(CC_PRIORITY_INTERACTIVE),
-          0, 0, nil, 0, nil, 0, 0, UInt32(CC_SLOT_SESSION))
+          0, 0, nil, 0, nil, 0, 0, 0, UInt32(CC_SLOT_SESSION))
       }
     }
     let firstPlan = try XCTUnwrap(planned)
@@ -115,7 +125,7 @@ final class ClapCacheBridgeTests: XCTestCase {
       fits.withUnsafeBufferPointer { tokens in
         cc_manager_plan(manager, tokens.baseAddress, tokens.count, namespace.baseAddress,
           1, 0, 0, 0, 2, UInt32(CC_SCOPE_SESSION), UInt32(CC_PRIORITY_INTERACTIVE),
-          0, 0, nil, 0, nil, 0, 0, UInt32(CC_SLOT_SESSION))
+          0, 0, nil, 0, nil, 0, 0, 0, UInt32(CC_SLOT_SESSION))
       }
     }
     let recoveredPlan = try XCTUnwrap(recovered)
@@ -125,7 +135,7 @@ final class ClapCacheBridgeTests: XCTestCase {
 
   func testDynamicRetentionABIRegistrationTelemetryAndCeiling() throws {
     let manager = try XCTUnwrap(cc_manager_create_with_retention(
-      1, 1, 64, 3, 3, 1_000, 800, 500))
+      1, 1, 64, 3, 3, 1_000, 800, 500, 1, 2_048, 2_048, 8, 2_500, 0))
     defer { cc_manager_destroy(manager) }
 
     var slot: UInt32 = 0
@@ -143,6 +153,9 @@ final class ClapCacheBridgeTests: XCTestCase {
     XCTAssertEqual(telemetry.physical_byte_budget, 1_000)
     XCTAssertEqual(telemetry.high_watermark_bytes, 800)
     XCTAssertEqual(telemetry.low_watermark_bytes, 500)
+    XCTAssertEqual(telemetry.automatic_checkpoint_slots, 0)
+    XCTAssertEqual(telemetry.automatic_checkpoint_bytes, 0)
+    XCTAssertEqual(telemetry.automatic_checkpoint_byte_budget, 250)
 
     XCTAssertEqual(cc_manager_set_anchor_protected(manager, 0, 1, 1),
       Int32(CC_INVALID_ARGUMENT))

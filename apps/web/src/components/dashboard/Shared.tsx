@@ -57,8 +57,29 @@ const tagColors = {
   warn: "border-warn text-warn",
   hit: "border-cache text-cache",
   pin: "border-thinking text-thinking",
+  cold: "border-soft-border text-foreground",
+  isolated: "border-thinking text-thinking",
+  busy: "border-warn text-warn",
 } as const;
 
-export function Tag({ tone = "default", title, children }: { tone?: keyof typeof tagColors; title?: string; children: ReactNode }) {
-  return <span title={title} className={`inline-block whitespace-nowrap border px-1.5 text-[0.7rem] ${tagColors[tone]}`}>{children}</span>;
+export function Tag({
+  tone = "default",
+  title,
+  children,
+  ariaLabel,
+}: {
+  tone?: keyof typeof tagColors;
+  title?: string;
+  children: ReactNode;
+  ariaLabel?: string;
+}) {
+  return (
+    <span
+      title={title}
+      aria-label={ariaLabel ?? (typeof children === "string" ? children : title)}
+      className={`inline-block max-w-full truncate whitespace-nowrap border px-1.5 text-[0.7rem] ${tagColors[tone]}`}
+    >
+      {children}
+    </span>
+  );
 }

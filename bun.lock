@@ -16,7 +16,7 @@
     },
     "apps/cli": {
       "name": "@clap/cli",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "clap": "./src/index.ts",
       },
@@ -28,7 +28,7 @@
     },
     "apps/web": {
       "name": "@clap/web",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@tanstack/react-router": "^1.170.9",
         "react": "^19.0.0",
@@ -46,7 +46,7 @@
     },
     "packages/api": {
       "name": "@clap/api",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@asteasolutions/zod-to-openapi": "^7.3.4",
         "zod": "^3.23.8",
@@ -54,7 +54,7 @@
     },
     "packages/models": {
       "name": "@clap/models",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@clap/api": "workspace:*",
         "@clap/runtime-llama": "workspace:*",
@@ -63,21 +63,21 @@
     },
     "packages/runtime-llama": {
       "name": "@clap/runtime-llama",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@clap/api": "workspace:*",
       },
     },
     "packages/runtime-mlx": {
       "name": "@clap/runtime-mlx",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@clap/api": "workspace:*",
       },
     },
     "packages/runtime-router": {
       "name": "@clap/runtime-router",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@clap/runtime-llama": "workspace:*",
         "@clap/runtime-mlx": "workspace:*",
@@ -85,7 +85,7 @@
     },
     "packages/server": {
       "name": "@clap/server",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@clap/api": "workspace:*",
         "@clap/models": "workspace:*",

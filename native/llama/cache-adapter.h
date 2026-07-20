@@ -74,7 +74,9 @@ class Plan {
 
   Plan(Plan&& other) noexcept
       : owner_(other.owner_), handle_(other.handle_), view_(other.view_),
-        evictions_(std::move(other.evictions_)), candidates_(std::move(other.candidates_)) {
+        evictions_(std::move(other.evictions_)),
+        anchor_boundaries_(std::move(other.anchor_boundaries_)),
+        candidates_(std::move(other.candidates_)) {
     other.owner_ = nullptr;
     other.handle_ = nullptr;
   }
@@ -86,6 +88,7 @@ class Plan {
       handle_ = other.handle_;
       view_ = other.view_;
       evictions_ = std::move(other.evictions_);
+      anchor_boundaries_ = std::move(other.anchor_boundaries_);
       candidates_ = std::move(other.candidates_);
       other.owner_ = nullptr;
       other.handle_ = nullptr;
@@ -97,6 +100,7 @@ class Plan {
 
   const clap_cache_plan_view_t& view() const { return view_; }
   const std::vector<clap_cache_slot_ref_t>& evictions() const { return evictions_; }
+  const std::vector<uint64_t>& anchor_boundaries() const { return anchor_boundaries_; }
   const std::vector<clap_cache_candidate_evaluation_t>& candidates() const {
     return candidates_;
   }
@@ -141,6 +145,17 @@ class Plan {
             clap_cache_plan_evictions(handle_, evictions_.data(), count, &count));
     }
     count = 0;
+    status = clap_cache_plan_anchor_boundaries(handle_, nullptr, 0, &count);
+    if (status != CLAP_CACHE_OK && status != CLAP_CACHE_NO_CAPACITY) {
+      check("clap_cache_plan_anchor_boundaries", status);
+    }
+    anchor_boundaries_.resize(count);
+    if (count > 0) {
+      check("clap_cache_plan_anchor_boundaries",
+            clap_cache_plan_anchor_boundaries(
+                handle_, anchor_boundaries_.data(), count, &count));
+    }
+    count = 0;
     status = clap_cache_plan_candidates(handle_, nullptr, 0, &count);
     if (status != CLAP_CACHE_OK && status != CLAP_CACHE_NO_CAPACITY) {
       check("clap_cache_plan_candidates", status);
@@ -163,6 +178,7 @@ class Plan {
   clap_cache_plan_t* handle_ = nullptr;
   clap_cache_plan_view_t view_{};
   std::vector<clap_cache_slot_ref_t> evictions_;
+  std::vector<uint64_t> anchor_boundaries_;
   std::vector<clap_cache_candidate_evaluation_t> candidates_;
 };
 
@@ -173,7 +189,13 @@ class Coordinator {
               uint32_t hard_max_retained_entries = 0,
               uint64_t physical_byte_budget = 0,
               uint64_t high_watermark_bytes = 0,
-              uint64_t low_watermark_bytes = 0)
+              uint64_t low_watermark_bytes = 0,
+              bool automatic_checkpoints = true,
+              uint64_t checkpoint_minimum_tokens = 2048,
+              uint64_t checkpoint_interval_tokens = 2048,
+              uint32_t checkpoint_max = 8,
+              uint32_t checkpoint_budget_basis_points = 2500,
+              uint64_t checkpoint_budget_bytes = 0)
       : slot_count_(slots) {
     clap_cache_config_t config{};
     config.version = CLAP_CACHE_ABI_VERSION;
@@ -182,6 +204,12 @@ class Coordinator {
     config.max_anchors = max_anchors;
     config.min_reuse_tokens = min_reuse_tokens;
     config.logical_token_capacity = logical_token_capacity;
+    config.automatic_checkpoint_mode = automatic_checkpoints ? 1 : 2;
+    config.automatic_checkpoint_max = checkpoint_max;
+    config.automatic_checkpoint_min_tokens = checkpoint_minimum_tokens;
+    config.automatic_checkpoint_interval_tokens = checkpoint_interval_tokens;
+    config.automatic_checkpoint_memory_basis_points = checkpoint_budget_basis_points;
+    config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
     clap_cache_retention_config_t retention{};
     retention.version = CLAP_CACHE_ABI_VERSION;
     retention.struct_size = sizeof(retention);
@@ -208,7 +236,8 @@ class Coordinator {
   Plan plan(const std::vector<int32_t>& tokens, const Identity& identity,
             uint64_t capabilities, uint64_t output_reserve,
             uint32_t result_state = CLAP_CACHE_SLOT_SESSION,
-            const std::vector<uint8_t>& supplied_slot_capabilities = {}) {
+            const std::vector<uint8_t>& supplied_slot_capabilities = {},
+            const std::vector<uint64_t>& stable_boundaries = {}) {
     clap_cache_labels_t labels{};
     labels.version = CLAP_CACHE_ABI_VERSION;
     labels.struct_size = sizeof(labels);
@@ -240,6 +269,8 @@ class Coordinator {
     }
     request.slot_capabilities = slot_capabilities->data();
     request.slot_capabilities_len = slot_capabilities->size();
+    request.stable_boundaries = stable_boundaries.data();
+    request.stable_boundaries_len = stable_boundaries.size();
     request.output_reserve = output_reserve;
     request.result_state = result_state;
 
@@ -271,6 +302,11 @@ class Coordinator {
 
   void set_busy(clap_cache_slot_ref_t slot, bool busy) {
     check("clap_cache_set_busy", clap_cache_set_busy(handle_, slot, busy ? 1 : 0));
+  }
+
+  void set_anchor_protected(clap_cache_slot_ref_t slot, bool protected_anchor) {
+    check("clap_cache_set_anchor_protected",
+          clap_cache_set_anchor_protected(handle_, slot, protected_anchor ? 1 : 0));
   }
 
   uint64_t invalidate(clap_cache_slot_ref_t slot) {

@@ -4,11 +4,11 @@ version = 3
 
 [[package]]
 name = "clap-cache-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "clap-cache-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-cache-core",
 ]

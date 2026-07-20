@@ -32,6 +32,27 @@ extendZodWithOpenApi(z);
 
 export function createOpenApiDocument() {
   const registry = new OpenAPIRegistry();
+  const CacheOutcomeSchema = z.object({
+    category: z.enum([
+      "hit",
+      "cold",
+      "isolated",
+      "below_checkpoint",
+      "no_shared_prefix",
+      "donor_busy",
+      "no_eligible_donor",
+      "fresh_by_policy",
+      "cache_error",
+      "unexplained_miss",
+      "miss_reason_unavailable",
+      "unknown",
+    ]),
+    reason: z.string(),
+    hitKind: z.enum(["session", "branch", "checkpoint"]).optional(),
+    maxBlockedPrefixTokens: z.number().int().nonnegative().optional(),
+    boundariesSkipped: z.number().int().nonnegative().optional(),
+    evidence: z.array(z.string()),
+  });
   const CacheDecisionSchema = z.object({
     schemaVersion: z.number().int(),
     source: z.literal("persisted"),
@@ -42,6 +63,9 @@ export function createOpenApiDocument() {
     model: z.string(),
     backend: z.string().optional(),
     status: z.enum(["ok", "error", "cancelled"]),
+    // Optional classification derived at finish time. Older records omit it;
+    // readers re-derive via classifyCacheOutcome without rewriting storage.
+    cacheOutcome: CacheOutcomeSchema.optional(),
     cache: z.object({
       hit: z.boolean().optional(),
       missReason: z.string().optional(),
@@ -85,6 +109,7 @@ export function createOpenApiDocument() {
   registry.register("OllamaPullRequest", OllamaPullRequestSchema);
   registry.register("OllamaChatRequest", OllamaChatRequestSchema);
   registry.register("OllamaGenerateRequest", OllamaGenerateRequestSchema);
+  registry.register("CacheOutcome", CacheOutcomeSchema);
   registry.register("CacheDecision", CacheDecisionSchema);
   registry.register("CacheDecisionPage", CacheDecisionPageSchema);
 

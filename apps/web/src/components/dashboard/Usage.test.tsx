@@ -31,6 +31,10 @@ const worker = {
         inputs: { model_active_bytes: 4 * 2 ** 30 } },
       active: 1, retainedTotal: 103, retainedSessions: 100, retainedAnchors: 3,
       retainedBytes: 10 * 2 ** 30, sessionBytes: 8 * 2 ** 30, anchorBytes: 2 * 2 ** 30,
+      automaticCheckpointCount: 8, automaticCheckpointBytes: 512 * 2 ** 20,
+      automaticCheckpointBudgetBytes: 2 * 2 ** 30, automaticCheckpointsEnabled: true,
+      automaticCheckpointMinimumTokens: 2048, automaticCheckpointIntervalTokens: 2048,
+      automaticCheckpointMax: 8,
       budgetBytes: 96 * 2 ** 30, highWatermarkBytes: 86.4 * 2 ** 30, lowWatermarkBytes: 72 * 2 ** 30,
       underPressure: false, hardCeiling: 256, evictionReason: "byte_pressure", evictionCount: 2,
     },
@@ -104,7 +108,7 @@ describe("worker resource presentation", () => {
     const retained = html.indexOf('data-model-details="retained-cache"');
     expect(retained).toBeGreaterThan(backend);
     expect(html).toContain("Retained Cache");
-    for (const label of ["startup available", "active reserve", "retained total", "sessions", "anchors", "retained bytes", "budget", "high watermark", "low watermark", "hard ceiling", "evictions", "last reason"]) {
+    for (const label of ["startup available", "active reserve", "retained total", "sessions", "anchors", "retained bytes", "automatic checkpoints", "automatic checkpoint bytes", "checkpoint policy", "checkpoint budget", "budget", "high watermark", "low watermark", "hard ceiling", "evictions", "last reason"]) {
       expect(html.indexOf(`>${label}</span>`, retained)).toBeGreaterThan(retained);
     }
     expect(html).toContain("memory ceiling");

@@ -231,5 +231,33 @@ int main() {
   assert(unavailable_boundary.token_count == 0);
   assert(unavailable_boundary.kind.empty());
   assert(!empty_hashed);
+  const std::vector<int32_t> final_prompt{1, 2, 3, 4};
+  const std::vector<int32_t> exact_prefix{1, 2};
+  const std::vector<int32_t> eos_suffix{1, 2, 99};
+  const std::vector<int32_t> unsafe_suffix{1, 2, 77};
+  const auto is_terminal = [](int32_t token) { return token == 99; };
+  assert(clap::llama_boundary::exact_template_boundary(
+      exact_prefix, final_prompt, is_terminal) == 2);
+  assert(clap::llama_boundary::exact_template_boundary(
+      eos_suffix, final_prompt, is_terminal) == 2);
+  assert(!clap::llama_boundary::exact_template_boundary(
+      unsafe_suffix, final_prompt, is_terminal));
+
+  Coordinator unified(10, 16, 32768, 10);
+  Identity unified_identity;
+  unified_identity.name_space = clap::llama_cache::fingerprint("unified-checkpoints");
+  unified_identity.tenant = clap::llama_cache::hash("unified-tenant");
+  unified_identity.scope = CLAP_CACHE_SCOPE_TENANT;
+  std::vector<int32_t> long_prompt(17021);
+  for (std::size_t index = 0; index < long_prompt.size(); ++index) {
+    long_prompt[index] = static_cast<int32_t>(index);
+  }
+  auto unified_plan = unified.plan(long_prompt, unified_identity,
+      CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT | CLAP_CACHE_CAP_UNIFIED_STORAGE,
+      0);
+  assert(unified_plan.anchor_boundaries().size() == 8);
+  assert(unified_plan.anchor_boundaries().front() == 2048);
+  assert(unified_plan.anchor_boundaries().back() == 16384);
+  unified_plan.abort();
   return 0;
 }

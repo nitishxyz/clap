@@ -7,11 +7,11 @@ use std::slice;
 use std::sync::Mutex;
 
 use clap_cache_core::{
-    CacheManager, Capabilities, Commit, Config, Error, Labels, Namespace, PlanRequest, Priority,
-    RetentionConfig, Scope, SlotCapabilities, SlotState,
+    AutomaticCheckpointConfig, CacheManager, Capabilities, Commit, Config, Error, Labels,
+    Namespace, PlanRequest, Priority, RetentionConfig, Scope, SlotCapabilities, SlotState,
 };
 
-pub const CLAP_CACHE_ABI_VERSION: u32 = 2;
+pub const CLAP_CACHE_ABI_VERSION: u32 = 3;
 pub const CLAP_CACHE_SLOT_MATERIALIZED: u8 = SlotCapabilities::MATERIALIZED;
 pub const CLAP_CACHE_SLOT_WRITABLE: u8 = SlotCapabilities::WRITABLE;
 pub const CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM: u8 = SlotCapabilities::PARTIAL_SUFFIX_TRIM;
@@ -52,10 +52,17 @@ pub struct ClapCacheConfig {
     pub max_anchors: u32,
     pub min_reuse_tokens: u64,
     pub logical_token_capacity: u64,
+    /// Zero uses the safe default, one enables, and two disables.
+    pub automatic_checkpoint_mode: u32,
+    pub automatic_checkpoint_max: u32,
+    pub automatic_checkpoint_min_tokens: u64,
+    pub automatic_checkpoint_interval_tokens: u64,
+    pub automatic_checkpoint_memory_basis_points: u32,
+    pub reserved: u32,
+    pub automatic_checkpoint_memory_cap_bytes: u64,
 }
 
-/// Additive dynamic-retention configuration. Keeping this separate preserves
-/// the layout and semantics of `ClapCacheConfig` and `clap_cache_create`.
+/// Additive dynamic-retention configuration.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ClapCacheRetentionConfig {
@@ -222,6 +229,10 @@ pub struct ClapCacheRetentionTelemetry {
     pub total_bytes: u64,
     pub session_bytes: u64,
     pub anchor_bytes: u64,
+    pub automatic_checkpoint_slots: u32,
+    pub reserved0: u32,
+    pub automatic_checkpoint_bytes: u64,
+    pub automatic_checkpoint_byte_budget: u64,
     pub active_bytes: u64,
     pub physical_byte_budget: u64,
     pub high_watermark_bytes: u64,
@@ -326,6 +337,10 @@ fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
     ) {
         return Err(ClapCacheStatus::InvalidArgument);
     }
+    if config.automatic_checkpoint_mode > 2 {
+        return Err(ClapCacheStatus::InvalidArgument);
+    }
+    let defaults = AutomaticCheckpointConfig::default();
     Ok(Config {
         slot_count: config.slot_count,
         max_anchors: config.max_anchors,
@@ -333,6 +348,32 @@ fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
             .map_err(|_| ClapCacheStatus::InvalidArgument)?,
         logical_token_capacity: usize::try_from(config.logical_token_capacity)
             .map_err(|_| ClapCacheStatus::InvalidArgument)?,
+        automatic_checkpoints: AutomaticCheckpointConfig {
+            enabled: config.automatic_checkpoint_mode != 2,
+            minimum_prompt_tokens: if config.automatic_checkpoint_min_tokens == 0 {
+                defaults.minimum_prompt_tokens
+            } else {
+                usize::try_from(config.automatic_checkpoint_min_tokens)
+                    .map_err(|_| ClapCacheStatus::InvalidArgument)?
+            },
+            target_interval_tokens: if config.automatic_checkpoint_interval_tokens == 0 {
+                defaults.target_interval_tokens
+            } else {
+                usize::try_from(config.automatic_checkpoint_interval_tokens)
+                    .map_err(|_| ClapCacheStatus::InvalidArgument)?
+            },
+            max_checkpoints: if config.automatic_checkpoint_max == 0 {
+                defaults.max_checkpoints
+            } else {
+                config.automatic_checkpoint_max
+            },
+            memory_budget_basis_points: if config.automatic_checkpoint_memory_basis_points == 0 {
+                defaults.memory_budget_basis_points
+            } else {
+                config.automatic_checkpoint_memory_basis_points
+            },
+            memory_budget_cap_bytes: config.automatic_checkpoint_memory_cap_bytes,
+        },
     })
 }
 
@@ -596,6 +637,41 @@ pub unsafe extern "C" fn clap_cache_plan_evictions(
                     },
                 )
             };
+        }
+        Ok(())
+    })
+}
+
+/// Copies the ordered exact prefix lengths that Rust authorized for physical
+/// snapshotting during this request.
+///
+/// # Safety
+/// `plan` and `out_count` must be live, and `out_boundaries` must hold
+/// `capacity` writable elements when capacity is nonzero.
+#[no_mangle]
+pub unsafe extern "C" fn clap_cache_plan_anchor_boundaries(
+    plan: *const ClapCachePlan,
+    out_boundaries: *mut u64,
+    capacity: usize,
+    out_count: *mut usize,
+) -> ClapCacheStatus {
+    ffi_status(|| {
+        if plan.is_null() || out_count.is_null() || (out_boundaries.is_null() && capacity != 0) {
+            return Err(ClapCacheStatus::InvalidArgument);
+        }
+        // SAFETY: checked non-null and caller guarantees a live plan handle.
+        let plan = unsafe { &*plan }
+            .plan
+            .as_ref()
+            .ok_or(ClapCacheStatus::PlanConsumed)?;
+        // SAFETY: out_count is writable.
+        unsafe { *out_count = plan.anchor_boundaries.len() };
+        if capacity < plan.anchor_boundaries.len() {
+            return Err(ClapCacheStatus::NoCapacity);
+        }
+        for (index, boundary) in plan.anchor_boundaries.iter().copied().enumerate() {
+            // SAFETY: capacity was checked for every written element.
+            unsafe { ptr::write(out_boundaries.add(index), boundary as u64) };
         }
         Ok(())
     })
@@ -1022,6 +1098,10 @@ pub unsafe extern "C" fn clap_cache_get_retention_telemetry(
             total_bytes: telemetry.physical_bytes,
             session_bytes: telemetry.session_bytes,
             anchor_bytes: telemetry.anchor_bytes,
+            automatic_checkpoint_slots: telemetry.automatic_checkpoint_slots,
+            reserved0: 0,
+            automatic_checkpoint_bytes: telemetry.automatic_checkpoint_bytes,
+            automatic_checkpoint_byte_budget: telemetry.automatic_checkpoint_byte_budget,
             active_bytes: telemetry.active_bytes,
             physical_byte_budget: telemetry.physical_byte_budget,
             high_watermark_bytes: telemetry.high_watermark_bytes,

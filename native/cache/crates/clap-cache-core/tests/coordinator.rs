@@ -27,6 +27,7 @@ fn manager(slots: u32) -> CacheManager {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: slots,
+            automatic_checkpoints: Default::default(),
         },
         fixed_retention(slots),
     )
@@ -79,6 +80,21 @@ fn commit_idle(manager: &mut CacheManager, plan: &Plan, len: usize, state: SlotS
             .set_busy(snapshot.id, snapshot.generation, false)
             .unwrap();
     }
+}
+
+fn materialize_anchor(
+    manager: &mut CacheManager,
+    tokens: &[i32],
+    name_space: Namespace,
+    scope: Scope,
+) -> u32 {
+    let mut anchor_request = request(tokens, name_space, 0, 0);
+    anchor_request.result_state = SlotState::Anchor;
+    anchor_request.labels.scope = scope;
+    let anchor = manager.plan(anchor_request).unwrap();
+    let slot = anchor.target.slot;
+    commit_idle(manager, &anchor, tokens.len(), SlotState::Anchor);
+    slot
 }
 
 #[test]
@@ -280,13 +296,14 @@ fn saturated_anchor_pool_evicts_an_idle_anchor_instead_of_returning_no_capacity(
 }
 
 #[test]
-fn exact_anchor_creation_is_a_namespace_scoped_noop_before_the_anchor_limit() {
+fn exact_anchor_creation_is_a_namespace_scoped_noop_and_capacity_is_replaceable() {
     let mut cache = CacheManager::new(
         Config {
             slot_count: 2,
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 1,
+            automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
     )
@@ -321,7 +338,11 @@ fn exact_anchor_creation_is_a_namespace_scoped_noop_before_the_anchor_limit() {
 
     let mut isolated_request = request(&tokens, namespace(2), 3, 0);
     isolated_request.result_state = SlotState::Anchor;
-    assert_eq!(cache.plan(isolated_request), Err(Error::NoCapacity));
+    let replacement = cache.plan(isolated_request).unwrap();
+    assert_eq!(replacement.operation, Operation::Fresh);
+    assert_eq!(replacement.evictions.len(), 1);
+    assert_eq!(replacement.evictions[0].slot, first.target.slot);
+    cache.abort(replacement.id).unwrap();
 }
 
 #[test]
@@ -332,6 +353,7 @@ fn long_harness_output_reserve_does_not_discard_a_legal_donor() {
             min_reuse_tokens: 2,
             logical_token_capacity: 128,
             max_anchors: 2,
+            automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
     )
@@ -471,6 +493,37 @@ fn no_writable_target_returns_backpressure_instead_of_reusing_a_donor() {
     );
     incoming.slot_capabilities = Some(&slots);
     assert_eq!(cache.plan(incoming), Err(Error::NoCapacity));
+}
+
+#[test]
+fn all_writable_targets_busy_returns_retryable_slot_busy() {
+    let mut cache = manager(2);
+    for session in 1..=2 {
+        let tokens = [session as i32, 10 + session as i32];
+        let plan = cache
+            .plan(request(&tokens, namespace(1), session, 0))
+            .unwrap();
+        cache
+            .commit(
+                plan.id,
+                Commit {
+                    resident_tokens: tokens.len(),
+                    actual_state: SlotState::Session,
+                    physical_bytes: 0,
+                    prefill_us_saved: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        cache.plan(request(&[99, 100], namespace(1), 3, 0)),
+        Err(Error::SlotBusy)
+    );
+    let slot = cache.slot(0).unwrap();
+    cache.set_busy(slot.id, slot.generation, false).unwrap();
+    let retry = cache.plan(request(&[99, 100], namespace(1), 3, 0)).unwrap();
+    assert_eq!(retry.operation, Operation::Fresh);
+    cache.abort(retry.id).unwrap();
 }
 
 #[test]
@@ -814,6 +867,7 @@ fn deterministic_value_eviction_protects_anchor_and_interactive_session() {
             min_reuse_tokens: 2,
             logical_token_capacity: 7,
             max_anchors: 1,
+            automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
     )
@@ -907,7 +961,7 @@ fn deeper_foreign_namespace_does_not_hide_a_shorter_local_prefix() {
 }
 
 #[test]
-fn recurrent_fresh_plan_discovers_a_non_rewindable_shared_boundary() {
+fn recurrent_fresh_plan_does_not_invent_an_unauthorized_boundary() {
     let mut cache = manager(4);
     let stable: Vec<i32> = (0..128).collect();
     let mut first_tokens = stable.clone();
@@ -935,7 +989,8 @@ fn recurrent_fresh_plan_discovers_a_non_rewindable_shared_boundary() {
     let second = cache.plan(second_request).unwrap();
     assert_eq!(second.operation, Operation::Fresh);
     assert_eq!(second.reuse_tokens, 0);
-    assert_eq!(second.anchor_tokens, 128);
+    assert_eq!(second.anchor_tokens, 0);
+    assert!(second.anchor_boundaries.is_empty());
 }
 
 #[test]
@@ -955,13 +1010,16 @@ fn cold_seed_boundary_materializes_once_then_restores_without_losing_session() {
         &seed_tokens,
         namespace(1),
         1,
-        Capabilities::WHOLE_STATE_COPY | Capabilities::RECURRENT_OR_HYBRID,
+        Capabilities::WHOLE_STATE_COPY
+            | Capabilities::RECURRENT_OR_HYBRID
+            | Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
     );
     seed_request.stable_boundaries = &boundaries;
     seed_request.slot_capabilities = Some(&slots);
     let seed = cache.plan(seed_request).unwrap();
     assert_eq!(seed.operation, Operation::Fresh);
     assert_eq!(seed.anchor_tokens, stable.len());
+    assert_eq!(seed.anchor_boundaries, [stable.len()]);
     commit_idle(&mut cache, &seed, seed_tokens.len(), SlotState::Session);
 
     let mut anchor_request = request(&stable, namespace(1), 0, 0);
@@ -1020,6 +1078,378 @@ fn cold_seed_boundary_materializes_once_then_restores_without_losing_session() {
     let isolated = cache.plan(foreign).unwrap();
     assert_eq!(isolated.operation, Operation::Fresh);
     assert_eq!(isolated.reuse_tokens, 0);
+}
+
+#[test]
+fn mlx_and_gguf_hybrid_nested_anchor_matrix_restores_each_project_longest() {
+    for backend_capabilities in [
+        Capabilities::WHOLE_STATE_COPY
+            | Capabilities::RECURRENT_OR_HYBRID
+            | Capabilities::PROMPT_BOUNDARY_SNAPSHOT
+            | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS,
+        Capabilities::WHOLE_STATE_COPY
+            | Capabilities::RECURRENT_OR_HYBRID
+            | Capabilities::PROMPT_BOUNDARY_SNAPSHOT
+            | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS,
+    ] {
+        let mut cache = manager(8);
+        let project_a = [1, 2, 3, 4, 10, 11, 12, 13, 14, 90, 91];
+        let project_b = [1, 2, 3, 4, 20, 21, 22, 23, 24, 92, 93];
+        let boundaries = [4, 9, 9, 4];
+
+        let mut seed_a = request(&project_a, namespace(1), 101, backend_capabilities);
+        seed_a.stable_boundaries = &boundaries;
+        let seed_a_plan = cache.plan(seed_a).unwrap();
+        assert_eq!(seed_a_plan.anchor_boundaries, [4, 9]);
+        cache.abort(seed_a_plan.id).unwrap();
+        let global = materialize_anchor(&mut cache, &project_a[..4], namespace(1), Scope::Harness);
+        let anchor_a =
+            materialize_anchor(&mut cache, &project_a[..9], namespace(1), Scope::Project);
+
+        let mut seed_b = request(&project_b, namespace(1), 202, backend_capabilities);
+        seed_b.stable_boundaries = &boundaries;
+        let seed_b_plan = cache.plan(seed_b).unwrap();
+        assert_eq!(seed_b_plan.operation, Operation::Restore);
+        assert_eq!(seed_b_plan.donor.as_ref().unwrap().slot, global);
+        assert_eq!(seed_b_plan.reuse_tokens, 4);
+        assert_eq!(seed_b_plan.anchor_boundaries, [9]);
+        cache.abort(seed_b_plan.id).unwrap();
+        let anchor_b =
+            materialize_anchor(&mut cache, &project_b[..9], namespace(1), Scope::Project);
+
+        for (tokens, expected) in [(project_a, anchor_a), (project_b, anchor_b)] {
+            let reopened = cache
+                .plan(request(&tokens, namespace(1), 303, backend_capabilities))
+                .unwrap();
+            assert_eq!(reopened.operation, Operation::Restore);
+            assert_eq!(reopened.donor.as_ref().unwrap().slot, expected);
+            assert_eq!(reopened.reuse_tokens, 9);
+            cache.abort(reopened.id).unwrap();
+        }
+
+        let mut duplicate = request(&project_a, namespace(1), 404, backend_capabilities);
+        duplicate.stable_boundaries = &boundaries;
+        let duplicate_plan = cache.plan(duplicate).unwrap();
+        assert!(duplicate_plan.anchor_boundaries.is_empty());
+        cache.abort(duplicate_plan.id).unwrap();
+
+        let foreign = cache
+            .plan(request(&project_a, namespace(2), 505, backend_capabilities))
+            .unwrap();
+        assert_eq!(foreign.operation, Operation::Fresh);
+        assert_eq!(foreign.reuse_tokens, 0);
+        cache.abort(foreign.id).unwrap();
+
+        let ghost_tokens = [1, 2, 3, 4, 30, 31];
+        let mut ghost_request = request(&ghost_tokens, namespace(1), 0, 0);
+        ghost_request.result_state = SlotState::Anchor;
+        let ghost = cache.plan(ghost_request).unwrap();
+        cache.abort(ghost.id).unwrap();
+        assert!((0..8).all(|slot| cache.slot(slot).is_none_or(|entry| {
+            entry.state != SlotState::Anchor || entry.resident_len != ghost_tokens.len()
+        })));
+    }
+}
+
+#[test]
+fn gguf_unified_storage_authorizes_logical_shared_prefix_anchors() {
+    let mut cache = manager(4);
+    let tokens = [1, 2, 3, 4, 5, 6];
+    let boundaries = [2, 5];
+    let mut incoming = request(
+        &tokens,
+        namespace(1),
+        1,
+        Capabilities::PROMPT_BOUNDARY_SNAPSHOT | Capabilities::UNIFIED_STORAGE,
+    );
+    incoming.stable_boundaries = &boundaries;
+    let plan = cache.plan(incoming).unwrap();
+    assert_eq!(plan.anchor_boundaries, boundaries);
+    cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn automatic_token_checkpoints_are_exact_adaptive_and_bounded() {
+    let mut cache = manager(10);
+    let tokens: Vec<i32> = (0..17_000).collect();
+    let plan = cache
+        .plan(request(
+            &tokens,
+            namespace(1),
+            1,
+            Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+        ))
+        .unwrap();
+    assert_eq!(
+        plan.anchor_boundaries,
+        [2_048, 4_096, 6_144, 8_192, 10_240, 12_288, 14_336, 16_384]
+    );
+    assert!(plan
+        .anchor_boundaries
+        .iter()
+        .all(|&offset| offset < tokens.len()));
+    cache.abort(plan.id).unwrap();
+
+    let short: Vec<i32> = (0..2_047).collect();
+    let short_plan = cache
+        .plan(request(
+            &short,
+            namespace(1),
+            2,
+            Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+        ))
+        .unwrap();
+    assert!(short_plan.anchor_boundaries.is_empty());
+    cache.abort(short_plan.id).unwrap();
+}
+
+#[test]
+fn automatic_checkpoint_budget_admits_a_fresh_namespace_baseline() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 4,
+            min_reuse_tokens: 16,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 8,
+            automatic_checkpoints: Default::default(),
+        },
+        RetentionConfig {
+            hard_max_retained_entries: 8,
+            physical_byte_budget: Some(1_000_000),
+            high_watermark_bytes: 900_000,
+            low_watermark_bytes: 800_000,
+        },
+    )
+    .unwrap();
+    let first_tokens: Vec<i32> = (0..2_048).collect();
+    let mut anchor_request = request(&first_tokens, namespace(1), 0, 0);
+    anchor_request.result_state = SlotState::Anchor;
+    anchor_request.estimated_bytes_per_token = 0;
+    let anchor = cache.plan(anchor_request).unwrap();
+    cache
+        .commit(
+            anchor.id,
+            Commit {
+                resident_tokens: first_tokens.len(),
+                actual_state: SlotState::Anchor,
+                physical_bytes: 200_000,
+                prefill_us_saved: 0,
+            },
+        )
+        .unwrap();
+
+    let fresh: Vec<i32> = (10_000..15_000).collect();
+    let plan = cache
+        .plan(request(
+            &fresh,
+            namespace(2),
+            2,
+            Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+        ))
+        .unwrap();
+    assert_eq!(plan.anchor_boundaries, [2_048, 4_096]);
+    cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn nontrimmable_full_donors_leave_deep_checkpoint_executable_across_projects() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 16,
+            min_reuse_tokens: 16,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 12,
+            automatic_checkpoints: Default::default(),
+        },
+        RetentionConfig {
+            hard_max_retained_entries: 16,
+            physical_byte_budget: Some(1_100_000),
+            high_watermark_bytes: 1_000_000,
+            low_watermark_bytes: 900_000,
+        },
+    )
+    .unwrap();
+    let project_a: Vec<i32> = (0..14_472).collect();
+    let mut seed = request(
+        &project_a,
+        namespace(1),
+        0,
+        Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+    );
+    seed.labels.project = 10;
+    seed.labels.scope = Scope::Project;
+    let seed_plan = cache.plan(seed).unwrap();
+    let checkpoints = seed_plan.anchor_boundaries.clone();
+    cache.abort(seed_plan.id).unwrap();
+    assert!(checkpoints.contains(&14_336));
+
+    for boundary in checkpoints {
+        let mut anchor_request = request(&project_a[..boundary], namespace(1), 0, 0);
+        anchor_request.labels.project = 10;
+        anchor_request.labels.scope = Scope::Project;
+        anchor_request.result_state = SlotState::Anchor;
+        anchor_request.estimated_bytes_per_token = 16;
+        let anchor = cache.plan(anchor_request).unwrap();
+        cache
+            .commit(
+                anchor.id,
+                Commit {
+                    resident_tokens: boundary,
+                    actual_state: SlotState::Anchor,
+                    physical_bytes: boundary as u64 * 16,
+                    prefill_us_saved: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert!((0..16).any(|slot| {
+        cache.slot(slot).is_some_and(|snapshot| {
+            snapshot.state == SlotState::Anchor && snapshot.resident_len == 14_336
+        })
+    }));
+
+    for project in 10..13 {
+        let mut donor_request = request(&project_a, namespace(1), 0, 0);
+        donor_request.labels.project = project;
+        donor_request.labels.scope = Scope::Project;
+        donor_request.result_state = SlotState::PromptBoundary;
+        donor_request.estimated_bytes_per_token = 0;
+        let donor = cache.plan(donor_request).unwrap();
+        cache
+            .commit(
+                donor.id,
+                Commit {
+                    resident_tokens: project_a.len(),
+                    actual_state: SlotState::PromptBoundary,
+                    physical_bytes: 0,
+                    prefill_us_saved: 0,
+                },
+            )
+            .unwrap();
+        let snapshot = cache.slot(donor.target.slot).unwrap();
+        cache
+            .set_busy(snapshot.id, snapshot.generation, false)
+            .unwrap();
+    }
+
+    let mut project_b = project_a[..14_426].to_vec();
+    project_b.extend(20_000..22_547);
+    let slot_capabilities = (0..16)
+        .map(|slot| match cache.slot(slot) {
+            Some(snapshot) if snapshot.state == SlotState::Anchor => SlotCapabilities(
+                SlotCapabilities::MATERIALIZED
+                    | SlotCapabilities::WRITABLE
+                    | SlotCapabilities::COPY,
+            ),
+            Some(snapshot) if snapshot.state == SlotState::PromptBoundary => {
+                SlotCapabilities(SlotCapabilities::MATERIALIZED | SlotCapabilities::WRITABLE)
+            }
+            _ => SlotCapabilities::ALL,
+        })
+        .collect::<Vec<_>>();
+    let mut incoming = request(
+        &project_b,
+        namespace(1),
+        0,
+        Capabilities::WHOLE_STATE_COPY
+            | Capabilities::PARTIAL_PREFIX_BRANCH
+            | Capabilities::PARTIAL_SUFFIX_TRIM
+            | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS,
+    );
+    incoming.labels.project = 20;
+    incoming.labels.scope = Scope::Project;
+    incoming.slot_capabilities = Some(&slot_capabilities);
+    let plan = cache.plan(incoming).unwrap();
+    assert_eq!(plan.operation, Operation::Restore);
+    assert_eq!(plan.reuse_tokens, 14_336);
+    assert!(plan.candidates.iter().any(|candidate| {
+        candidate.state == SlotState::PromptBoundary
+            && candidate.shared_prefix_tokens == 14_426
+            && candidate.rejection == clap_cache_core::CandidateRejection::Nontrim
+    }));
+    cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn impossible_automatic_checkpoint_budget_skips_without_failing_generation() {
+    let checkpoints = clap_cache_core::AutomaticCheckpointConfig {
+        memory_budget_cap_bytes: 1_000,
+        ..Default::default()
+    };
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 2,
+            min_reuse_tokens: 16,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 2,
+            automatic_checkpoints: checkpoints,
+        },
+        RetentionConfig {
+            hard_max_retained_entries: 2,
+            physical_byte_budget: Some(100_000),
+            high_watermark_bytes: 90_000,
+            low_watermark_bytes: 80_000,
+        },
+    )
+    .unwrap();
+    let tokens: Vec<i32> = (0..5_000).collect();
+    let mut incoming = request(
+        &tokens,
+        namespace(1),
+        1,
+        Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+    );
+    incoming.estimated_bytes_per_token = 16;
+    let plan = cache.plan(incoming).unwrap();
+    assert!(plan.anchor_boundaries.is_empty());
+    cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn anchor_pressure_keeps_structural_and_reused_project_boundaries() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 4,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 3,
+            automatic_checkpoints: Default::default(),
+        },
+        fixed_retention(4),
+    )
+    .unwrap();
+    let global = materialize_anchor(&mut cache, &[1, 2], namespace(1), Scope::Harness);
+    let project_a = materialize_anchor(&mut cache, &[1, 2, 10, 11], namespace(1), Scope::Project);
+    let project_b = materialize_anchor(&mut cache, &[1, 2, 20, 21], namespace(1), Scope::Project);
+
+    let reused = [1, 2, 20, 21, 99];
+    let restore = cache
+        .plan(request(
+            &reused,
+            namespace(1),
+            9,
+            Capabilities::WHOLE_STATE_COPY | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS,
+        ))
+        .unwrap();
+    assert_eq!(restore.donor.as_ref().unwrap().slot, project_b);
+    commit_idle(&mut cache, &restore, 4, SlotState::Session);
+
+    let replacement_tokens = [1, 2, 30, 31];
+    let mut replacement_request = request(&replacement_tokens, namespace(1), 0, 0);
+    replacement_request.result_state = SlotState::Anchor;
+    replacement_request.labels.scope = Scope::Project;
+    let replacement = cache.plan(replacement_request).unwrap();
+    assert_eq!(replacement.target.slot, project_a);
+    assert!(replacement
+        .evictions
+        .iter()
+        .any(|slot| slot.slot == project_a));
+    assert!(!replacement.evictions.iter().any(|slot| slot.slot == global));
+    assert!(!replacement
+        .evictions
+        .iter()
+        .any(|slot| slot.slot == project_b));
+    cache.abort(replacement.id).unwrap();
 }
 
 #[test]

@@ -18,7 +18,10 @@ cc_manager_t *cc_manager_create_with_retention(
     uint32_t initial_slots, uint64_t min_reuse_tokens,
     uint64_t token_capacity, uint32_t max_anchors,
     uint32_t hard_max_retained_entries, uint64_t physical_byte_budget,
-    uint64_t high_watermark_bytes, uint64_t low_watermark_bytes) {
+    uint64_t high_watermark_bytes, uint64_t low_watermark_bytes,
+    uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
+    uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
+    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes) {
   cc_manager_t *manager = calloc(1, sizeof(*manager));
   if (!manager) return NULL;
   clap_cache_config_t config = {0};
@@ -28,6 +31,12 @@ cc_manager_t *cc_manager_create_with_retention(
   config.max_anchors = max_anchors;
   config.min_reuse_tokens = min_reuse_tokens;
   config.logical_token_capacity = token_capacity;
+  config.automatic_checkpoint_mode = automatic_checkpoints ? 1 : 2;
+  config.automatic_checkpoint_min_tokens = checkpoint_minimum_tokens;
+  config.automatic_checkpoint_interval_tokens = checkpoint_interval_tokens;
+  config.automatic_checkpoint_max = checkpoint_max;
+  config.automatic_checkpoint_memory_basis_points = checkpoint_budget_basis_points;
+  config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
   clap_cache_retention_config_t retention = {0};
   retention.version = CLAP_CACHE_ABI_VERSION;
   retention.struct_size = sizeof(retention);
@@ -62,7 +71,7 @@ cc_plan_t *cc_manager_plan(cc_manager_t *manager, const int32_t *tokens,
                            uint64_t capabilities, const uint8_t *slot_capabilities,
                            size_t slot_capabilities_len, const uint64_t *stable_boundaries,
                            size_t stable_boundaries_len, uint64_t output_reserve,
-                           uint32_t result_state) {
+                           uint64_t estimated_bytes_per_token, uint32_t result_state) {
   if (!manager || !namespace_fingerprint) return NULL;
   clap_cache_request_t request = {0};
   request.version = CLAP_CACHE_ABI_VERSION;
@@ -86,6 +95,7 @@ cc_plan_t *cc_manager_plan(cc_manager_t *manager, const int32_t *tokens,
   request.stable_boundaries = stable_boundaries;
   request.stable_boundaries_len = stable_boundaries_len;
   request.output_reserve = output_reserve;
+  request.estimated_bytes_per_token = estimated_bytes_per_token;
   request.result_state = result_state;
 
   clap_cache_plan_t *inner = NULL;
@@ -136,6 +146,30 @@ int32_t cc_plan_eviction(const cc_plan_t *plan, uint32_t index,
     *slot = entries[index].slot;
     *generation = entries[index].generation;
   }
+  free(entries);
+  return status;
+}
+
+int32_t cc_plan_anchor_boundary_count(const cc_plan_t *plan, uint32_t *count) {
+  if (!plan || !count) return CLAP_CACHE_INVALID_ARGUMENT;
+  size_t required = 0;
+  int32_t status = clap_cache_plan_anchor_boundaries(plan->plan, NULL, 0, &required);
+  if (status != CLAP_CACHE_OK && status != CLAP_CACHE_NO_CAPACITY) return status;
+  *count = (uint32_t)required;
+  return CLAP_CACHE_OK;
+}
+
+int32_t cc_plan_anchor_boundary(const cc_plan_t *plan, uint32_t index,
+                                uint64_t *token_count) {
+  if (!plan || !token_count) return CLAP_CACHE_INVALID_ARGUMENT;
+  size_t count = 0;
+  int32_t status = clap_cache_plan_anchor_boundaries(plan->plan, NULL, 0, &count);
+  if (status != CLAP_CACHE_OK && status != CLAP_CACHE_NO_CAPACITY) return status;
+  if (index >= count) return CLAP_CACHE_INVALID_ARGUMENT;
+  uint64_t *entries = calloc(count, sizeof(*entries));
+  if (!entries) return CLAP_CACHE_NO_CAPACITY;
+  status = clap_cache_plan_anchor_boundaries(plan->plan, entries, count, &count);
+  if (status == CLAP_CACHE_OK) *token_count = entries[index];
   free(entries);
   return status;
 }
@@ -328,6 +362,9 @@ int32_t cc_manager_retention_telemetry(cc_manager_t *manager,
   out->total_bytes = retention.total_bytes;
   out->session_bytes = retention.session_bytes;
   out->anchor_bytes = retention.anchor_bytes;
+  out->automatic_checkpoint_slots = retention.automatic_checkpoint_slots;
+  out->automatic_checkpoint_bytes = retention.automatic_checkpoint_bytes;
+  out->automatic_checkpoint_byte_budget = retention.automatic_checkpoint_byte_budget;
   out->active_bytes = retention.active_bytes;
   out->physical_byte_budget = retention.physical_byte_budget;
   out->high_watermark_bytes = retention.high_watermark_bytes;

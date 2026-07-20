@@ -218,6 +218,16 @@ uint64_t available_memory_bytes() {
 #endif
 }
 
+uint64_t env_u64(const char* name, uint64_t fallback) {
+  const char* raw = std::getenv(name);
+  if (!raw || !*raw) return fallback;
+  try {
+    return std::stoull(raw);
+  } catch (...) {
+    return fallback;
+  }
+}
+
 int env_int(const char* name, int fallback) {
   const char* raw = std::getenv(name);
   if (!raw || !*raw) return fallback;
@@ -238,7 +248,7 @@ std::vector<ChatEntry> messages_from_request(const json& request) {
     if (message.contains("content") && message["content"].is_string()) {
       content = message["content"].get<std::string>();
     }
-    if (role.empty() || content.empty()) continue;
+    if (role.empty()) continue;
     messages.push_back({role, content});
   }
   return messages;
@@ -268,7 +278,8 @@ SamplingParams sampling_from_request(const json& request) {
   return params;
 }
 
-std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& entries) {
+std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& entries,
+                             bool add_generation_prompt = true) {
   if (entries.empty()) return "";
 
   const char* tmpl = llama_model_chat_template(model, nullptr);
@@ -279,7 +290,7 @@ std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& e
       if (role == "tool") role = "user";
       prompt += "<|turn>" + role + "\n" + entry.content + "<turn|>\n";
     }
-    prompt += "<|turn>model\n";
+    if (add_generation_prompt) prompt += "<|turn>model\n";
     return prompt;
   }
 
@@ -296,10 +307,12 @@ std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& e
     chat.push_back({entry.role.c_str(), entry.content.c_str()});
   }
 
-  int32_t length = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, nullptr, 0);
+  int32_t length = llama_chat_apply_template(tmpl, chat.data(), chat.size(),
+      add_generation_prompt, nullptr, 0);
   if (length <= 0) return "";
   std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
-  int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buffer.data(), buffer.size());
+  int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(),
+      add_generation_prompt, buffer.data(), buffer.size());
   if (written <= 0) return "";
   return std::string(buffer.data(), static_cast<std::size_t>(written));
 }
@@ -440,8 +453,14 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
   try {
     loaded.coordinator = std::make_unique<clap::llama_cache::Coordinator>(
       1, 16, static_cast<uint64_t>(n_ctx),
-      static_cast<uint32_t>(std::min(8, retained_max)),
-      static_cast<uint32_t>(retained_max));
+      static_cast<uint32_t>(retained_max),
+      static_cast<uint32_t>(retained_max), 0, 0, 0,
+      env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0,
+      static_cast<uint64_t>(env_int("CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS", 2048)),
+      static_cast<uint64_t>(env_int("CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS", 2048)),
+      static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_MAX", 8)),
+      static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS", 2500)),
+      env_u64("CLAP_CACHE_CHECKPOINT_BUDGET_BYTES", 0));
     for (int32_t expected = 1; expected < retained_max; ++expected) {
       const auto registered = loaded.coordinator->register_slot();
       if (registered.slot != static_cast<uint32_t>(expected) || registered.generation == 0) {
@@ -625,6 +644,18 @@ struct ActiveRequest {
   std::string cache_fallback;
   std::string prompt_token_hash;
   clap::llama_boundary::StableBoundary stable_boundary;
+  struct BoundaryInfo {
+    std::size_t token_count;
+    std::string kind;
+    std::string label;
+    bool requested;
+    std::string status;
+    std::string skip_reason;
+  };
+  std::vector<std::size_t> anchor_boundaries;
+  std::vector<std::size_t> structural_boundaries;
+  std::vector<std::size_t> materialized_boundaries;
+  std::vector<BoundaryInfo> resolved_boundaries;
   json cache_candidates = json::array();
   bool cache_side_request = false;
 
@@ -712,7 +743,9 @@ clap::llama_cache::Identity cache_identity(const LoadedLlama& loaded,
                                             const json& request) {
   const json cache = request.contains("cache") && request["cache"].is_object()
       ? request["cache"] : json::object();
-  const std::string tenant = cache_string(cache, "namespace");
+  const std::string requested_namespace = cache_string(cache, "namespace");
+  const std::string tenant = requested_namespace.empty()
+      ? cache_string(cache, "tenant") : requested_namespace;
   const std::string keyed = telemetry_key() + "|";
   clap::llama_cache::Identity identity;
   identity.name_space = clap::llama_cache::fingerprint(
@@ -749,7 +782,8 @@ const char* cache_scope_name(uint32_t scope) {
 uint64_t llama_cache_capabilities(const LoadedLlama& loaded) {
   uint64_t capabilities = CLAP_CACHE_CAP_WHOLE_STATE_COPY |
       CLAP_CACHE_CAP_SAFE_BUSY_DONOR | CLAP_CACHE_CAP_RELIABLE_RESIDENT_LENGTH |
-      CLAP_CACHE_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS;
+      CLAP_CACHE_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS |
+      CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT;
   if (loaded.hybrid) {
     capabilities |= CLAP_CACHE_CAP_RECURRENT_OR_HYBRID;
   } else {
@@ -762,7 +796,8 @@ uint64_t llama_cache_capabilities(const LoadedLlama& loaded) {
 
 bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
                               std::vector<llama_token>& prompt_tokens,
-                              int32_t output_reserve) {
+                              int32_t output_reserve,
+                              const std::vector<uint64_t>& stable_boundaries) {
   if (!loaded.coordinator) return false;
   clap::llama_cache::Plan plan;
   std::vector<uint8_t> slot_capabilities;
@@ -778,7 +813,7 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
   try {
     plan = loaded.coordinator->plan(prompt_tokens, req.cache_identity,
         llama_cache_capabilities(loaded), static_cast<uint64_t>(output_reserve),
-        CLAP_CACHE_SLOT_SESSION, slot_capabilities);
+        CLAP_CACHE_SLOT_SESSION, slot_capabilities, stable_boundaries);
   } catch (const clap::llama_cache::Error& error) {
     if (error.status == CLAP_CACHE_NO_CAPACITY || error.status == CLAP_CACHE_SLOT_BUSY) {
       throw CacheBackpressure(error.what());
@@ -875,7 +910,21 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
     req.cache_planned_reuse_tokens = decision.planned_reuse_tokens;
     req.cache_realized_reuse_tokens = decision.realized_reuse_tokens;
     req.cache_decision_us = decision.decision_us;
-    req.anchor_at = static_cast<int32_t>(view.anchor_tokens);
+    req.anchor_boundaries.clear();
+    for (const auto boundary : plan.anchor_boundaries()) {
+      const auto count = static_cast<std::size_t>(boundary);
+      req.anchor_boundaries.push_back(count);
+      const auto known = std::find_if(req.resolved_boundaries.begin(),
+          req.resolved_boundaries.end(), [count](const auto& value) {
+            return value.token_count == count;
+          });
+      if (known == req.resolved_boundaries.end()) {
+        req.resolved_boundaries.push_back(
+            {count, "automatic_token", "", false, "authorized", ""});
+      }
+    }
+    req.anchor_at = req.anchor_boundaries.empty()
+        ? -1 : static_cast<int32_t>(req.anchor_boundaries.front());
     req.stable_boundary = clap::llama_boundary::exact(
         req.full_prompt_tokens, static_cast<std::size_t>(view.anchor_tokens), "prompt",
         [](const auto& tokens, std::size_t count) {
@@ -908,10 +957,14 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
 }
 
 void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
-  if (req.anchor_planted || req.anchor_at < 0 || !req.coordinator) return;
+  if (req.anchor_at < 0 || !req.coordinator) return;
   const std::size_t count = static_cast<std::size_t>(req.anchor_at);
-  if (count < 16 || req.ingested != count || req.slot == nullptr) return;
-  req.anchor_planted = true;
+  if (count < 16 || static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested != count ||
+      req.slot == nullptr) return;
+  const auto next = std::upper_bound(
+      req.anchor_boundaries.begin(), req.anchor_boundaries.end(), count);
+  req.anchor_at = next == req.anchor_boundaries.end()
+      ? -1 : static_cast<int32_t>(*next);
   std::vector<llama_token> boundary(
       req.full_prompt_tokens.begin(),
       req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
@@ -924,13 +977,18 @@ void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
     slot_capabilities.push_back(flags);
   }
   try {
-    auto plan = req.coordinator->plan(boundary, req.cache_identity,
+    auto anchor_identity = req.cache_identity;
+    const bool structural = std::find(req.structural_boundaries.begin(),
+        req.structural_boundaries.end(), count) != req.structural_boundaries.end();
+    anchor_identity.scope = structural ? CLAP_CACHE_SCOPE_HARNESS : CLAP_CACHE_SCOPE_PROJECT;
+    auto plan = req.coordinator->plan(boundary, anchor_identity,
         CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
             CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT,
         0, CLAP_CACHE_SLOT_ANCHOR, slot_capabilities);
     const auto view = plan.view();
     if (view.operation == CLAP_CACHE_OPERATION_NOOP) {
       plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
+      req.materialized_boundaries.push_back(count);
       return;
     }
     if (view.target.slot >= loaded.slots.size()) {
@@ -953,6 +1011,11 @@ void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
     try {
       plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
       anchor.coordinator_generation = req.coordinator->slot(view.target.slot).generation;
+      if (structural) {
+        req.coordinator->set_anchor_protected(
+            {view.target.slot, 0, anchor.coordinator_generation}, true);
+      }
+      req.materialized_boundaries.push_back(count);
     } catch (...) {
       llama_memory_seq_rm(mem, static_cast<llama_seq_id>(view.target.slot), -1, -1);
       anchor = {};
@@ -1006,6 +1069,23 @@ void finalize(ActiveRequest& req) {
     cache["stable_boundary_token_hash"] = req.stable_boundary.token_hash;
     cache["stable_boundary_token_count"] = req.stable_boundary.token_count;
     cache["stable_boundary_kind"] = req.stable_boundary.kind;
+  }
+  cache["stable_boundaries"] = json::array();
+  for (const auto& resolved : req.resolved_boundaries) {
+    const auto boundary = resolved.token_count;
+    const bool available = (resolved.status == "resolved" || resolved.status == "authorized") &&
+        boundary > 0;
+    cache["stable_boundaries"].push_back(json{
+      {"token_hash", available ? json(token_fingerprint(req.full_prompt_tokens, boundary)) : json(nullptr)},
+      {"token_count", available ? json(boundary) : json(nullptr)},
+      {"kind", resolved.kind},
+      {"label", !resolved.label.empty() ? json(resolved.label) : json(nullptr)},
+      {"requested", resolved.requested},
+      {"status", resolved.status},
+      {"skip_reason", !resolved.skip_reason.empty() ? json(resolved.skip_reason) : json(nullptr)},
+      {"materialized", available ? json(std::find(req.materialized_boundaries.begin(),
+          req.materialized_boundaries.end(), boundary) != req.materialized_boundaries.end()) : json(nullptr)},
+    });
   }
   emit(req.id, json{
     {"done", true},
@@ -1146,7 +1226,9 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
     }
     req.n_pos += req.step_tokens;
     req.ingested += chunk;
-    if (req.anchor_at >= 0 && req.ingested == static_cast<std::size_t>(req.anchor_at)) {
+    if (req.anchor_at >= 0 &&
+        static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested ==
+            static_cast<std::size_t>(req.anchor_at)) {
       maybe_create_anchor(loaded, req);
     }
     if (req.prompt_tokens.size() > 1024 && req.ingested < req.prompt_tokens.size()) {
@@ -1223,6 +1305,9 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
     req.ingested = 0;
     req.n_pos = 0;
     req.cached_prompt_tokens = 0;
+    req.materialized_boundaries.clear();
+    req.anchor_at = req.anchor_boundaries.empty()
+        ? -1 : static_cast<int32_t>(req.anchor_boundaries.front());
     req.cache_realized_reuse_tokens = 0;
     req.cache_reuse_kind.clear();
     req.cache_fallback = "decode_retry_full_prefill";
@@ -1245,8 +1330,11 @@ int32_t add_contribution(llama_batch& batch, ActiveRequest& req, int32_t budget)
     return 1;
   }
   std::size_t remaining = req.prompt_tokens.size() - req.ingested;
-  if (req.anchor_at >= 0 && static_cast<std::size_t>(req.anchor_at) > req.ingested) {
-    remaining = std::min(remaining, static_cast<std::size_t>(req.anchor_at) - req.ingested);
+  const std::size_t absolute_ingested =
+      static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested;
+  if (req.anchor_at >= 0 && static_cast<std::size_t>(req.anchor_at) > absolute_ingested) {
+    remaining = std::min(
+        remaining, static_cast<std::size_t>(req.anchor_at) - absolute_ingested);
   }
   const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(budget)));
   req.logits_index = -1;
@@ -1356,6 +1444,95 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), add_special, true) < 0) {
     throw std::runtime_error("failed to tokenize prompt");
   }
+  std::vector<uint64_t> stable_boundaries;
+  const auto resolve_boundary = [&](std::size_t message_count, const std::string& kind,
+                                    const std::string& label, bool requested) {
+    if (message_count == 0 || message_count > entries.size()) {
+      if (requested) req->resolved_boundaries.push_back(
+          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
+      return;
+    }
+    const std::vector<ChatEntry> prefix_entries(entries.begin(), entries.begin() + message_count);
+    const std::string prefix_prompt = templated_prompt(loaded.model, prefix_entries, false);
+    if (prefix_prompt.empty()) {
+      if (requested) req->resolved_boundaries.push_back(
+          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
+      return;
+    }
+    const bool prefix_add_special = prefix_prompt.find("<bos>") == std::string::npos &&
+        prefix_prompt.find("<|turn>") == std::string::npos;
+    const int prefix_count = -llama_tokenize(vocab, prefix_prompt.c_str(),
+        prefix_prompt.size(), nullptr, 0, prefix_add_special, true);
+    if (prefix_count <= 0) {
+      if (requested) req->resolved_boundaries.push_back(
+          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
+      return;
+    }
+    std::vector<llama_token> prefix_tokens(static_cast<std::size_t>(prefix_count));
+    if (llama_tokenize(vocab, prefix_prompt.c_str(), prefix_prompt.size(),
+        prefix_tokens.data(), prefix_tokens.size(), prefix_add_special, true) < 0) {
+      if (requested) req->resolved_boundaries.push_back(
+          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
+      return;
+    }
+    const auto exact = clap::llama_boundary::exact_template_boundary(
+        prefix_tokens, prompt_tokens,
+        [vocab](llama_token token) { return llama_vocab_is_eog(vocab, token); });
+    if (!exact) {
+      if (requested) req->resolved_boundaries.push_back(
+          {0, kind, label, true, "skipped", "non_prefix_template_boundary"});
+      return;
+    }
+    const std::size_t boundary = *exact;
+    stable_boundaries.push_back(boundary);
+    if (kind != "prompt") req->structural_boundaries.push_back(boundary);
+    const auto existing = std::find_if(req->resolved_boundaries.begin(),
+        req->resolved_boundaries.end(), [boundary](const auto& value) {
+          return value.token_count == boundary;
+        });
+    if (existing == req->resolved_boundaries.end()) {
+      req->resolved_boundaries.push_back(
+          {boundary, kind, label, requested, "resolved", ""});
+    } else if (requested) {
+      existing->kind = kind;
+      existing->label = label;
+      existing->requested = true;
+      existing->status = "resolved";
+      existing->skip_reason.clear();
+    }
+  };
+  std::size_t leading_systems = 0;
+  while (leading_systems < entries.size() && entries[leading_systems].role == "system") {
+    ++leading_systems;
+  }
+  for (std::size_t count = 1; count <= leading_systems; ++count) {
+    resolve_boundary(count, "messages", "", false);
+  }
+  if (request.contains("cache") && request["cache"].is_object() &&
+      request["cache"].contains("boundaries") && request["cache"]["boundaries"].is_array()) {
+    for (const auto& descriptor : request["cache"]["boundaries"]) {
+      const std::string kind = descriptor.value("kind", "");
+      const std::string label = descriptor.value("label", "");
+      if (kind == "messages") {
+        resolve_boundary(descriptor.value("through_message", entries.size()) + 1,
+            kind, label, true);
+      } else if (kind == "tools") {
+        // The llama worker receives no native tool-template structure. Any
+        // compatibility instructions are ordinary messages, so there is no
+        // independently provable tools-only prefix.
+        req->resolved_boundaries.push_back(
+            {0, kind, label, true, "skipped", "unsupported_template_boundary"});
+      }
+    }
+  }
+  if (prompt_tokens.size() > 16) {
+    stable_boundaries.push_back(prompt_tokens.size() - 1);
+    req->resolved_boundaries.push_back(
+        {prompt_tokens.size() - 1, "prompt", "", false, "resolved", ""});
+  }
+  std::sort(stable_boundaries.begin(), stable_boundaries.end());
+  stable_boundaries.erase(
+      std::unique(stable_boundaries.begin(), stable_boundaries.end()), stable_boundaries.end());
 
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
   const int32_t prompt_count = static_cast<int32_t>(prompt_tokens.size());
@@ -1426,7 +1603,8 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     return req;
   }
 
-  if (prepare_with_coordinator(loaded, *req, prompt_tokens, output_reserve)) {
+  if (prepare_with_coordinator(
+          loaded, *req, prompt_tokens, output_reserve, stable_boundaries)) {
     req->prompt_tokens = std::move(prompt_tokens);
     req->sampler = make_sampler(req->params);
     return req;

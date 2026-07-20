@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Clap Local Model Server API",
-    "version": "0.1.2"
+    "version": "0.2.0"
   },
   "servers": [
     {
@@ -853,6 +853,36 @@
                           "type": "integer",
                           "minimum": 0
                         },
+                        "automaticCheckpointCount": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "automaticCheckpointBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "automaticCheckpointBudgetBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "automaticCheckpointsEnabled": {
+                          "type": "boolean"
+                        },
+                        "automaticCheckpointMinimumTokens": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "automaticCheckpointIntervalTokens": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "automaticCheckpointMax": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
                         "budgetBytes": {
                           "type": "integer",
                           "minimum": 0
@@ -1265,6 +1295,36 @@
                         "type": "integer",
                         "minimum": 0
                       },
+                      "automaticCheckpointCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointBudgetBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointsEnabled": {
+                        "type": "boolean"
+                      },
+                      "automaticCheckpointMinimumTokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "automaticCheckpointIntervalTokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "automaticCheckpointMax": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
                       "budgetBytes": {
                         "type": "integer",
                         "minimum": 0
@@ -1664,6 +1724,36 @@
                       "anchorBytes": {
                         "type": "integer",
                         "minimum": 0
+                      },
+                      "automaticCheckpointCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointBudgetBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "automaticCheckpointsEnabled": {
+                        "type": "boolean"
+                      },
+                      "automaticCheckpointMinimumTokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "automaticCheckpointIntervalTokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "automaticCheckpointMax": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
                       },
                       "budgetBytes": {
                         "type": "integer",
@@ -2858,6 +2948,61 @@
               },
               "side_request": {
                 "type": "boolean"
+              },
+              "boundaries": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "tools"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "messages"
+                          ]
+                        },
+                        "through_message": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "through_message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "maxItems": 8
               }
             }
           }
@@ -3447,6 +3592,100 @@
           },
           "previous_response_id": {
             "type": "string"
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tenant": {
+                "type": "string",
+                "minLength": 1
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1
+              },
+              "harness": {
+                "type": "string",
+                "minLength": 1
+              },
+              "agent": {
+                "type": "string",
+                "minLength": 1
+              },
+              "session": {
+                "type": "string",
+                "minLength": 1
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "interactive",
+                  "background"
+                ]
+              },
+              "side_request": {
+                "type": "boolean"
+              },
+              "boundaries": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "tools"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "messages"
+                          ]
+                        },
+                        "through_message": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "through_message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "maxItems": 8
+              }
+            }
           }
         },
         "required": [
@@ -4109,6 +4348,58 @@
           "model"
         ]
       },
+      "CacheOutcome": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "hit",
+              "cold",
+              "isolated",
+              "below_checkpoint",
+              "no_shared_prefix",
+              "donor_busy",
+              "no_eligible_donor",
+              "fresh_by_policy",
+              "cache_error",
+              "unexplained_miss",
+              "miss_reason_unavailable",
+              "unknown"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "hitKind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "branch",
+              "checkpoint"
+            ]
+          },
+          "maxBlockedPrefixTokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "boundariesSkipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "category",
+          "reason",
+          "evidence"
+        ]
+      },
       "CacheDecision": {
         "type": "object",
         "properties": {
@@ -4145,6 +4436,58 @@
               "ok",
               "error",
               "cancelled"
+            ]
+          },
+          "cacheOutcome": {
+            "type": "object",
+            "properties": {
+              "category": {
+                "type": "string",
+                "enum": [
+                  "hit",
+                  "cold",
+                  "isolated",
+                  "below_checkpoint",
+                  "no_shared_prefix",
+                  "donor_busy",
+                  "no_eligible_donor",
+                  "fresh_by_policy",
+                  "cache_error",
+                  "unexplained_miss",
+                  "miss_reason_unavailable",
+                  "unknown"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "hitKind": {
+                "type": "string",
+                "enum": [
+                  "session",
+                  "branch",
+                  "checkpoint"
+                ]
+              },
+              "maxBlockedPrefixTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "boundariesSkipped": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "category",
+              "reason",
+              "evidence"
             ]
           },
           "cache": {
@@ -4246,6 +4589,58 @@
                     "ok",
                     "error",
                     "cancelled"
+                  ]
+                },
+                "cacheOutcome": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "hit",
+                        "cold",
+                        "isolated",
+                        "below_checkpoint",
+                        "no_shared_prefix",
+                        "donor_busy",
+                        "no_eligible_donor",
+                        "fresh_by_policy",
+                        "cache_error",
+                        "unexplained_miss",
+                        "miss_reason_unavailable",
+                        "unknown"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "hitKind": {
+                      "type": "string",
+                      "enum": [
+                        "session",
+                        "branch",
+                        "checkpoint"
+                      ]
+                    },
+                    "maxBlockedPrefixTokens": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "boundariesSkipped": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "reason",
+                    "evidence"
                   ]
                 },
                 "cache": {
@@ -5373,6 +5768,36 @@
                                     "type": "integer",
                                     "minimum": 0
                                   },
+                                  "automaticCheckpointCount": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "automaticCheckpointBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "automaticCheckpointBudgetBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "automaticCheckpointsEnabled": {
+                                    "type": "boolean"
+                                  },
+                                  "automaticCheckpointMinimumTokens": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "automaticCheckpointIntervalTokens": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "automaticCheckpointMax": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
                                   "budgetBytes": {
                                     "type": "integer",
                                     "minimum": 0
@@ -5686,6 +6111,58 @@
                               "cancelled"
                             ]
                           },
+                          "cacheOutcome": {
+                            "type": "object",
+                            "properties": {
+                              "category": {
+                                "type": "string",
+                                "enum": [
+                                  "hit",
+                                  "cold",
+                                  "isolated",
+                                  "below_checkpoint",
+                                  "no_shared_prefix",
+                                  "donor_busy",
+                                  "no_eligible_donor",
+                                  "fresh_by_policy",
+                                  "cache_error",
+                                  "unexplained_miss",
+                                  "miss_reason_unavailable",
+                                  "unknown"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string"
+                              },
+                              "hitKind": {
+                                "type": "string",
+                                "enum": [
+                                  "session",
+                                  "branch",
+                                  "checkpoint"
+                                ]
+                              },
+                              "maxBlockedPrefixTokens": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "boundariesSkipped": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "evidence": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "required": [
+                              "category",
+                              "reason",
+                              "evidence"
+                            ]
+                          },
                           "cache": {
                             "type": "object",
                             "properties": {
@@ -5841,6 +6318,58 @@
                         "ok",
                         "error",
                         "cancelled"
+                      ]
+                    },
+                    "cacheOutcome": {
+                      "type": "object",
+                      "properties": {
+                        "category": {
+                          "type": "string",
+                          "enum": [
+                            "hit",
+                            "cold",
+                            "isolated",
+                            "below_checkpoint",
+                            "no_shared_prefix",
+                            "donor_busy",
+                            "no_eligible_donor",
+                            "fresh_by_policy",
+                            "cache_error",
+                            "unexplained_miss",
+                            "miss_reason_unavailable",
+                            "unknown"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "hitKind": {
+                          "type": "string",
+                          "enum": [
+                            "session",
+                            "branch",
+                            "checkpoint"
+                          ]
+                        },
+                        "maxBlockedPrefixTokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "boundariesSkipped": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "category",
+                        "reason",
+                        "evidence"
                       ]
                     },
                     "cache": {
@@ -6229,6 +6758,36 @@
                                 "anchorBytes": {
                                   "type": "integer",
                                   "minimum": 0
+                                },
+                                "automaticCheckpointCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointBudgetBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointsEnabled": {
+                                  "type": "boolean"
+                                },
+                                "automaticCheckpointMinimumTokens": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "automaticCheckpointIntervalTokens": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "automaticCheckpointMax": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
                                 },
                                 "budgetBytes": {
                                   "type": "integer",
@@ -6682,6 +7241,36 @@
                                 "anchorBytes": {
                                   "type": "integer",
                                   "minimum": 0
+                                },
+                                "automaticCheckpointCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointBudgetBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "automaticCheckpointsEnabled": {
+                                  "type": "boolean"
+                                },
+                                "automaticCheckpointMinimumTokens": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "automaticCheckpointIntervalTokens": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "automaticCheckpointMax": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
                                 },
                                 "budgetBytes": {
                                   "type": "integer",
@@ -8305,6 +8894,61 @@
                       },
                       "side_request": {
                         "type": "boolean"
+                      },
+                      "boundaries": {
+                        "type": "array",
+                        "items": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "tools"
+                                  ]
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "messages"
+                                  ]
+                                },
+                                "through_message": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "through_message"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "maxItems": 8
                       }
                     }
                   }
@@ -8947,6 +9591,100 @@
                   },
                   "previous_response_id": {
                     "type": "string"
+                  },
+                  "cache": {
+                    "type": "object",
+                    "properties": {
+                      "namespace": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "tenant": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "project": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "harness": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "agent": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "session": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "priority": {
+                        "type": "string",
+                        "enum": [
+                          "interactive",
+                          "background"
+                        ]
+                      },
+                      "side_request": {
+                        "type": "boolean"
+                      },
+                      "boundaries": {
+                        "type": "array",
+                        "items": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "tools"
+                                  ]
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "messages"
+                                  ]
+                                },
+                                "through_message": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "through_message"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "maxItems": 8
+                      }
+                    }
                   }
                 },
                 "required": [

@@ -1,7 +1,55 @@
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{offset_of, size_of, MaybeUninit};
 use std::ptr;
 
 use clap_cache_ffi::*;
+
+#[test]
+fn config_layout_matches_the_public_c_header() {
+    assert_eq!(CLAP_CACHE_ABI_VERSION, 3);
+    assert_eq!(size_of::<ClapCacheConfig>(), 72);
+    assert_eq!(offset_of!(ClapCacheConfig, version), 0);
+    assert_eq!(offset_of!(ClapCacheConfig, struct_size), 4);
+    assert_eq!(offset_of!(ClapCacheConfig, slot_count), 8);
+    assert_eq!(offset_of!(ClapCacheConfig, max_anchors), 12);
+    assert_eq!(offset_of!(ClapCacheConfig, min_reuse_tokens), 16);
+    assert_eq!(offset_of!(ClapCacheConfig, logical_token_capacity), 24);
+    assert_eq!(offset_of!(ClapCacheConfig, automatic_checkpoint_mode), 32);
+    assert_eq!(offset_of!(ClapCacheConfig, automatic_checkpoint_max), 36);
+    assert_eq!(
+        offset_of!(ClapCacheConfig, automatic_checkpoint_min_tokens),
+        40
+    );
+    assert_eq!(
+        offset_of!(ClapCacheConfig, automatic_checkpoint_interval_tokens),
+        48
+    );
+    assert_eq!(
+        offset_of!(ClapCacheConfig, automatic_checkpoint_memory_basis_points),
+        56
+    );
+    assert_eq!(offset_of!(ClapCacheConfig, reserved), 60);
+    assert_eq!(
+        offset_of!(ClapCacheConfig, automatic_checkpoint_memory_cap_bytes),
+        64
+    );
+    assert_eq!(size_of::<ClapCacheRetentionTelemetry>(), 112);
+    assert_eq!(
+        offset_of!(ClapCacheRetentionTelemetry, automatic_checkpoint_slots),
+        48
+    );
+    assert_eq!(
+        offset_of!(ClapCacheRetentionTelemetry, automatic_checkpoint_bytes),
+        56
+    );
+    assert_eq!(
+        offset_of!(
+            ClapCacheRetentionTelemetry,
+            automatic_checkpoint_byte_budget
+        ),
+        64
+    );
+    assert_eq!(offset_of!(ClapCacheRetentionTelemetry, under_pressure), 104);
+}
 
 fn labels(session: u64) -> ClapCacheLabels {
     ClapCacheLabels {
@@ -29,6 +77,13 @@ fn ffi_lifecycle_exports_owned_plan_and_metrics() {
             max_anchors: 1,
             min_reuse_tokens: 2,
             logical_token_capacity: u64::MAX,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -117,6 +172,13 @@ fn ffi_rejects_nulls_and_version_mismatches_without_unwinding() {
             max_anchors: 1,
             min_reuse_tokens: 1,
             logical_token_capacity: 10,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(
@@ -137,6 +199,13 @@ fn ffi_abort_releases_plan_and_reset_changes_epoch() {
             max_anchors: 1,
             min_reuse_tokens: 1,
             logical_token_capacity: 10,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -184,6 +253,13 @@ fn ffi_no_capacity_is_request_local_and_next_plan_succeeds() {
             max_anchors: 1,
             min_reuse_tokens: 1,
             logical_token_capacity: 1,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -237,6 +313,13 @@ fn ffi_output_reserve_does_not_hide_a_legal_donor() {
             max_anchors: 2,
             min_reuse_tokens: 2,
             logical_token_capacity: 128,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -411,6 +494,13 @@ fn ffi_dynamic_registration_is_bounded_and_reports_retention_policy() {
             max_anchors: 4,
             min_reuse_tokens: 1,
             logical_token_capacity: 1,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let retention = ClapCacheRetentionConfig {
             version: CLAP_CACHE_ABI_VERSION,
@@ -466,6 +556,13 @@ fn candidate_copy_reports_required_capacity_without_partial_writes() {
             max_anchors: 1,
             min_reuse_tokens: 1,
             logical_token_capacity: 32,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);

@@ -122,6 +122,9 @@ typedef struct cc_retention_telemetry {
   uint64_t total_bytes;
   uint64_t session_bytes;
   uint64_t anchor_bytes;
+  uint32_t automatic_checkpoint_slots;
+  uint64_t automatic_checkpoint_bytes;
+  uint64_t automatic_checkpoint_byte_budget;
   uint64_t active_bytes;
   uint64_t physical_byte_budget;
   uint64_t high_watermark_bytes;
@@ -134,7 +137,10 @@ cc_manager_t *cc_manager_create_with_retention(
     uint32_t initial_slots, uint64_t min_reuse_tokens,
     uint64_t token_capacity, uint32_t max_anchors,
     uint32_t hard_max_retained_entries, uint64_t physical_byte_budget,
-    uint64_t high_watermark_bytes, uint64_t low_watermark_bytes);
+    uint64_t high_watermark_bytes, uint64_t low_watermark_bytes,
+    uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
+    uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
+    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes);
 void cc_manager_destroy(cc_manager_t *manager);
 int32_t cc_manager_last_status(const cc_manager_t *manager);
 
@@ -146,10 +152,13 @@ cc_plan_t *cc_manager_plan(cc_manager_t *manager, const int32_t *tokens,
                            uint64_t capabilities, const uint8_t *slot_capabilities,
                            size_t slot_capabilities_len, const uint64_t *stable_boundaries,
                            size_t stable_boundaries_len, uint64_t output_reserve,
-                           uint32_t result_state);
+                           uint64_t estimated_bytes_per_token, uint32_t result_state);
 int32_t cc_plan_view(const cc_plan_t *plan, cc_plan_view_t *out);
 int32_t cc_plan_eviction(const cc_plan_t *plan, uint32_t index,
                          uint32_t *slot, uint64_t *generation);
+int32_t cc_plan_anchor_boundary_count(const cc_plan_t *plan, uint32_t *count);
+int32_t cc_plan_anchor_boundary(const cc_plan_t *plan, uint32_t index,
+                                uint64_t *token_count);
 int32_t cc_plan_candidate_count(const cc_plan_t *plan, uint32_t *count);
 int32_t cc_plan_candidate(const cc_plan_t *plan, uint32_t index,
                           cc_candidate_t *out);

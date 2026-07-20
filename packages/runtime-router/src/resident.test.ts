@@ -163,6 +163,7 @@ describe("resident worker registry", () => {
           session: "conversation-123",
           priority: "interactive",
           side_request: true,
+          boundaries: [{ kind: "messages", through_message: 0, label: "checkpoint.alpha" }],
         },
       });
       expect(first.content).toBe("resident response");
@@ -170,6 +171,10 @@ describe("resident worker registry", () => {
       expect(first.finishReason).toBe("stop");
       expect(first.cache).toMatchObject({ hit: true, reusedTokens: 10, reuseKind: "branch", reuseScope: "conversation", sideRequest: false, slot: 1 });
       expect(first.cache).toMatchObject({ stableBoundaryTokenHash: "boundary-one", stableBoundaryTokenCount: 8, stableBoundaryKind: "prompt" });
+      expect(first.cache?.stableBoundaries).toEqual([{
+        tokenHash: "boundary-one", tokenCount: 8, kind: "messages", label: "prefix-0",
+        requested: true, status: "resolved", skipReason: undefined, materialized: true,
+      }]);
       expect(first.cache?.workerLaunchId).toMatch(/^[0-9a-f-]{36}$/);
       expect(tokens).toEqual(["resident ", "response"]);
       expect(dispatches).toBe(1);
@@ -180,6 +185,13 @@ describe("resident worker registry", () => {
       expect(second.cache?.stableBoundaryKind).toBeUndefined();
       expect(withIntent.cache?.reuseScope).toBe("project");
       expect(withIntent.cache?.sideRequest).toBe(true);
+      expect(withIntent.cache?.stableBoundaries?.[0]?.label).toBe("checkpoint.alpha");
+      expect(withIntent.cache?.stableBoundaries?.[1]).toMatchObject({
+        kind: "tools", label: "slice:tools-v2", requested: true,
+        status: "skipped", skipReason: "unsupported_template_boundary",
+      });
+      expect(withIntent.cache?.stableBoundaries?.[1]?.tokenHash).toBeUndefined();
+      expect(withIntent.cache?.stableBoundaries?.[1]?.tokenCount).toBeUndefined();
       expect(withIntent.cache?.stableBoundaryTokenHash).toBeUndefined();
       expect(worker.info().pid).toBe(info.pid);
       expect(worker.info().memory).toEqual({ activeBytes: 1024, cacheBytes: 0, peakActiveBytes: 4096 });
@@ -332,8 +344,9 @@ for await (const chunk of Bun.stdin.stream()) {
     console.log(JSON.stringify({ id: request.id, token: "resident " }));
     console.log(JSON.stringify({ id: request.id, token: "response" }));
     const stableBoundary = chatCount === 1
-      ? { stable_boundary_token_hash: "boundary-one", stable_boundary_token_count: 8, stable_boundary_kind: "prompt" }
+      ? { stable_boundary_token_hash: "boundary-one", stable_boundary_token_count: 8, stable_boundary_kind: "prompt", stable_boundaries: [{ token_hash: "boundary-one", token_count: 8, kind: "messages", label: "prefix-0", requested: true, status: "resolved", materialized: true }] }
       : chatCount === 2 ? { stable_boundary_token_hash: "empty-sequence-hash", stable_boundary_token_count: 0 } : {};
+    if (request.cache?.boundaries?.[0]?.label === "checkpoint.alpha") stableBoundary.stable_boundaries = [{ token_hash: "slice-boundary", token_count: 9, kind: "messages", label: "checkpoint.alpha", requested: true, status: "resolved", materialized: false }, { kind: "tools", label: "slice:tools-v2", requested: true, status: "skipped", skip_reason: "unsupported_template_boundary" }];
     console.log(JSON.stringify({ id: request.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 12, completion_tokens: 2 }, cache: { hit: true, reused_tokens: 10, reuse_kind: chatCount === 1 ? "branch" : "anchor", reuse_scope: request.cache?.project ? "project" : "conversation", side_request: request.cache?.side_request ?? false, slot: 1, ...stableBoundary } }));
     console.log(JSON.stringify({ memory: { active_bytes: 1024, cache_bytes: 0, peak_active_bytes: 4096 } }));
   }

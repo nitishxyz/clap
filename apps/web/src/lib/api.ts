@@ -67,6 +67,29 @@ export type RequestDetail = {
   rawOutput?: string;
 };
 
+export type CacheOutcomeCategory =
+  | "hit"
+  | "cold"
+  | "isolated"
+  | "below_checkpoint"
+  | "no_shared_prefix"
+  | "donor_busy"
+  | "no_eligible_donor"
+  | "fresh_by_policy"
+  | "cache_error"
+  | "unexplained_miss"
+  | "miss_reason_unavailable"
+  | "unknown";
+
+export type CacheOutcome = {
+  category: CacheOutcomeCategory;
+  reason: string;
+  hitKind?: "session" | "branch" | "checkpoint";
+  maxBlockedPrefixTokens?: number;
+  boundariesSkipped?: number;
+  evidence: string[];
+};
+
 export type DashboardRequest = {
   source?: "live" | "persisted";
   id: string;
@@ -83,7 +106,13 @@ export type DashboardRequest = {
   phase: "queued" | "loading" | "prefill" | "decode" | "done";
   prefillDone?: number;
   prefillTotal?: number;
+  // Legacy prompt-prefix id; prefer sessionDisplayId + sessionIdentityKind.
   conversation?: string;
+  // Privacy-safe identity: installation-keyed session fingerprint (short form)
+  // when cache.session was set, else prompt-prefix grouping. Never raw session.
+  sessionDisplayId?: string;
+  sessionIdentityKind?: "cache_session" | "prompt_prefix";
+  sessionFingerprint?: string;
   promptTokens?: number;
   completionTokens?: number;
   tokensPerSecond?: number;
@@ -102,6 +131,29 @@ export type DashboardRequest = {
   realizedReuseTokens?: number;
   cacheFallback?: string;
   finishReason?: string;
+  // Evidence-based classification from the server. Preserve raw telemetry
+  // (cacheHit/reusedTokens/etc.) separately; never invent a category client-side.
+  cacheOutcome?: CacheOutcome;
+  timing?: {
+    receivedToAdmittedMs?: number;
+    templateTokenizeMs?: number;
+    coordinatorWaitMs?: number;
+    coordinatorPlanMs?: number;
+    coordinatorApplyMs?: number;
+    schedulerWaitMs?: number;
+    cacheMaterializeMs?: number;
+    prefillMs?: number;
+    residualPrefillTokens?: number;
+    prefillTokens?: number;
+    prefillChunks?: number;
+    firstDecodeMs?: number;
+    firstEmitMs?: number;
+    normalPrefillQuantum?: number;
+    contendedPrefillQuantum?: number;
+  };
+  // True when the record belongs to a previous server/worker launch whose KV
+  // is no longer resident. Orthogonal to the outcome category.
+  historical?: boolean;
   toolCalls?: number;
   messageCount?: number;
   error?: string;
@@ -123,10 +175,21 @@ export type DashboardRequest = {
     stableBoundaryTokenHash?: string;
     stableBoundaryTokenCount?: number;
     stableBoundaryKind?: string;
+    stableBoundaries?: Array<{
+      tokenHash?: string;
+      tokenCount?: number;
+      kind: string;
+      label?: string;
+      requested: boolean;
+      status: "resolved" | "skipped";
+      skipReason?: "unsupported_template_boundary" | "non_prefix_template_boundary";
+      materialized?: boolean;
+    }>;
     promptTokenHash?: string;
     promptTokenCount?: number;
     errorCode?: string;
     prefillMs?: number;
+    timing?: DashboardRequest["timing"];
     cache?: {
       missReason?: string;
       donorGeneration?: number;
@@ -187,6 +250,13 @@ export type DashboardLoadedModel = {
     memory?: { activeBytes: number; cacheBytes: number; peakActiveBytes: number };
     retention?: {
       maxActive: number;
+      queued?: number;
+      previousMaxActive?: number;
+      lastAdjustmentReason?: string;
+      lastAdjustmentAt?: string;
+      retainedGrowthReserveBytes?: number;
+      globalResidentMemoryBytes?: number;
+      pressureState?: "normal" | "warning" | "critical";
       activePolicy: {
         mode: "auto" | "fixed";
         selectedMax: number;
@@ -204,6 +274,13 @@ export type DashboardLoadedModel = {
       retainedBytes: number;
       sessionBytes: number;
       anchorBytes: number;
+      automaticCheckpointCount?: number;
+      automaticCheckpointBytes?: number;
+      automaticCheckpointBudgetBytes?: number;
+      automaticCheckpointsEnabled?: boolean;
+      automaticCheckpointMinimumTokens?: number;
+      automaticCheckpointIntervalTokens?: number;
+      automaticCheckpointMax?: number;
       budgetBytes: number;
       highWatermarkBytes: number;
       lowWatermarkBytes: number;

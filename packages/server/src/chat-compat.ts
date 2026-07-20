@@ -47,6 +47,7 @@ export type PrepareChatOptions = {
 
 export function prepareChatRequest(request: ChatCompletionRequest, options: PrepareChatOptions = {}): ChatCompletionRequest {
   rejectUnsupportedContentParts(request);
+  const explicitBoundaries = request.cache?.boundaries;
   let messages = request.messages.map((message) => ({
     ...message,
     content: stringifyMessageContent(message, options),
@@ -55,8 +56,18 @@ export function prepareChatRequest(request: ChatCompletionRequest, options: Prep
   if (instructions) {
     messages.unshift({ role: "system", content: instructions });
   }
-  messages = mergeLeadingSystemMessages(messages);
-  return { ...request, messages };
+  // Explicit message indexes refer to the caller's original zero-based array.
+  // Keep those message boundaries representable and account only for the
+  // deterministic compatibility system message added above. The worker still
+  // owns rendering, tokenization, and exact-prefix validation.
+  if (!explicitBoundaries?.length) messages = mergeLeadingSystemMessages(messages);
+  const cache = request.cache && instructions ? {
+    ...request.cache,
+    boundaries: explicitBoundaries?.map((boundary) => boundary.kind === "messages"
+      ? { ...boundary, through_message: boundary.through_message + 1 }
+      : boundary),
+  } : request.cache;
+  return { ...request, messages, cache };
 }
 
 // Clients such as agent harnesses send multiple system messages, and we may

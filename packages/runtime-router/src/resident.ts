@@ -53,6 +53,13 @@ export type ResidentMlxRetention = {
   retainedBytes: number;
   sessionBytes: number;
   anchorBytes: number;
+  automaticCheckpointCount?: number;
+  automaticCheckpointBytes?: number;
+  automaticCheckpointBudgetBytes?: number;
+  automaticCheckpointsEnabled?: boolean;
+  automaticCheckpointMinimumTokens?: number;
+  automaticCheckpointIntervalTokens?: number;
+  automaticCheckpointMax?: number;
   budgetBytes: number;
   highWatermarkBytes: number;
   lowWatermarkBytes: number;
@@ -65,6 +72,24 @@ export type ResidentMlxRetention = {
 export type ResidentUsage = {
   promptTokens?: number;
   completionTokens?: number;
+};
+
+export type ResidentTiming = {
+  receivedToAdmittedMs?: number;
+  templateTokenizeMs?: number;
+  coordinatorWaitMs?: number;
+  coordinatorPlanMs?: number;
+  coordinatorApplyMs?: number;
+  schedulerWaitMs?: number;
+  cacheMaterializeMs?: number;
+  prefillMs?: number;
+  residualPrefillTokens?: number;
+  prefillTokens?: number;
+  prefillChunks?: number;
+  firstDecodeMs?: number;
+  firstEmitMs?: number;
+  normalPrefillQuantum?: number;
+  contendedPrefillQuantum?: number;
 };
 
 export type ResidentCacheInfo = {
@@ -112,6 +137,16 @@ export type ResidentCacheInfo = {
   stableBoundaryTokenHash?: string;
   stableBoundaryTokenCount?: number;
   stableBoundaryKind?: string;
+  stableBoundaries?: Array<{
+    tokenHash?: string;
+    tokenCount?: number;
+    kind: string;
+    label?: string;
+    requested: boolean;
+    status: "resolved" | "authorized" | "skipped";
+    skipReason?: "unsupported_template_boundary" | "non_prefix_template_boundary";
+    materialized?: boolean;
+  }>;
   promptTokenHash?: string;
   promptTokenCount?: number;
   prefillMs?: number;
@@ -122,6 +157,7 @@ export type ResidentChatResult = {
   usage?: ResidentUsage;
   finishReason?: "stop" | "length" | "cancel";
   cache?: ResidentCacheInfo;
+  timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
 };
 
@@ -159,6 +195,7 @@ type Pending = {
   usage?: ResidentUsage;
   finishReason?: "stop" | "length" | "cancel";
   cache?: ResidentCacheInfo;
+  timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
 };
 
@@ -427,6 +464,27 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
       };
     }
+    if (message.timing && typeof message.timing === "object") {
+      const timing = message.timing as Record<string, unknown>;
+      const number = (key: string) => typeof timing[key] === "number" ? timing[key] as number : undefined;
+      pending.timing = {
+        receivedToAdmittedMs: number("received_to_admitted_ms"),
+        templateTokenizeMs: number("template_tokenize_ms"),
+        coordinatorWaitMs: number("coordinator_wait_ms"),
+        coordinatorPlanMs: number("coordinator_plan_ms"),
+        coordinatorApplyMs: number("coordinator_apply_ms"),
+        schedulerWaitMs: number("scheduler_wait_ms"),
+        cacheMaterializeMs: number("cache_materialize_ms"),
+        prefillMs: number("prefill_ms"),
+        residualPrefillTokens: number("residual_prefill_tokens"),
+        prefillTokens: number("prefill_tokens"),
+        prefillChunks: number("prefill_chunks"),
+        firstDecodeMs: number("first_decode_ms"),
+        firstEmitMs: number("first_emit_ms"),
+        normalPrefillQuantum: number("normal_prefill_quantum"),
+        contendedPrefillQuantum: number("contended_prefill_quantum"),
+      };
+    }
     if (message.cache && typeof message.cache === "object") {
       const cache = message.cache as Record<string, unknown>;
       const rejectionReasons = new Set(["namespace", "model_domain", "generation", "capability", "busy_lease", "materialization", "session", "nontrim", "min_prefix", "capacity", "absent_anchor", "lower_rank"]);
@@ -492,6 +550,29 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
             stableBoundaryTokenCount: cache.stable_boundary_token_count,
             stableBoundaryKind: cache.stable_boundary_kind,
           } : {}),
+        stableBoundaries: Array.isArray(cache.stable_boundaries) ? cache.stable_boundaries.flatMap((value) => {
+          if (!value || typeof value !== "object") return [];
+          const boundary = value as Record<string, unknown>;
+          if (typeof boundary.kind !== "string" ||
+              (boundary.status !== "resolved" && boundary.status !== "authorized" && boundary.status !== "skipped")) return [];
+          const resolved = (boundary.status === "resolved" || boundary.status === "authorized") && typeof boundary.token_hash === "string" &&
+              typeof boundary.token_count === "number" && typeof boundary.materialized === "boolean";
+          if ((boundary.status === "resolved" || boundary.status === "authorized") && !resolved) return [];
+          const label = typeof boundary.label === "string" && boundary.label.length <= 64 &&
+              /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(boundary.label) ? boundary.label : undefined;
+          const skipReason = boundary.skip_reason === "unsupported_template_boundary" ||
+              boundary.skip_reason === "non_prefix_template_boundary" ? boundary.skip_reason : undefined;
+          return [{
+            tokenHash: resolved ? boundary.token_hash as string : undefined,
+            tokenCount: resolved ? boundary.token_count as number : undefined,
+            kind: boundary.kind,
+            label,
+            requested: boundary.requested === true,
+            status: boundary.status as "resolved" | "authorized" | "skipped",
+            skipReason,
+            materialized: resolved ? boundary.materialized as boolean : undefined,
+          }];
+        }) : undefined,
         promptTokenHash: typeof cache.prompt_token_hash === "string" ? cache.prompt_token_hash : undefined,
         promptTokenCount: typeof cache.prompt_token_count === "number" ? cache.prompt_token_count : undefined,
         prefillMs: typeof cache.prefill_ms === "number" ? cache.prefill_ms : undefined,
@@ -505,7 +586,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       if (id) this.pending.delete(id);
       else this.deleteFirstPending();
       if (pending.cache && !pending.cache.workerLaunchId) pending.cache.workerLaunchId = this.workerLaunchId;
-      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, tokenCapabilities: pending.tokenCapabilities });
+      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities });
     }
   }
 
@@ -595,6 +676,12 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
   const retainedBytes = integer("retained_bytes");
   const sessionBytes = integer("session_bytes");
   const anchorBytes = integer("anchor_bytes");
+  const automaticCheckpointCount = integer("automatic_checkpoint_count");
+  const automaticCheckpointBytes = integer("automatic_checkpoint_bytes");
+  const automaticCheckpointBudgetBytes = integer("automatic_checkpoint_budget_bytes");
+  const automaticCheckpointMinimumTokens = integer("automatic_checkpoint_minimum_tokens");
+  const automaticCheckpointIntervalTokens = integer("automatic_checkpoint_interval_tokens");
+  const automaticCheckpointMax = integer("automatic_checkpoint_max");
   const budgetBytes = integer("budget_bytes");
   const highWatermarkBytes = integer("high_watermark_bytes");
   const lowWatermarkBytes = integer("low_watermark_bytes");
@@ -628,6 +715,14 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     active: active!, retainedTotal: retainedTotal!, retainedSessions: retainedSessions!,
     retainedAnchors: retainedAnchors!, retainedBytes: retainedBytes!, sessionBytes: sessionBytes!,
     anchorBytes: anchorBytes!, budgetBytes: budgetBytes!, highWatermarkBytes: highWatermarkBytes!,
+    ...(automaticCheckpointCount !== undefined ? { automaticCheckpointCount } : {}),
+    ...(automaticCheckpointBytes !== undefined ? { automaticCheckpointBytes } : {}),
+    ...(automaticCheckpointBudgetBytes !== undefined ? { automaticCheckpointBudgetBytes } : {}),
+    ...(typeof raw.automatic_checkpoints_enabled === "boolean"
+      ? { automaticCheckpointsEnabled: raw.automatic_checkpoints_enabled } : {}),
+    ...(automaticCheckpointMinimumTokens !== undefined ? { automaticCheckpointMinimumTokens } : {}),
+    ...(automaticCheckpointIntervalTokens !== undefined ? { automaticCheckpointIntervalTokens } : {}),
+    ...(automaticCheckpointMax !== undefined ? { automaticCheckpointMax } : {}),
     lowWatermarkBytes: lowWatermarkBytes!, underPressure: raw.under_pressure, hardCeiling: hardCeiling!,
     ...(evictionReason ? { evictionReason } : {}), evictionCount: evictionCount!,
   };

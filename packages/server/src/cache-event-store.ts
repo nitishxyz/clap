@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { CacheOutcome } from "./cache-outcome";
 
 export const CACHE_EVENT_SCHEMA_VERSION = 2;
 export const DEFAULT_CACHE_EVENT_MAX_BYTES = 32 * 1024 * 1024;
@@ -57,6 +58,9 @@ export type PersistedCacheDecision = {
   namespaceFingerprint?: string;
   sessionIdentitySource?: string;
   sessionFingerprint?: string;
+  // Privacy-safe prompt-prefix grouping id (not a session). Present when the
+  // request had no explicit cache.session; never raw prompt content.
+  promptPrefixId?: string;
   projectFingerprint?: string;
   agentFingerprint?: string;
   harnessFingerprint?: string;
@@ -67,11 +71,24 @@ export type PersistedCacheDecision = {
   stableBoundaryTokenHash?: string;
   stableBoundaryTokenCount?: number;
   stableBoundaryKind?: string;
+  stableBoundaries?: Array<{
+    tokenHash?: string;
+    tokenCount?: number;
+    kind: string;
+    label?: string;
+    requested: boolean;
+    status: "resolved" | "authorized" | "skipped";
+    skipReason?: "unsupported_template_boundary" | "non_prefix_template_boundary";
+    materialized?: boolean;
+  }>;
   promptTokenHash?: string;
   promptTokenCount?: number;
   status: "ok" | "error" | "cancelled";
   finishReason?: string;
   errorCode?: string;
+  // Classification derived at finish time and persisted with the event. Older
+  // records lack it; readers re-derive it reproducibly via classifyCacheOutcome.
+  cacheOutcome?: CacheOutcome;
   side?: boolean;
   priority?: "interactive" | "background";
   cache?: {
@@ -93,6 +110,23 @@ export type PersistedCacheDecision = {
   };
   ttftMs?: number;
   prefillMs?: number;
+  timing?: {
+    receivedToAdmittedMs?: number;
+    templateTokenizeMs?: number;
+    coordinatorWaitMs?: number;
+    coordinatorPlanMs?: number;
+    coordinatorApplyMs?: number;
+    schedulerWaitMs?: number;
+    cacheMaterializeMs?: number;
+    prefillMs?: number;
+    residualPrefillTokens?: number;
+    prefillTokens?: number;
+    prefillChunks?: number;
+    firstDecodeMs?: number;
+    firstEmitMs?: number;
+    normalPrefillQuantum?: number;
+    contendedPrefillQuantum?: number;
+  };
   durationMs?: number;
 };
 

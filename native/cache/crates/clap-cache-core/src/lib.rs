@@ -110,6 +110,32 @@ pub struct Config {
     pub min_reuse_tokens: usize,
     pub logical_token_capacity: usize,
     pub max_anchors: u32,
+    pub automatic_checkpoints: AutomaticCheckpointConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutomaticCheckpointConfig {
+    pub enabled: bool,
+    pub minimum_prompt_tokens: usize,
+    pub target_interval_tokens: usize,
+    pub max_checkpoints: u32,
+    /// Maximum share of the retained physical byte budget, in basis points.
+    pub memory_budget_basis_points: u32,
+    /// Optional absolute cap. Zero means no additional absolute cap.
+    pub memory_budget_cap_bytes: u64,
+}
+
+impl Default for AutomaticCheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            minimum_prompt_tokens: 2_048,
+            target_interval_tokens: 2_048,
+            max_checkpoints: 8,
+            memory_budget_basis_points: 2_500,
+            memory_budget_cap_bytes: 0,
+        }
+    }
 }
 
 /// Retained-memory policy for every cache manager.
@@ -128,6 +154,7 @@ impl Default for Config {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
+            automatic_checkpoints: AutomaticCheckpointConfig::default(),
         }
     }
 }
@@ -214,6 +241,9 @@ pub struct Plan {
     pub donor: Option<SlotRef>,
     pub reuse_tokens: usize,
     pub anchor_tokens: usize,
+    /// Ordered exact boundaries authorized for physical snapshotting while
+    /// this request prefills. Adapters must not invent additional boundaries.
+    pub anchor_boundaries: Vec<usize>,
     pub evictions: Vec<SlotRef>,
     pub namespace: Namespace,
     pub requested_tokens: Vec<i32>,
@@ -268,6 +298,9 @@ pub struct Telemetry {
     pub session_slots: u32,
     pub session_bytes: u64,
     pub anchor_bytes: u64,
+    pub automatic_checkpoint_slots: u32,
+    pub automatic_checkpoint_bytes: u64,
+    pub automatic_checkpoint_byte_budget: u64,
     pub active_bytes: u64,
     pub physical_byte_budget: u64,
     pub high_watermark_bytes: u64,
@@ -376,6 +409,9 @@ impl CacheManager {
         if config.slot_count == 0
             || retention.hard_max_retained_entries < config.slot_count
             || config.max_anchors > retention.hard_max_retained_entries
+            || config.automatic_checkpoints.minimum_prompt_tokens == 0
+            || config.automatic_checkpoints.target_interval_tokens == 0
+            || config.automatic_checkpoints.memory_budget_basis_points > 10_000
             || retention.physical_byte_budget.is_some_and(|budget| {
                 budget == 0
                     || retention.low_watermark_bytes > retention.high_watermark_bytes
@@ -447,6 +483,7 @@ impl CacheManager {
                     donor: Some(self.slot_ref(slot.id)),
                     reuse_tokens: request.tokens.len(),
                     anchor_tokens: 0,
+                    anchor_boundaries: Vec::new(),
                     evictions: Vec::new(),
                     namespace: request.namespace,
                     requested_tokens: request.tokens.to_vec(),
@@ -463,17 +500,6 @@ impl CacheManager {
                 return Ok(plan);
             }
         }
-        if request.result_state == SlotState::Anchor
-            && self
-                .slots
-                .iter()
-                .filter(|slot| slot.state == SlotState::Anchor)
-                .count()
-                >= self.config.max_anchors as usize
-        {
-            return Err(Error::NoCapacity);
-        }
-
         let plan_id = self.next_plan;
         self.next_plan = self.next_plan.checked_add(1).ok_or(Error::NoCapacity)?;
 
@@ -531,35 +557,52 @@ impl CacheManager {
                 let target = self.choose_target(None, &request)?;
                 (Operation::Fresh, target, None, 0)
             };
-        let anchor_tokens = if operation == Operation::Fresh
-            && request.result_state != SlotState::Anchor
-            && (request
+        let anchor_boundaries = if request.result_state != SlotState::Anchor
+            && request
                 .capabilities
-                .contains(Capabilities::RECURRENT_OR_HYBRID)
-                || (!request.stable_boundaries.is_empty()
-                    && request
-                        .capabilities
-                        .contains(Capabilities::PROMPT_BOUNDARY_SNAPSHOT)))
+                .contains(Capabilities::PROMPT_BOUNDARY_SNAPSHOT)
         {
-            self.choose_anchor_boundary(&request)
+            self.choose_anchor_boundaries(&request, reuse_tokens)
         } else {
-            0
+            Vec::new()
         };
+        let anchor_tokens = anchor_boundaries.last().copied().unwrap_or(0);
 
         let mut eviction_ids = Vec::new();
         if !self.slots[target_id as usize].is_empty() && operation != Operation::Continue {
             eviction_ids.push(target_id);
         }
-        eviction_ids.extend(
-            self.pressure_victims(
-                target_id,
-                selected_donor,
-                request.namespace,
+        eviction_ids.extend(self.pressure_victims(
+            target_id,
+            selected_donor,
+            request.namespace,
+            if request.result_state == SlotState::Anchor {
                 request
                     .estimated_bytes_per_token
-                    .saturating_mul(request.tokens.len() as u64),
-            )?,
-        );
+                    .saturating_mul(request.tokens.len() as u64)
+            } else {
+                // Active execution storage is not retained checkpoint
+                // storage. Charging a full sibling prompt here can reject
+                // generation even though the target becomes the active
+                // session and optional anchors are independently bounded.
+                0
+            },
+            request.result_state == SlotState::Anchor,
+        )?);
+        if request.result_state == SlotState::Anchor
+            && self.is_automatic_checkpoint_len(request.tokens.len())
+        {
+            eviction_ids.extend(
+                self.automatic_checkpoint_budget_victims(
+                    target_id,
+                    selected_donor,
+                    request.namespace,
+                    request
+                        .estimated_bytes_per_token
+                        .saturating_mul(request.tokens.len() as u64),
+                )?,
+            );
+        }
         eviction_ids.sort_unstable();
         eviction_ids.dedup();
 
@@ -601,6 +644,7 @@ impl CacheManager {
             donor: selected_donor.map(|slot| self.slot_ref(slot)),
             reuse_tokens,
             anchor_tokens,
+            anchor_boundaries,
             evictions: eviction_ids
                 .iter()
                 .map(|&slot| self.slot_ref(slot))
@@ -803,42 +847,186 @@ impl CacheManager {
             })
     }
 
-    fn choose_anchor_boundary(&self, request: &PlanRequest<'_>) -> usize {
-        let observed = self
-            .slots
-            .iter()
-            .filter(|slot| {
-                slot.namespace == request.namespace
-                    && !slot.is_empty()
-                    && slot.writer.is_none()
-                    && self
-                        .slot_capabilities(request, slot.id)
-                        .contains(SlotCapabilities::MATERIALIZED)
-            })
-            .map(|slot| common_prefix(&slot.tokens, request.tokens))
-            .filter(|&prefix| {
-                prefix >= self.config.min_reuse_tokens && prefix < request.tokens.len()
-            })
-            .max()
-            .unwrap_or(0);
-        request
+    fn choose_anchor_boundaries(
+        &self,
+        request: &PlanRequest<'_>,
+        reuse_tokens: usize,
+    ) -> Vec<usize> {
+        let automatic = self.propose_automatic_checkpoints(request.tokens.len());
+        let eligible = |boundary: usize| {
+            boundary >= self.config.min_reuse_tokens
+                && boundary > reuse_tokens
+                && boundary < request.tokens.len()
+                && (self.retention.physical_byte_budget.is_some()
+                    || boundary <= self.config.logical_token_capacity)
+                && !self.slots.iter().any(|slot| {
+                    slot.state == SlotState::Anchor
+                        && slot.namespace == request.namespace
+                        && slot.tokens == request.tokens[..boundary]
+                })
+        };
+        let mut semantic = request
             .stable_boundaries
             .iter()
             .copied()
-            .filter(|&boundary| {
-                boundary >= self.config.min_reuse_tokens
-                    && boundary < request.tokens.len()
-                    && (self.retention.physical_byte_budget.is_some()
-                        || boundary <= self.config.logical_token_capacity)
-                    && !self.slots.iter().any(|slot| {
-                        slot.state == SlotState::Anchor
-                            && slot.namespace == request.namespace
-                            && slot.tokens == request.tokens[..boundary]
-                    })
+            .filter(|&boundary| eligible(boundary))
+            .collect::<Vec<_>>();
+        semantic.sort_unstable();
+        semantic.dedup();
+        let mut automatic = automatic
+            .into_iter()
+            .filter(|&boundary| eligible(boundary) && !semantic.contains(&boundary))
+            .collect::<Vec<_>>();
+        let existing_anchors = self
+            .slots
+            .iter()
+            .filter(|slot| slot.state == SlotState::Anchor)
+            .count();
+        let available = (self.config.max_anchors as usize).saturating_sub(existing_anchors);
+        let replaceable_automatic = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && slot.namespace == request.namespace
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+                    && !slot.busy
+                    && slot.writer.is_none()
+                    && slot.read_leases == 0
+                    && !slot.protected
             })
-            .chain((observed > 0).then_some(observed))
-            .max()
-            .unwrap_or(0)
+            .count();
+        semantic.truncate(available);
+        let automatic_available = available
+            .saturating_sub(semantic.len())
+            .saturating_add(replaceable_automatic);
+        automatic.truncate(self.config.automatic_checkpoints.max_checkpoints as usize);
+        automatic = self.checkpoint_coverage_order(automatic);
+        let mut authorized = semantic;
+        let mut physical_cost = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && slot.namespace == request.namespace
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+            })
+            .map(|slot| slot.physical_bytes)
+            .sum::<u64>();
+        let byte_limit = self.automatic_checkpoint_byte_limit();
+        let baseline_cost = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && slot.namespace == request.namespace
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+            })
+            .min_by_key(|slot| slot.tokens.len())
+            .map_or(0, |slot| slot.physical_bytes);
+        let mut automatic_added = 0;
+        for boundary in automatic {
+            if automatic_added >= automatic_available {
+                break;
+            }
+            let incremental = request
+                .estimated_bytes_per_token
+                .saturating_mul(boundary as u64);
+            if byte_limit != u64::MAX
+                && incremental > 0
+                && physical_cost.saturating_add(incremental) > byte_limit
+            {
+                if baseline_cost.saturating_add(incremental) > byte_limit {
+                    continue;
+                }
+                physical_cost = baseline_cost;
+            }
+            physical_cost = physical_cost.saturating_add(incremental);
+            authorized.push(boundary);
+            automatic_added += 1;
+        }
+        authorized.sort_unstable();
+        authorized
+    }
+
+    fn checkpoint_coverage_order(&self, mut boundaries: Vec<usize>) -> Vec<usize> {
+        boundaries.sort_unstable();
+        let shallowest = boundaries.first().copied();
+        let deepest = boundaries.last().copied();
+        let mut baseline = Vec::new();
+        let mut remainder = Vec::new();
+        let mut seen_bands = BTreeMap::<u32, ()>::new();
+        for boundary in boundaries {
+            if Some(boundary) == shallowest || Some(boundary) == deepest {
+                continue;
+            }
+            let band = self.checkpoint_depth_band(boundary);
+            if seen_bands.insert(band, ()).is_none() {
+                baseline.push(boundary);
+            } else {
+                remainder.push(boundary);
+            }
+        }
+        remainder.reverse();
+        let mut ordered = Vec::new();
+        if let Some(boundary) = shallowest {
+            ordered.push(boundary);
+        }
+        if let Some(boundary) = deepest.filter(|deep| Some(*deep) != shallowest) {
+            ordered.push(boundary);
+        }
+        ordered.extend(baseline);
+        ordered.extend(remainder);
+        ordered
+    }
+
+    fn checkpoint_depth_band(&self, tokens: usize) -> u32 {
+        let interval = self
+            .config
+            .automatic_checkpoints
+            .target_interval_tokens
+            .max(1);
+        (tokens / interval).max(1).ilog2()
+    }
+
+    fn is_automatic_checkpoint_len(&self, tokens: usize) -> bool {
+        let policy = &self.config.automatic_checkpoints;
+        policy.enabled
+            && tokens >= policy.minimum_prompt_tokens
+            && tokens % policy.target_interval_tokens == 0
+    }
+
+    fn propose_automatic_checkpoints(&self, prompt_tokens: usize) -> Vec<usize> {
+        let policy = &self.config.automatic_checkpoints;
+        if !policy.enabled || prompt_tokens < policy.minimum_prompt_tokens || prompt_tokens <= 1 {
+            return Vec::new();
+        }
+        let reusable = prompt_tokens - 1;
+        let base = policy.target_interval_tokens;
+        let proposed_at_base = reusable / base;
+        let multiplier = proposed_at_base
+            .div_ceil(policy.max_checkpoints.max(1) as usize)
+            .max(1);
+        let interval = base.saturating_mul(multiplier);
+        (interval..=reusable)
+            .step_by(interval)
+            .take(policy.max_checkpoints as usize)
+            .collect()
+    }
+
+    fn automatic_checkpoint_byte_limit(&self) -> u64 {
+        let policy = &self.config.automatic_checkpoints;
+        let fraction = self
+            .retention
+            .physical_byte_budget
+            .map_or(u64::MAX, |budget| {
+                budget.saturating_mul(policy.memory_budget_basis_points as u64) / 10_000
+            });
+        if policy.memory_budget_cap_bytes == 0 {
+            fraction
+        } else {
+            fraction.min(policy.memory_budget_cap_bytes)
+        }
     }
 
     fn choose_target(
@@ -846,6 +1034,32 @@ impl CacheManager {
         donor: Option<SlotId>,
         request: &PlanRequest<'_>,
     ) -> Result<SlotId, Error> {
+        let anchor_count = self
+            .slots
+            .iter()
+            .filter(|slot| slot.state == SlotState::Anchor)
+            .count();
+        if request.result_state == SlotState::Anchor
+            && anchor_count >= self.config.max_anchors as usize
+        {
+            return self
+                .slots
+                .iter()
+                .filter(|slot| {
+                    slot.state == SlotState::Anchor
+                        && Some(slot.id) != donor
+                        && !slot.busy
+                        && slot.writer.is_none()
+                        && slot.read_leases == 0
+                        && !slot.protected
+                        && self
+                            .slot_capabilities(request, slot.id)
+                            .contains(SlotCapabilities::WRITABLE)
+                })
+                .min_by_key(|slot| (anchor_eviction_value(slot), slot.id))
+                .map(|slot| slot.id)
+                .ok_or(Error::NoCapacity);
+        }
         if let Some(slot) = self.slots.iter().find(|slot| {
             slot.is_empty()
                 && slot.writer.is_none()
@@ -880,7 +1094,8 @@ impl CacheManager {
         // otherwise writable slots are anchors, evict the lowest-value one
         // (never the selected donor) so a session can still start fresh or
         // restore another exact anchor.
-        self.slots
+        let fallback = self
+            .slots
             .iter()
             .filter(|slot| {
                 Some(slot.id) != donor
@@ -893,8 +1108,22 @@ impl CacheManager {
                         .contains(SlotCapabilities::WRITABLE)
             })
             .min_by_key(|slot| (eviction_value(slot), slot.id))
-            .map(|slot| slot.id)
-            .ok_or(Error::NoCapacity)
+            .map(|slot| slot.id);
+        if let Some(slot) = fallback {
+            return Ok(slot);
+        }
+        let temporarily_blocked = self.slots.iter().any(|slot| {
+            Some(slot.id) != donor
+                && self
+                    .slot_capabilities(request, slot.id)
+                    .contains(SlotCapabilities::WRITABLE)
+                && (slot.busy || slot.writer.is_some() || slot.read_leases > 0)
+        });
+        Err(if temporarily_blocked {
+            Error::SlotBusy
+        } else {
+            Error::NoCapacity
+        })
     }
 
     fn pressure_victims(
@@ -903,6 +1132,7 @@ impl CacheManager {
         donor: Option<SlotId>,
         request_namespace: Namespace,
         projected_target_bytes: u64,
+        enforce_low_watermark: bool,
     ) -> Result<Vec<SlotId>, Error> {
         let Some(_) = self.retention.physical_byte_budget else {
             return Ok(Vec::new());
@@ -943,10 +1173,12 @@ impl CacheManager {
             })
             .collect();
         candidates.sort_by_key(|slot| {
+            let coverage_representative = self.is_checkpoint_coverage_representative(slot);
             (
                 (!slot.labels.side_request) as u8,
                 (slot.labels.priority == Priority::Interactive) as u8,
                 (slot.state == SlotState::Anchor) as u8,
+                coverage_representative as u8,
                 slot.reuse_count,
                 slot.saved_us,
                 namespace_bytes
@@ -968,10 +1200,119 @@ impl CacheManager {
             projected = projected.saturating_sub(slot.physical_bytes);
             victims.push(slot.id);
         }
-        if projected > self.retention.low_watermark_bytes {
+        if enforce_low_watermark && projected > self.retention.low_watermark_bytes {
             return Err(Error::NoCapacity);
         }
         Ok(victims)
+    }
+
+    fn automatic_checkpoint_budget_victims(
+        &self,
+        target: SlotId,
+        donor: Option<SlotId>,
+        request_namespace: Namespace,
+        projected_target_bytes: u64,
+    ) -> Result<Vec<SlotId>, Error> {
+        let limit = self.automatic_checkpoint_byte_limit();
+        if limit == u64::MAX || projected_target_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let target_current = self.slots[target as usize].physical_bytes;
+        let current = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+            })
+            .map(|slot| slot.physical_bytes)
+            .sum::<u64>();
+        let mut projected = current
+            .saturating_sub(target_current)
+            .saturating_add(projected_target_bytes);
+        if projected <= limit {
+            return Ok(Vec::new());
+        }
+
+        let mut namespace_bytes = BTreeMap::<Namespace, u64>::new();
+        for slot in self.slots.iter().filter(|slot| {
+            slot.state == SlotState::Anchor && self.is_automatic_checkpoint_len(slot.tokens.len())
+        }) {
+            *namespace_bytes.entry(slot.namespace).or_default() = namespace_bytes
+                .get(&slot.namespace)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(slot.physical_bytes);
+        }
+        namespace_bytes.entry(request_namespace).or_default();
+        let fair_share = limit / namespace_bytes.len().max(1) as u64;
+        let mut candidates = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.id != target
+                    && Some(slot.id) != donor
+                    && slot.state == SlotState::Anchor
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+                    && !slot.busy
+                    && slot.writer.is_none()
+                    && slot.read_leases == 0
+                    && !slot.protected
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|slot| {
+            let shallowest = !self.slots.iter().any(|other| {
+                other.id != slot.id
+                    && other.state == SlotState::Anchor
+                    && other.namespace == slot.namespace
+                    && self.is_automatic_checkpoint_len(other.tokens.len())
+                    && other.tokens.len() < slot.tokens.len()
+            });
+            (
+                slot.namespace != request_namespace,
+                namespace_bytes
+                    .get(&slot.namespace)
+                    .copied()
+                    .unwrap_or_default()
+                    <= fair_share,
+                shallowest,
+                slot.reuse_count,
+                slot.saved_us,
+                slot.last_used,
+                Reverse(slot.physical_bytes),
+                slot.id,
+            )
+        });
+        let mut victims = Vec::new();
+        for slot in candidates {
+            if projected <= limit {
+                break;
+            }
+            projected = projected.saturating_sub(slot.physical_bytes);
+            victims.push(slot.id);
+        }
+        if projected > limit {
+            return Err(Error::NoCapacity);
+        }
+        Ok(victims)
+    }
+
+    fn is_checkpoint_coverage_representative(&self, candidate: &Slot) -> bool {
+        if candidate.state != SlotState::Anchor
+            || !self.is_automatic_checkpoint_len(candidate.tokens.len())
+        {
+            return false;
+        }
+        let band = self.checkpoint_depth_band(candidate.tokens.len());
+        !self.slots.iter().any(|slot| {
+            slot.id != candidate.id
+                && slot.state == SlotState::Anchor
+                && slot.namespace == candidate.namespace
+                && self.is_automatic_checkpoint_len(slot.tokens.len())
+                && self.checkpoint_depth_band(slot.tokens.len()) == band
+                && slot.tokens.len() < candidate.tokens.len()
+                && candidate.tokens[..slot.tokens.len()] == slot.tokens
+        })
     }
 
     fn slot_capabilities(&self, request: &PlanRequest<'_>, slot: SlotId) -> SlotCapabilities {
@@ -1058,6 +1399,8 @@ impl CacheManager {
             target.physical_bytes = commit.physical_bytes;
             target.saved_us = target.saved_us.saturating_add(commit.prefill_us_saved);
             target.busy = commit.actual_state == SlotState::Session;
+            target.protected = commit.actual_state == SlotState::Anchor
+                && matches!(target.labels.scope, Scope::Harness | Scope::Tenant);
             if plan.reuse_tokens > 0 {
                 target.reuse_count += 1;
             }
@@ -1389,6 +1732,24 @@ impl CacheManager {
             .filter(|slot| slot.state == SlotState::Session)
             .map(|slot| slot.physical_bytes)
             .sum();
+        self.telemetry.automatic_checkpoint_slots = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+            })
+            .count() as u32;
+        self.telemetry.automatic_checkpoint_bytes = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor
+                    && self.is_automatic_checkpoint_len(slot.tokens.len())
+            })
+            .map(|slot| slot.physical_bytes)
+            .sum();
+        self.telemetry.automatic_checkpoint_byte_budget = self.automatic_checkpoint_byte_limit();
         self.telemetry.anchor_bytes = self
             .slots
             .iter()
@@ -1428,6 +1789,17 @@ fn eviction_value(slot: &Slot) -> (u8, u8, u8, u64, u64, u64, usize) {
         (!slot.labels.side_request) as u8,
         (slot.labels.priority == Priority::Interactive) as u8,
         (slot.state == SlotState::Anchor) as u8,
+        slot.reuse_count,
+        slot.saved_us,
+        slot.last_used,
+        slot.tokens.len(),
+    )
+}
+
+fn anchor_eviction_value(slot: &Slot) -> (u8, u64, u64, u64, usize) {
+    let structural = matches!(slot.labels.scope, Scope::Harness | Scope::Tenant) as u8;
+    (
+        structural,
         slot.reuse_count,
         slot.saved_us,
         slot.last_used,

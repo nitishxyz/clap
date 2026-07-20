@@ -130,6 +130,29 @@ describe("CacheEventStore", () => {
     expect(store.get(positive.record.id)?.stableBoundaryTokenHash).not.toBe("native-token-hash");
   });
 
+  test("persists arbitrary boundary labels only as telemetry with hashed token identities", () => {
+    const store = new CacheEventStore({ directory: directory() });
+    const metrics = new MetricsCollector(store);
+    const handle = metrics.start("model", "/v1/chat/completions", false);
+    handle.capture({ messages: [{ role: "user", content: "PRIVATE SLICE CONTENT" }] });
+    handle.finish({
+      status: "ok",
+      stableBoundaries: [
+        { tokenHash: "native-token-hash-a", tokenCount: 12, kind: "messages", label: "checkpoint.alpha", requested: true, status: "resolved", materialized: true },
+        { tokenHash: "native-token-hash-b", tokenCount: 18, kind: "prompt", requested: false, status: "resolved", materialized: false },
+        { kind: "tools", label: "slice:tools-v2", requested: true, status: "skipped", skipReason: "unsupported_template_boundary" },
+      ],
+    });
+    const boundaries = store.get(handle.record.id)?.stableBoundaries;
+    expect(boundaries?.map(({ tokenHash: _tokenHash, ...boundary }) => boundary)).toEqual([
+      { tokenCount: 12, kind: "messages", label: "checkpoint.alpha", requested: true, status: "resolved", materialized: true },
+      { tokenCount: 18, kind: "prompt", requested: false, status: "resolved", materialized: false },
+      { kind: "tools", label: "slice:tools-v2", requested: true, status: "skipped", skipReason: "unsupported_template_boundary" },
+    ]);
+    expect(boundaries?.[0]?.tokenHash).not.toBe("native-token-hash-a");
+    expect(JSON.stringify(store.get(handle.record.id))).not.toContain("PRIVATE SLICE CONTENT");
+  });
+
   test("persists cancellation and candidate diagnostics without request content", () => {
     const root = directory();
     const store = new CacheEventStore({ directory: root });
@@ -164,5 +187,67 @@ describe("CacheEventStore", () => {
     handle.capture({ messages: [{ role: "user", content: "do not persist me" }] });
     handle.finish({ status: "error", errorCode: "unsupported_content_part", error: "parser rejected content" });
     expect(store.get(handle.record.id)?.errorCode).toBe("unsupported_content_part");
+  });
+
+  test("persists classified cacheOutcome while keeping raw cache telemetry", () => {
+    const store = new CacheEventStore({ directory: directory() });
+    const metrics = new MetricsCollector(store, { checkpointMinimumTokens: () => 2048 });
+    const handle = metrics.start("model", "/v1/chat/completions", false);
+    handle.finish({
+      status: "ok",
+      cacheHit: false,
+      reusedTokens: 0,
+      workerLaunchId: "worker-launch",
+      cacheCandidates: [],
+      promptTokenCount: 4096,
+    });
+    const persisted = store.get(handle.record.id);
+    expect(persisted?.cacheOutcome?.category).toBe("cold");
+    expect(persisted?.cache).toMatchObject({ hit: false, reusedTokens: 0, candidates: [] });
+    // Stored event keeps both classification and raw fields; neither replaces the other.
+    expect(JSON.stringify(persisted)).toContain("\"hit\":false");
+    expect(JSON.stringify(persisted)).toContain("\"category\":\"cold\"");
+  });
+
+  test("persists session fingerprint and omits raw session content", () => {
+    const root = directory();
+    const store = new CacheEventStore({ directory: root });
+    const metrics = new MetricsCollector(store);
+    const handle = metrics.start("model", "/v1/chat/completions", false);
+    handle.capture({
+      messages: [{ role: "user", content: "hello" }],
+      cache: { session: "RAW-SESSION-S1", namespace: "tenant" },
+    });
+    handle.finish({ status: "ok", cacheHit: true, reusedTokens: 1, reuseKind: "slot" });
+    const persisted = store.get(handle.record.id);
+    expect(persisted?.sessionFingerprint).toBeDefined();
+    expect(persisted?.sessionFingerprint).not.toBe("RAW-SESSION-S1");
+    expect(persisted?.sessionIdentitySource).toBe("request.cache.session");
+    expect(persisted?.promptPrefixId).toBeUndefined();
+    const disk = readdirSync(root).filter((name) => name.endsWith(".jsonl")).map((name) => readFileSync(join(root, name), "utf8")).join("");
+    expect(disk).not.toContain("RAW-SESSION-S1");
+  });
+
+  test("reads old records without cacheOutcome without rewriting them", () => {
+    const root = directory();
+    writeFileSync(join(root, "cache-decisions.current.jsonl"), `${JSON.stringify({
+      schemaVersion: 2,
+      source: "persisted",
+      requestId: "legacy",
+      timestamp: Date.now(),
+      serverLaunchId: "server-launch",
+      model: "model-a",
+      status: "ok",
+      cache: { hit: false, reusedTokens: 0, candidates: [] },
+      promptTokenCount: 4096,
+    })}\n`);
+    const store = new CacheEventStore({ directory: root });
+    const legacy = store.get("legacy");
+    expect(legacy?.cacheOutcome).toBeUndefined();
+    expect(legacy?.cache?.candidates).toEqual([]);
+    // File content is not rewritten with a derived outcome.
+    const disk = readFileSync(join(root, "cache-decisions.current.jsonl"), "utf8");
+    expect(disk).not.toContain("cacheOutcome");
+    expect(disk).toContain("\"hit\":false");
   });
 });
