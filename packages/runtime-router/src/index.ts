@@ -10,6 +10,13 @@ export { V1RequestTracker, type ResidentProtocolFact, type TrackedRequestState }
 export { classifyMemoryPressure, retainedGrowthReserve, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type ActiveLimitPlan, type ActiveLimitWorker, type GlobalActiveLimitInput,
   type MemoryPressure } from "./concurrency";
+export { canonicalModelPath, createWorkerLaunchPaths, fingerprintModelPath, hashModelIdentity,
+  resolveClapHome } from "./process/launch-paths";
+export { DEFAULT_MAX_BYTES_PER_BACKEND, DEFAULT_MAX_LAUNCHES_PER_MODEL, LaunchLogStore,
+  launchRetentionLimits, pruneLaunchLogs, RETENTION_BYTES_ENV, RETENTION_COUNT_ENV,
+  writeLaunchMetadataAtomic } from "./process/launch-log-store";
+export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type WorkerLaunchIdentity,
+  type WorkerLaunchMetadata, type WorkerLaunchPaths } from "./process/types";
 
 export function listBackends() {
   return [llamaBackendStatus(), mlxBackendStatus()];
