@@ -213,18 +213,15 @@ final class CacheCoordinator {
   private let handle: OpaquePointer
 
   init(retention: RetentionConfiguration, capacity: Int,
-       environment: [String: String] = ProcessInfo.processInfo.environment) throws {
-    let enabled = environment["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0"
-    let minimum = UInt64(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048
-    let interval = UInt64(environment["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048
-    let maximum = UInt32(environment["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8
-    let fraction = UInt32(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS"] ?? "") ?? 2_500
-    let cap = UInt64(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BYTES"] ?? "") ?? 0
+       checkpoints: CheckpointConfiguration) throws {
     guard let handle = cc_manager_create_with_retention(
       UInt32(retention.initialEntries), 16, UInt64(max(capacity, 1)),
       UInt32(retention.hardCeiling), UInt32(retention.hardCeiling),
       retention.physicalByteBudget, retention.highWatermarkBytes,
-      retention.lowWatermarkBytes, enabled ? 1 : 0, minimum, interval, maximum, fraction, cap) else {
+      retention.lowWatermarkBytes, checkpoints.enabled ? 1 : 0,
+      checkpoints.coordinatorMinimumTokens, checkpoints.coordinatorIntervalTokens,
+      checkpoints.coordinatorMaximum, checkpoints.budgetBasisPoints,
+      checkpoints.budgetBytes) else {
       throw CacheCoordinatorError.unavailable
     }
     self.handle = handle

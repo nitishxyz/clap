@@ -9,36 +9,6 @@ import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
-private func startupAvailableMemoryBytes() -> UInt64? {
-  var statistics = vm_statistics64()
-  var count = mach_msg_type_number_t(
-    MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
-  let status = withUnsafeMutablePointer(to: &statistics) { pointer in
-    pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-      host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
-    }
-  }
-  var pageSize: vm_size_t = 0
-  guard status == KERN_SUCCESS,
-        host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS else { return nil }
-  let pages = UInt64(statistics.free_count) + UInt64(statistics.inactive_count) +
-    UInt64(statistics.purgeable_count)
-  let bytes = pages.multipliedReportingOverflow(by: UInt64(pageSize))
-  return bytes.overflow ? nil : bytes.partialValue
-}
-
-func automaticCheckpointOffsets(promptTokens: Int, environment: [String: String]) -> [Int] {
-  guard environment["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0" else { return [] }
-  let minimum = Int(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048
-  let base = Int(environment["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048
-  let maximum = Int(environment["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8
-  guard promptTokens >= minimum, promptTokens > 1, base > 0, maximum > 0 else { return [] }
-  let reusable = promptTokens - 1
-  let multiplier = max(1, ((reusable / base) + maximum - 1) / maximum)
-  let interval = base * multiplier
-  return Array(stride(from: interval, through: reusable, by: interval).prefix(maximum))
-}
-
 func tokenFingerprint(_ tokens: [Int], count: Int) -> String {
   let limit = min(max(count, 0), tokens.count)
   var bytes = Array((cacheTelemetryKey + "|tokens-v1|\(limit)|").utf8)
@@ -238,16 +208,6 @@ func validateModelDirectory(_ path: String) throws -> URL {
   return url
 }
 
-enum WorkerError: Error, CustomStringConvertible {
-  case invalidModelDirectory(String)
-
-  var description: String {
-    switch self {
-    case .invalidModelDirectory(let message): message
-    }
-  }
-}
-
 // ModelContext members (model, tokenizer) are not Sendable but are only used
 // from this single-threaded main loop; ChatSession uses the same pattern.
 struct UncheckedBox<T>: @unchecked Sendable {
@@ -288,16 +248,12 @@ func main() async {
     var modelContextLengthSource: String?
     var modelMaxOutputTokensSource: String?
 
-    let env = ProcessInfo.processInfo.environment
-    let physicalMemoryBytes = ProcessInfo.processInfo.physicalMemory
-    let availableMemoryAtStartup = startupAvailableMemoryBytes()
-    let retentionConfig = RetentionConfiguration.fromEnvironment(env,
-      physicalMemoryBytes: physicalMemoryBytes,
-      startupAvailableMemoryBytes: availableMemoryAtStartup)
-    let retainedGrowthMinimumBytes = UInt64(env["CLAP_MLX_RETAINED_GROWTH_MIN_BYTES"] ?? "")
-      ?? 64 * 1_048_576
-    let retainedGrowthReservePercent = UInt64(env["CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT"] ?? "")
-      ?? 10
+    let configuration = WorkerConfiguration.current()
+    let physicalMemoryBytes = configuration.physicalMemoryBytes
+    let availableMemoryAtStartup = configuration.availableMemoryAtStartup
+    let retentionConfig = configuration.retention
+    let retainedGrowthMinimumBytes = configuration.retainedGrowthMinimumBytes
+    let retainedGrowthReservePercent = configuration.retainedGrowthReservePercent
     var activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
       physicalMemoryBytes: physicalMemoryBytes,
       startupAvailableMemoryBytes: availableMemoryAtStartup, modelActiveBytes: nil,
@@ -305,19 +261,15 @@ func main() async {
       retainedGrowthMinimumBytes: retainedGrowthMinimumBytes,
       retainedGrowthReservePercent: retainedGrowthReservePercent,
       retainedCeiling: retentionConfig.hardCeiling,
-      processorCount: ProcessInfo.processInfo.processorCount))
+      processorCount: configuration.processorCount))
     var maxActive = activePolicy.selectedMax
     // Context window policy (parity with the llama worker): default to the
     // model's trained context; CLAP_MLX_CONTEXT pins it, and
     // CLAP_MLX_MAX_SESSION_CTX caps any single session's share.
-    let contextOverride = Int(env["CLAP_MLX_CONTEXT"] ?? "") ?? 0
-    let sessionCap = Int(env["CLAP_MLX_MAX_SESSION_CTX"] ?? "") ?? 0
+    let contextOverride = configuration.contextOverride
+    let sessionCap = configuration.sessionCap
     // KV cache quantization (parity with CLAP_LLAMA_KV_TYPE): q8_0/q4_0/f16.
-    let kvBits: Int? = switch env["CLAP_MLX_KV_TYPE"] ?? "f16" {
-    case "q8_0": 8
-    case "q4_0": 4
-    default: nil
-    }
+    let kvBits = configuration.kvBits
 
     // Physical KV slots mirror Rust coordinator state. The worker executes
     // authorized operations but does not independently choose cache policy.
@@ -406,7 +358,7 @@ func main() async {
           os_reserve_bytes: activePolicy.osReserveBytes,
           usable_runtime_bytes: activePolicy.usableRuntimeBytes,
           per_active_reserve_bytes: activePolicy.perActiveReserveBytes,
-          processor_count: ProcessInfo.processInfo.processorCount,
+          processor_count: configuration.processorCount,
           hybrid_or_recurrent: activePolicyHybrid))
       return WorkerRetention(max_active: maxActive, queued: queued,
         previous_max_active: previousMaxActive,
@@ -422,12 +374,10 @@ func main() async {
         automatic_checkpoint_count: Int(telemetry.automatic_checkpoint_slots),
         automatic_checkpoint_bytes: telemetry.automatic_checkpoint_bytes,
         automatic_checkpoint_budget_bytes: telemetry.automatic_checkpoint_byte_budget,
-        automatic_checkpoints_enabled: env["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0",
-        automatic_checkpoint_minimum_tokens:
-          Int(env["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048,
-        automatic_checkpoint_interval_tokens:
-          Int(env["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048,
-        automatic_checkpoint_max: Int(env["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8,
+        automatic_checkpoints_enabled: configuration.checkpoints.enabled,
+        automatic_checkpoint_minimum_tokens: configuration.checkpoints.minimumTokens,
+        automatic_checkpoint_interval_tokens: configuration.checkpoints.intervalTokens,
+        automatic_checkpoint_max: configuration.checkpoints.maximum,
         budget_bytes: telemetry.physical_byte_budget,
         high_watermark_bytes: telemetry.high_watermark_bytes,
         low_watermark_bytes: telemetry.low_watermark_bytes,
@@ -463,7 +413,7 @@ func main() async {
       modelContextLength = knownContextCaps.min() ?? 0
       modelMaxOutputTokens = metadata.maxOutputTokens?.value ?? 0
       modelMaxOutputTokensSource = metadata.maxOutputTokens?.source
-      let outputOverride = Int(env["CLAP_MLX_MAX_OUTPUT"] ?? "") ?? 0
+      let outputOverride = configuration.outputOverride
       if outputOverride > 0 {
         if modelMaxOutputTokens == 0 || outputOverride < modelMaxOutputTokens {
           modelMaxOutputTokens = outputOverride
@@ -479,7 +429,7 @@ func main() async {
       activePolicyHybrid = ["hybrid", "recurrent", "mamba", "deltanet", "ssm"]
         .contains { capabilityText.contains($0) }
       activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
-        explicitMax: Int(env["CLAP_MAX_ACTIVE"] ?? ""),
+        explicitMax: configuration.explicitMaxActive,
         physicalMemoryBytes: physicalMemoryBytes,
         startupAvailableMemoryBytes: availableMemoryAtStartup,
         modelActiveBytes: activePolicyModelBytes,
@@ -487,13 +437,14 @@ func main() async {
         retainedGrowthMinimumBytes: retainedGrowthMinimumBytes,
         retainedGrowthReservePercent: retainedGrowthReservePercent,
         retainedCeiling: retentionConfig.hardCeiling,
-        processorCount: ProcessInfo.processInfo.processorCount,
+        processorCount: configuration.processorCount,
         isHybridOrRecurrent: activePolicyHybrid))
       maxActive = activePolicy.selectedMax
       retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
         hardCeiling: retentionConfig.hardCeiling)
       do {
-        cacheCoordinator = try CacheCoordinator(retention: retentionConfig, capacity: Int.max / 4)
+        cacheCoordinator = try CacheCoordinator(retention: retentionConfig,
+          capacity: Int.max / 4, checkpoints: configuration.checkpoints)
         for slotID in 0..<retentionConfig.initialEntries {
           let slot = KVSlot()
           slot.coordinatorGeneration = try cacheCoordinator?.slot(slotID).generation ?? 0
@@ -902,7 +853,7 @@ func main() async {
             }
           }
         }
-        if ProcessInfo.processInfo.environment["CLAP_MLX_DEBUG_PROMPT"] != nil {
+        if configuration.debugPrompt {
           debugLog("prompt (\(promptTokens.count) tokens): \(tok.decode(tokenIds: promptTokens, skipSpecialTokens: false))")
         }
         let templateTokenizeMs = Double(DispatchTime.now().uptimeNanoseconds - templateStartNs) / 1_000_000
@@ -945,8 +896,7 @@ func main() async {
 
         let cacheIdentity = CacheIdentity(domain: cacheDomain, requestId: id, intent: control.cache)
         let physicalIdentity = PhysicalCacheIdentity(fingerprint: cacheIdentity.fingerprint)
-        let automaticProposals = automaticCheckpointOffsets(
-          promptTokens: promptTokens.count, environment: env)
+        let automaticProposals = configuration.checkpoints.offsets(promptTokens: promptTokens.count)
         let automaticDeduped = automaticProposals.filter { checkpoint in
           kvSlots.contains { slot in
             slot.isAnchor && slot.cacheIdentity?.isCompatible(with: physicalIdentity) == true &&
@@ -1544,7 +1494,7 @@ func main() async {
           steps += 1
           req.sampledTokens.append(token)
           if eosTokenIds.contains(token) {
-            if ProcessInfo.processInfo.environment["CLAP_MLX_DEBUG_PROMPT"] != nil {
+            if configuration.debugPrompt {
               debugLog("eos token \(token) (\(tokenizer?.convertIdToToken(token) ?? "?")) after \(req.generatedCount) tokens; eos set: \(eosTokenIds)")
             }
             req.finishReason = "stop"
