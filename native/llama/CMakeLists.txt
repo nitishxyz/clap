@@ -233,6 +233,24 @@ if(BUILD_TESTING)
   target_link_libraries(clap-llama-cache-transaction PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-transaction COMMAND clap-llama-cache-transaction)
 
+  add_executable(clap-llama-cache-request-lifecycle
+    tests/cache-request-lifecycle.test.cpp
+    src/cache-executor.cpp
+    src/environment.cpp
+    src/generation-stepper.cpp
+    src/model-runtime.cpp
+    src/request-state.cpp
+    src/stop-buffer.cpp
+  )
+  add_dependencies(clap-llama-cache-request-lifecycle clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-request-lifecycle PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-request-lifecycle PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-request-lifecycle COMMAND clap-llama-cache-request-lifecycle)
+
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)
 
@@ -355,6 +373,7 @@ if(BUILD_TESTING)
     clap-llama-cache-adapter
     clap-llama-cache-identity
     clap-llama-cache-executor
+    clap-llama-cache-request-lifecycle
     clap-llama-cache-transaction
     clap-llama-characterization
     clap-llama-environment
