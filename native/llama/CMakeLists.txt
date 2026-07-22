@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CLAP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(CLAP_LLAMA_VENDOR_DIR "${CLAP_ROOT}/vendor/llama.cpp")
 set(CLAP_CACHE_DIR "${CLAP_ROOT}/native/cache")
+set(CLAP_LLAMA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 if(NOT EXISTS "${CLAP_LLAMA_VENDOR_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "llama.cpp is not vendored; run: bun run runtime:llama:vendor")
@@ -48,11 +49,19 @@ set_target_properties(clap-cache-ffi PROPERTIES
 # translation units here as the native worker is decomposed.
 set(CLAP_LLAMA_SOURCES
   clap-llama.cpp
+  src/environment.cpp
 )
 
-add_executable(clap-llama ${CLAP_LLAMA_SOURCES})
+set(CLAP_LLAMA_HEADERS
+  include/clap/llama/environment.h
+)
+
+add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
 add_dependencies(clap-llama clap-cache-ffi-build)
-target_include_directories(clap-llama PRIVATE "${CLAP_LLAMA_VENDOR_DIR}/vendor")
+target_include_directories(clap-llama PRIVATE
+  "${CLAP_LLAMA_INCLUDE_DIR}"
+  "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+)
 target_link_libraries(clap-llama PRIVATE llama clap-cache-ffi)
 
 install(TARGETS clap-llama
@@ -63,4 +72,16 @@ install(TARGETS clap-llama
 if(BUILD_TESTING)
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)
+
+  add_executable(clap-llama-environment
+    tests/environment.test.cpp
+    src/environment.cpp
+  )
+  target_include_directories(clap-llama-environment PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
+  add_test(NAME clap-llama-environment COMMAND clap-llama-environment)
+
+  add_custom_target(clap-llama-tests DEPENDS
+    clap-llama-characterization
+    clap-llama-environment
+  )
 endif()
