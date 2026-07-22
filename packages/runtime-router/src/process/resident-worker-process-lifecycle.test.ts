@@ -7,7 +7,7 @@ import { testResidentChatOptions } from "../test-cache-identity";
 import { ResidentWorkerRegistry } from "../resident";
 import { ModelLifecycleManager } from "../lifecycle";
 import type { ResolvedModel } from "@clap/models";
-import type { WorkerLaunchMetadata } from "./types";
+import type { WorkerLaunchMetadata, WorkerLoadStateEvent } from "./types";
 
 const originalHome = process.env.CLAP_HOME;
 const originalWorker = process.env.CLAP_LLAMA_WORKER;
@@ -92,6 +92,46 @@ async function finalized(home: string): Promise<WorkerLaunchMetadata> {
 }
 
 describe.serial("resident worker lifecycle races", () => {
+  test("reports starting, loading, resident, closing, and not-started transitions", async () => {
+    const { worker } = await setup("terminal", "80");
+    const events: WorkerLoadStateEvent[] = [];
+    worker.onLoadState((event) => events.push(event));
+    expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
+
+    const load = worker.load();
+    expect(worker.info().loadState).toBe("starting");
+    await Bun.sleep(30);
+    expect(worker.info()).toMatchObject({ state: "resident", loadState: "loading" });
+    const pid = worker.info().pid;
+    await load;
+    expect(worker.info()).toMatchObject({ pid, state: "resident", loadState: "resident" });
+
+    const close = worker.shutdownAsync();
+    expect(worker.info()).toMatchObject({ pid, state: "resident", loadState: "closing" });
+    await close;
+    expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
+    expect(events.map((event) => event.loadState)).toEqual([
+      "starting", "loading", "resident", "closing", "not_started",
+    ]);
+    expect(events.find((event) => event.loadState === "closing")?.pid).toBe(pid);
+  });
+
+  test("observes RSS only while a stable process PID exists", async () => {
+    const { worker } = await setup();
+    expect(await worker.observeRss(async () => 123)).toEqual({
+      kind: "unavailable", bytes: null, basis: "not_observed",
+    });
+    await worker.load();
+    const pid = worker.info().pid!;
+    expect(await worker.observeRss(async (sampledPid) => sampledPid === pid ? 12_345 : null)).toEqual({
+      kind: "measured", bytes: 12_345, basis: "resident_rss",
+    });
+    expect(await worker.observeRss(async () => 0)).toEqual({
+      kind: "unavailable", bytes: null, basis: "not_reported",
+    });
+    await worker.shutdownAsync();
+  });
+
   test("single-flights concurrent load commands", async () => {
     const { worker, commands } = await setup("terminal", "50");
     await Promise.all([worker.load(), worker.load(), worker.load()]);
@@ -104,9 +144,11 @@ describe.serial("resident worker lifecycle races", () => {
     const load = worker.load();
     await Bun.sleep(20);
     const close = worker.shutdownAsync();
+    expect(worker.info().loadState).toBe("closing");
     await expect(load).rejects.toThrow("shut down");
     await close;
     expect(worker.info().state).toBe("not_started");
+    expect(worker.info().loadState).toBe("not_started");
   });
 
   test("graceful shutdown finalizes cleanly and repeated shutdown shares close", async () => {
@@ -149,6 +191,7 @@ describe.serial("resident worker lifecycle races", () => {
     const replacement = worker.info().launchId;
     await Bun.sleep(350);
     expect(worker.info()).toMatchObject({ state: "resident", launchId: replacement });
+    expect(worker.info().loadState).toBe("resident");
     await worker.shutdownAsync();
   });
 
@@ -173,5 +216,28 @@ describe.serial("resident worker lifecycle races", () => {
     expect(lifecycle.list()).toEqual([]);
     await expiryRegistry.shutdownAsync();
     expect((await finalized(second.home)).crashClassification).toBe("expected_exit");
+  });
+
+  test("registry exposes injected measured RSS without inventing unavailable values", async () => {
+    const fixture = await setup();
+    const registry = new ResidentWorkerRegistry();
+    expect(await registry.observeWorkerRss("missing")).toEqual({
+      kind: "unavailable", bytes: null, basis: "not_observed",
+    });
+    const worker = registry.getOrCreate("sample", "llama", fixture.worker.modelPath);
+    expect(await registry.observeWorkerRss("sample")).toEqual({
+      kind: "unavailable", bytes: null, basis: "not_observed",
+    });
+    await worker.load();
+    const pid = worker.info().pid!;
+    registry.rssSampler = async (sampledPid) => sampledPid === pid ? 98_765 : undefined;
+    expect(await registry.observeWorkerRss("sample")).toEqual({
+      kind: "measured", bytes: 98_765, basis: "resident_rss",
+    });
+    registry.rssSampler = async () => undefined;
+    expect(await registry.observeWorkerRss("sample")).toEqual({
+      kind: "unavailable", bytes: null, basis: "not_reported",
+    });
+    await registry.shutdownAsync();
   });
 });

@@ -155,7 +155,7 @@ describe.serial("resident worker per-launch logs", () => {
     const worker = new ResidentWorkerProcess("spawn", "llama", model, undefined, undefined,
       undefined, { modelId: "spawn" }, new WorkerLaunchLogStore(), spawn);
     await expect(worker.load()).rejects.toBe(original);
-    expect(worker.info().state).toBe("not_started");
+    expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
     const metadata = await waitForFinalized(home, 1);
     expect(metadata[0]).toMatchObject({ exitStatus: null, crashClassification: "spawn_failure" });
   });

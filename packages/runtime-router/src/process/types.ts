@@ -7,6 +7,18 @@ export interface WorkerLaunchIdentity {
   modelPath: string;
 }
 
+export type WorkerLoadState = "not_started" | "starting" | "loading" | "resident" | "closing";
+
+export interface WorkerLoadStateEvent {
+  readonly key: string;
+  readonly backend: string;
+  readonly loadState: WorkerLoadState;
+  readonly pid?: number;
+  readonly atMs: number;
+}
+
+export type WorkerRssSampler = (pid: number) => Promise<number | null | undefined>;
+
 export interface WorkerModelDescriptor {
   modelId: string;
   revision?: string | null;

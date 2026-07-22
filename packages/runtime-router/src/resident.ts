@@ -5,6 +5,8 @@ import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLim
   type MemoryPressure } from "./concurrency";
 import { ResidentWorkerProcess } from "./process/resident-worker-process";
 import type { ResidentCacheInfo } from "./process/types";
+import { measuredMemory, unavailableMemory, type MemoryValue } from "./residency/types";
+import type { WorkerLoadState, WorkerLoadStateEvent, WorkerRssSampler } from "./process/types";
 
 export { ResidentWorkerProcess } from "./process/resident-worker-process";
 export type { ResidentCacheInfo } from "./process/types";
@@ -15,6 +17,7 @@ export type ResidentWorkerInfo = {
   launchId?: string;
   stderrLogPath?: string; launchMetadataPath?: string; crashClassification?: string;
   state: LoadedModel["worker"]["state"];
+  loadState: WorkerLoadState;
   limitation?: string;
   crashes?: number;
   lastCrashAt?: string;
@@ -110,6 +113,8 @@ export type ResidentWorkerHandle = {
   backend: ResidentBackend;
   modelPath: string;
   info(): ResidentWorkerInfo;
+  onLoadState?(listener: (event: WorkerLoadStateEvent) => void): () => void;
+  observeRss?(sampler: WorkerRssSampler): Promise<MemoryValue>;
   load(): Promise<ResidentWorkerInfo>;
   chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void, options?: ResidentChatOptions): Promise<ResidentChatResult>;
   setMaxActive?(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void>;
@@ -335,6 +340,7 @@ export class ResidentWorkerRegistry {
   // Per-model worker environment (e.g. [models."x"] config sections);
   // consulted once when the worker handle is first created.
   workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
+  rssSampler: WorkerRssSampler = async () => undefined;
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string,
     descriptor: Partial<import("./process/types").WorkerModelDescriptor> = {}): ResidentWorkerHandle {
     const existing = this.workers.get(key);
@@ -351,6 +357,14 @@ export class ResidentWorkerRegistry {
       this.pressureTimer.unref?.();
     }
     return worker;
+  }
+
+  async observeWorkerRss(key: string): Promise<MemoryValue> {
+    const worker = this.workers.get(key);
+    if (!worker) return unavailableMemory("not_observed");
+    if (worker.observeRss) return worker.observeRss(this.rssSampler);
+    const pid = worker.info().pid;
+    return pid === undefined ? unavailableMemory("not_observed") : sampleRss(pid, this.rssSampler);
   }
 
   get(key: string): ResidentWorkerHandle | undefined {
@@ -517,4 +531,12 @@ export class ResidentWorkerRegistry {
       void this.rebalance(reason).catch(() => {});
     }, 0);
   }
+}
+
+async function sampleRss(pid: number, sampler: WorkerRssSampler): Promise<MemoryValue> {
+  const bytes = await sampler(pid);
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) {
+    return unavailableMemory("not_reported");
+  }
+  return measuredMemory(bytes, "resident_rss");
 }

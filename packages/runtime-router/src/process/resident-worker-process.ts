@@ -10,7 +10,9 @@ import { applyWorkerPayload, mapWorkerResultPayload, mapWorkerTelemetryPayload,
 import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResult,
   type ResidentCrashListener, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentChatOptions, type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
-import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerModelDescriptor } from "./types";
+import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerLoadState, WorkerLoadStateEvent,
+  WorkerModelDescriptor, WorkerRssSampler } from "./types";
+import { measuredMemory, unavailableMemory, type MemoryValue } from "../residency/types";
 
 type WorkerProcess = Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
 type CloseReason = "shutdown" | "unload";
@@ -38,6 +40,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private starting?: Promise<ActiveLaunch>;
   private loadPromise?: Promise<ResidentWorkerInfo>;
   private loaded = false;
+  private loadState: WorkerLoadState = "not_started";
+  private readonly loadStateListeners = new Set<(event: WorkerLoadStateEvent) => void>();
   private crashes = 0;
   private consecutiveCrashes = 0;
   private lastCrashAt?: number;
@@ -59,6 +63,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     private readonly descriptor: WorkerModelDescriptor = { modelId: key },
     private readonly launchLogs = new WorkerLaunchLogStore(),
     private readonly spawnWorker: typeof Bun.spawn = Bun.spawn,
+    private readonly onLoadStateEvent?: (event: WorkerLoadStateEvent) => void,
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -69,6 +74,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       launchMetadataPath: this.active?.context.paths.metadataPath ?? this.lastLaunchPaths?.metadataPath,
       crashClassification: this.crashClassification,
       state: this.active ? "resident" : "not_started",
+      loadState: this.loadState,
       crashes: this.crashes,
       lastCrashAt: this.lastCrashAt ? new Date(this.lastCrashAt).toISOString() : undefined,
       memory: this.memory,
@@ -77,9 +83,25 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     };
   }
 
+  async observeRss(sampler: WorkerRssSampler): Promise<MemoryValue> {
+    const pid = this.active?.proc.pid;
+    if (pid === undefined) return unavailableMemory("not_observed");
+    const bytes = await sampler(pid);
+    if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) {
+      return unavailableMemory("not_reported");
+    }
+    return measuredMemory(bytes, "resident_rss");
+  }
+
+  onLoadState(listener: (event: WorkerLoadStateEvent) => void): () => void {
+    this.loadStateListeners.add(listener);
+    return () => this.loadStateListeners.delete(listener);
+  }
+
   load(): Promise<ResidentWorkerInfo> {
     if (this.loaded && this.active && !this.active.closePromise) return Promise.resolve(this.info());
     if (this.loadPromise) return this.loadPromise;
+    if (!this.active) this.setLoadState("starting");
     const load = this.loadOnce();
     this.loadPromise = load;
     void load.finally(() => { if (this.loadPromise === load) this.loadPromise = undefined; }).catch(() => {});
@@ -87,18 +109,25 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private async loadOnce(): Promise<ResidentWorkerInfo> {
-    await this.awaitRestartBackoff();
-    const launch = await this.ensureStarted();
-    if (launch.closePromise) throw this.workerError("resident worker is shutting down");
-    if (!this.loaded) {
-      const result = await this.sendControl("load", { model: this.modelPath }, undefined, undefined,
-        undefined, undefined, launch);
-      if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
-      this.tokenCapabilities = result.tokenCapabilities;
-      this.loaded = true;
-      this.consecutiveCrashes = 0;
+    try {
+      await this.awaitRestartBackoff();
+      const launch = await this.ensureStarted();
+      if (launch.closePromise) throw this.workerError("resident worker is shutting down");
+      if (!this.loaded) {
+        this.setLoadState("loading", launch);
+        const result = await this.sendControl("load", { model: this.modelPath }, undefined, undefined,
+          undefined, undefined, launch);
+        if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
+        this.tokenCapabilities = result.tokenCapabilities;
+        this.loaded = true;
+        this.setLoadState("resident", launch);
+        this.consecutiveCrashes = 0;
+      }
+      return this.info();
+    } catch (error) {
+      if (this.loadState !== "closing") this.setLoadState(this.active ? "starting" : "not_started", this.active);
+      throw error;
     }
-    return this.info();
   }
 
   async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal,
@@ -167,6 +196,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private async startWorker(): Promise<ActiveLaunch> {
+    this.setLoadState("starting");
     this.loaded = false;
     this.memory = undefined;
     this.retention = undefined;
@@ -184,6 +214,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       proc = this.spawnWorker(status.command, { stdin: "pipe", stdout: "pipe",
         stderr: Bun.file(context.paths.stderrPath), env: { ...process.env, ...this.envOverrides } });
     } catch (error) {
+      this.setLoadState("not_started");
       await this.ignoreMetadataFailure(() => this.launchLogs.finalize(context, null, "spawn_failure"));
       throw error;
     }
@@ -261,6 +292,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
+      this.setLoadState("not_started");
     }
     await this.ignoreMetadataFailure(() => this.launchLogs.finalize(launch.context, exitCode, classification));
     launch.resolveExited();
@@ -320,6 +352,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     if (fact.kind === "failed") {
       this.pending.delete(fact.requestId); pending.cleanup?.();
+      if (pending.phase === "load" && this.active === launch && !launch.closePromise) this.setLoadState("starting", launch);
       pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath)); return;
     }
     this.applyWorkerPayload(launch, mapWorkerResultPayload(fact.result as Record<string, unknown>,
@@ -356,6 +389,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
+      this.setLoadState("not_started");
     }
     try { launch.proc.kill(); } catch { /* process already exited */ }
   }
@@ -398,6 +432,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private close(launch: ActiveLaunch, _reason: CloseReason): Promise<void> {
     if (launch.closePromise) return launch.closePromise;
+    this.setLoadState("closing", launch);
     const closing = this.closeOnce(launch);
     launch.closePromise = closing;
     return closing;
@@ -441,6 +476,21 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private async ignoreMetadataFailure(operation: () => Promise<void>): Promise<void> {
     try { await operation(); } catch { /* diagnostics persistence must not replace worker outcomes */ }
+  }
+
+  private setLoadState(loadState: WorkerLoadState, launch?: ActiveLaunch): void {
+    if (launch && this.active !== launch && loadState !== "not_started") return;
+    if (this.loadState === loadState) return;
+    this.loadState = loadState;
+    const event: WorkerLoadStateEvent = Object.freeze({
+      key: this.key,
+      backend: this.backend,
+      loadState,
+      pid: launch?.proc.pid ?? this.active?.proc.pid,
+      atMs: Date.now(),
+    });
+    this.onLoadStateEvent?.(event);
+    for (const listener of this.loadStateListeners) listener(event);
   }
 
   private async awaitRestartBackoff(): Promise<void> {
