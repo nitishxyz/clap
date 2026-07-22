@@ -137,7 +137,7 @@ type ServerEnv = {
 
 export function createServer(
   residents = new ResidentWorkerRegistry(),
-  lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key)),
+  lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdownAsync(entry.key)),
 ) {
   const app = new Hono<ServerEnv>();
   const { config, sources: configSources } = loadClapConfig();
@@ -1805,7 +1805,7 @@ export function startServer(options: ServerOptions = {}) {
   const hostname = options.hostname ?? hostnameFromEnv(config.server.host);
   const idleTimeout = options.idleTimeout ?? idleTimeoutFromEnv(config.server.idle_timeout_seconds);
   const residents = new ResidentWorkerRegistry();
-  const lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key));
+  const lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdownAsync(entry.key));
   const server = Bun.serve({
     port,
     hostname,

@@ -39,3 +39,8 @@ export {
   modelLoadEstimateHistoryKey,
   type ModelLoadEstimateOptions,
 } from "./estimates";
+export {
+  compareIdleEvictionVictims,
+  selectIdleEvictionVictims,
+  type IdleEvictionSelectionOptions,
+} from "./eviction";

@@ -1,5 +1,6 @@
 import type { BackendOverride, ResolvedModel } from "@clap/models";
 import type { LoadedModel } from "@clap/api";
+import { unavailableMemory, type MemoryValue } from "./residency/types";
 
 export type LoadModelOptions = {
   keepAlive?: string;
@@ -8,23 +9,51 @@ export type LoadModelOptions = {
 
 export type ModelLifecycleEntry = LoadedModel;
 export type LifecycleRemoveReason = "unload" | "expire" | "cleanup";
+export type LifecycleResidencyState = "starting" | "loading" | "idle" | "active" | "closing";
+export type LifecycleRemovalHook = (entry: LoadedModel, reason: LifecycleRemoveReason) => void | Promise<void>;
+
+export interface LifecycleResidencySnapshot {
+  readonly key: string;
+  readonly state: LifecycleResidencyState;
+  readonly activeRequests: number;
+  readonly pinned: boolean;
+  readonly always: boolean;
+  readonly loadedAtMs: number;
+  readonly lastUsedAtMs: number;
+  readonly lifecycleVersion: number;
+  readonly retainedValueScore: number;
+  readonly memory: MemoryValue;
+}
+
+export interface LifecycleResidencySnapshotOptions {
+  readonly memoryByKey?: ReadonlyMap<string, MemoryValue>;
+  readonly retainedValueByKey?: ReadonlyMap<string, number>;
+}
+
+export type IdleEvictionResult = "evicted" | "changed";
 
 const DEFAULT_KEEP_ALIVE = process.env.CLAP_KEEP_ALIVE ?? "15m";
 export class ModelLifecycleManager {
   private readonly entries = new Map<string, LoadedModel>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly residencyStates = new Map<string, {
+    state: Exclude<LifecycleResidencyState, "idle" | "active">;
+    at: number;
+  }>();
+  private readonly residencyVersions = new Map<string, number>();
   // Optional secondary listener (e.g. metrics/event log) attached after construction.
-  removeListener?: (entry: LoadedModel, reason: LifecycleRemoveReason) => void;
+  removeListener?: LifecycleRemovalHook;
 
   constructor(
     private readonly now = () => Date.now(),
-    private readonly onRemove?: (entry: LoadedModel, reason: LifecycleRemoveReason) => void,
+    private readonly onRemove?: LifecycleRemovalHook,
   ) {}
 
   load(resolved: ResolvedModel, options: LoadModelOptions = {}): LoadedModel {
     const localPath = resolved.modelPath ?? resolved.input;
     const key = modelLifecycleKey(resolved.id, resolved.backend, localPath);
     const existing = this.entries.get(key);
+    this.residencyStates.delete(key);
     const keepAlive = normalizeKeepAlive(options.keepAlive ?? existing?.keepAlive ?? DEFAULT_KEEP_ALIVE);
     const timestamp = iso(this.now());
     const expiresAt = expiresAtFor(this.now(), keepAlive);
@@ -36,6 +65,7 @@ export class ModelLifecycleManager {
       existing.lastUsedAt = timestamp;
       existing.expiresAt = expiresAt ? iso(expiresAt) : null;
       existing.state = existing.activeRequests > 0 ? "active" : "warm";
+      this.bumpResidencyVersion(key);
       this.scheduleExpiry(existing);
       return existing;
     }
@@ -57,6 +87,7 @@ export class ModelLifecycleManager {
       worker: options.worker ?? { state: "not_started" },
     };
     this.entries.set(key, entry);
+    this.bumpResidencyVersion(key);
     this.scheduleExpiry(entry);
     return entry;
   }
@@ -67,6 +98,8 @@ export class ModelLifecycleManager {
     const entry = this.entries.get(key);
     if (!entry) return { unloaded: false };
     if (entry.activeRequests > 0) {
+      this.residencyStates.set(key, { state: "closing", at: this.now() });
+      this.bumpResidencyVersion(key);
       entry.state = "unloading";
       entry.keepAlive = "0ms";
       entry.pinned = false;
@@ -105,6 +138,7 @@ export class ModelLifecycleManager {
     this.touch(entry);
     if (entry.activeRequests === 0) {
       if (entry.state === "unloading") {
+        this.residencyStates.delete(entry.key);
         this.delete(entry.key, "unload");
       } else {
         entry.state = "warm";
@@ -113,21 +147,86 @@ export class ModelLifecycleManager {
     }
   }
 
+  setResidencyTransition(key: string, state: "starting" | "loading" | "closing"): void {
+    this.residencyStates.set(key, { state, at: this.now() });
+    this.bumpResidencyVersion(key);
+  }
+
+  clearResidencyTransition(key: string): void {
+    this.residencyStates.delete(key);
+    this.bumpResidencyVersion(key);
+  }
+
+  snapshotForResidency(options: LifecycleResidencySnapshotOptions = {}): LifecycleResidencySnapshot[] {
+    const entries: LifecycleResidencySnapshot[] = [...this.entries.values()].map((entry) => ({
+      key: entry.key,
+      state: this.residencyStates.get(entry.key)?.state ?? (entry.activeRequests > 0 ? "active" : "idle"),
+      activeRequests: entry.activeRequests,
+      pinned: entry.pinned,
+      always: entry.always,
+      loadedAtMs: Date.parse(entry.loadedAt),
+      lastUsedAtMs: Date.parse(entry.lastUsedAt),
+      lifecycleVersion: this.residencyVersions.get(entry.key) ?? 0,
+      retainedValueScore: finiteNonnegative(options.retainedValueByKey?.get(entry.key)),
+      memory: options.memoryByKey?.get(entry.key) ?? unavailableMemory("not_observed"),
+    }));
+    for (const [key, transition] of this.residencyStates) {
+      if (this.entries.has(key)) continue;
+      entries.push({
+        key,
+        state: transition.state,
+        activeRequests: 0,
+        pinned: false,
+        always: false,
+        loadedAtMs: transition.at,
+        lastUsedAtMs: transition.at,
+        lifecycleVersion: this.residencyVersions.get(key) ?? 0,
+        retainedValueScore: finiteNonnegative(options.retainedValueByKey?.get(key)),
+        memory: options.memoryByKey?.get(key) ?? unavailableMemory("not_observed"),
+      });
+    }
+    return entries;
+  }
+
+  async tryEvictIdle(expected: LifecycleResidencySnapshot): Promise<IdleEvictionResult> {
+    const entry = this.entries.get(expected.key);
+    if (!entry
+      || expected.state !== "idle"
+      || expected.activeRequests !== 0
+      || expected.pinned
+      || expected.always
+      || this.residencyStates.has(expected.key)
+      || entry.activeRequests !== 0
+      || entry.pinned
+      || entry.always
+      || entry.state !== "warm"
+      || Date.parse(entry.lastUsedAt) !== expected.lastUsedAtMs
+      || this.residencyVersions.get(expected.key) !== expected.lifecycleVersion) {
+      return "changed";
+    }
+    this.residencyStates.set(expected.key, { state: "closing", at: this.now() });
+    this.bumpResidencyVersion(expected.key);
+    await this.deleteAsync(expected.key, "unload");
+    return "evicted";
+  }
+
   touch(entry: LoadedModel): void {
     const timestamp = this.now();
     entry.lastUsedAt = iso(timestamp);
     const expiresAt = expiresAtFor(timestamp, entry.keepAlive);
     entry.expiresAt = expiresAt ? iso(expiresAt) : null;
+    this.bumpResidencyVersion(entry.key);
   }
 
   cleanup(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     for (const entry of this.entries.values()) {
-      this.onRemove?.(entry, "cleanup");
-      this.removeListener?.(entry, "cleanup");
+      void this.invokeRemovalHooks(entry, "cleanup");
     }
     this.entries.clear();
+    this.residencyStates.clear();
+    this.residencyVersions.clear();
   }
 
   private expireIdle(): void {
@@ -152,15 +251,27 @@ export class ModelLifecycleManager {
   }
 
   private delete(key: string, reason: LifecycleRemoveReason): void {
+    void this.deleteAsync(key, reason);
+  }
+
+  private async deleteAsync(key: string, reason: LifecycleRemoveReason): Promise<void> {
     const timer = this.timers.get(key);
     if (timer) clearTimeout(timer);
     this.timers.delete(key);
     const entry = this.entries.get(key);
-    if (entry) {
-      this.onRemove?.(entry, reason);
-      this.removeListener?.(entry, reason);
-    }
     this.entries.delete(key);
+    this.residencyStates.delete(key);
+    this.residencyVersions.delete(key);
+    if (entry) await this.invokeRemovalHooks(entry, reason);
+  }
+
+  private async invokeRemovalHooks(entry: LoadedModel, reason: LifecycleRemoveReason): Promise<void> {
+    await this.onRemove?.(entry, reason);
+    await this.removeListener?.(entry, reason);
+  }
+
+  private bumpResidencyVersion(key: string): void {
+    this.residencyVersions.set(key, (this.residencyVersions.get(key) ?? 0) + 1);
   }
 }
 
@@ -187,6 +298,10 @@ export function parseKeepAliveMs(value: string): number | null {
 function expiresAtFor(timestamp: number, keepAlive: string): number | null {
   const duration = parseKeepAliveMs(keepAlive);
   return duration === null ? null : timestamp + duration;
+}
+
+function finiteNonnegative(value: number | undefined): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
 function iso(timestamp: number): string {

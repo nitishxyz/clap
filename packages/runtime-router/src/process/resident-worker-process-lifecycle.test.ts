@@ -165,7 +165,7 @@ describe.serial("resident worker lifecycle races", () => {
     const expiryWorker = expiryRegistry.getOrCreate("expiry", "llama", second.worker.modelPath);
     await expiryWorker.load();
     let now = Date.now();
-    const lifecycle = new ModelLifecycleManager(() => now, (entry) => expiryRegistry.shutdown(entry.key));
+    const lifecycle = new ModelLifecycleManager(() => now, (entry) => expiryRegistry.shutdownAsync(entry.key));
     const model: ResolvedModel = { id: "expiry", input: "expiry", backend: "llama", format: "gguf",
       modelPath: second.worker.modelPath, status: "available" };
     lifecycle.load(model, { keepAlive: "1s", worker: expiryWorker.info() });

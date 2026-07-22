@@ -1,7 +1,9 @@
 import { isGgufModel, llamaBackendStatus } from "@clap/runtime-llama";
 import { isMlxModelDirectorySync, mlxBackendStatus } from "@clap/runtime-mlx";
 
-export { ModelLifecycleManager, normalizeKeepAlive, parseKeepAliveMs, modelLifecycleKey } from "./lifecycle";
+export { ModelLifecycleManager, normalizeKeepAlive, parseKeepAliveMs, modelLifecycleKey,
+  type IdleEvictionResult, type LifecycleRemovalHook, type LifecycleResidencySnapshot,
+  type LifecycleResidencySnapshotOptions, type LifecycleResidencyState } from "./lifecycle";
 export { ResidentWorkerProcess, ResidentWorkerRegistry, type ResidentChatOptions, type ResidentChatResult, type ResidentUsage,
   type ResidentWorkerHandle } from "./resident";
 export type { CacheIdentity } from "@clap/worker-protocol";
