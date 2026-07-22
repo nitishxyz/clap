@@ -24,6 +24,7 @@ export type PhysicalCacheDomain = {
   tokenizer: string;
   contextAllocation: number;
   kvFormat: string;
+  unifiedKv?: boolean;
   layoutVersion: number;
 };
 
@@ -154,6 +155,7 @@ function derivePhysicalDomain(key: Uint8Array, physical: PhysicalCacheDomain): U
     tokenizer,
     String(physical.contextAllocation),
     kvFormat,
+    physical.unifiedKv === true ? "unified" : "split",
     String(physical.layoutVersion),
   ]);
 }

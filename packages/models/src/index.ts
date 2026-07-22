@@ -36,6 +36,8 @@ export type ResolvedModel = {
   backend: "llama" | "mlx";
   format: "gguf" | "mlx";
   modelPath?: string;
+  /** Immutable upstream revision when known; local artifacts use a content fallback in the server. */
+  revision?: string;
   alias?: ModelAlias;
   target?: AliasBackendTarget;
   status: "available" | "not_downloaded" | "unsupported" | "not_found";
@@ -506,6 +508,7 @@ function findCachedModel(model: string): ResolvedModel | undefined {
       backend: cached.backend,
       format: cached.format as "gguf" | "mlx",
       modelPath,
+      revision: cached.revision,
       status: "available",
     };
   }

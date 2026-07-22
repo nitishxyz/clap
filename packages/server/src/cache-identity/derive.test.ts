@@ -50,9 +50,9 @@ describe("cache identity derivation", () => {
         session: "session-99",
       },
       physical: {
-        fingerprint: "b18e8feeea0150d5dfb46d58abf61212f65d3ade3f22eaf255702a2d8b0f7874",
-        namespace: "37d89e4f01aeb4d83c701c31f207105880818a464228e884754a4bca115d9706",
-        namespaceId: 4024140329223369944n,
+        fingerprint: "5befd882f13033f62c62fd673e60b7758564412e14c6f18cbb799b541847ecb5",
+        namespace: "40d51ffb8e7b5c35e3a4519b9ce017396cc5c8d6c89a2c7652d087742b216329",
+        namespaceId: 4671675353754459189n,
       },
     });
     expect(allHex(identity).every((value) => /^[0-9a-f]{64}$/.test(value))).toBe(true);
@@ -114,6 +114,7 @@ describe("cache identity derivation", () => {
     ["tokenizer", { tokenizer: "tok-v3" }],
     ["context allocation", { contextAllocation: 4096 }],
     ["KV format", { kvFormat: "f16" }],
+    ["unified KV", { unifiedKv: true }],
     ["layout version", { layoutVersion: 4 }],
   ] satisfies Array<[string, Partial<PhysicalCacheDomain>]>)
   ("binds the physical namespace to %s", (_name, change) => {

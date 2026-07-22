@@ -94,6 +94,7 @@ export const ClapModelSchema = z.object({
   repo: z.string().optional(),
   file: z.string().optional(),
   localPath: z.string().optional(),
+  revision: z.string().optional(),
   pull: z.object({ model: z.string(), file: z.string().optional(), backend: z.enum(["gguf", "mlx"]).optional() }).optional(),
   reason: z.string().optional(),
 });
