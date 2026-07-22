@@ -110,6 +110,9 @@ if(BUILD_TESTING)
     "${CLAP_LLAMA_VENDOR_DIR}/vendor"
   )
   target_link_libraries(clap-llama-cache-identity PRIVATE llama clap-cache-ffi)
+  target_compile_definitions(clap-llama-cache-identity PRIVATE
+    CLAP_CACHE_IDENTITY_VECTOR_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../packages/worker-protocol/fixtures/v1/cache-identity-vector.json"
+  )
   add_test(NAME clap-llama-cache-identity COMMAND clap-llama-cache-identity)
 
   add_executable(clap-llama-worker

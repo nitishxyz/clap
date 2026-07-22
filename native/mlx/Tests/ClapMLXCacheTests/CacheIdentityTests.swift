@@ -10,13 +10,15 @@ struct CacheIdentityTests {
 
   @Test("shared vector reduces exact digests and enums")
   func sharedVector() throws {
-    let input = try decodeTestOpaqueIdentity(testOpaqueIdentityValue(backend: "llama"))
+    let fixture = try sharedCacheIdentityFixture()
+    let input = try decodeTestOpaqueIdentity(fixture["identity"] as! [String: Any])
+    let expected = fixture["expected"] as! [String: String]
     let identity = try CacheIdentity(input: input, expected: llamaPhysical)
-    #expect(identity.tenant == 0x6f64c827dbe30bac)
-    #expect(identity.project == 0xf1482819163f613f)
-    #expect(identity.harness == 0x94bdbacbdf215f56)
-    #expect(identity.agent == 0xd844f6c06cc42e03)
-    #expect(identity.session == 0xf269f6ff4a9cae43)
+    #expect(identity.tenant == UInt64(expected["tenant_u64_hex"]!, radix: 16)!)
+    #expect(identity.project == UInt64(expected["project_u64_hex"]!, radix: 16)!)
+    #expect(identity.harness == UInt64(expected["harness_u64_hex"]!, radix: 16)!)
+    #expect(identity.agent == UInt64(expected["agent_u64_hex"]!, radix: 16)!)
+    #expect(identity.session == UInt64(expected["session_u64_hex"]!, radix: 16)!)
     #expect(identity.scope == UInt32(CC_SCOPE_SESSION))
     #expect(identity.priority == UInt32(CC_PRIORITY_BACKGROUND))
     #expect(identity.sideRequest)

@@ -7,6 +7,7 @@ import {
   WORKER_EVENT_TYPES,
   WORKER_PROTOCOL_VERSION,
   WORKER_REQUEST_TYPES,
+  type CacheIdentity,
   decodeWorkerEvent,
   decodeWorkerRequest,
   encodeWorkerEvent,
@@ -21,6 +22,18 @@ async function fixtureLines(kind: "requests" | "events") {
 }
 
 describe("worker protocol v1 fixtures", () => {
+  test("parses the canonical cross-backend cache identity vector", async () => {
+    const fixture = JSON.parse(await readFile(join(fixtureRoot, "cache-identity-vector.json"), "utf8"));
+    const decoded = decodeWorkerRequest({
+      protocol: 1, type: "generate", request_id: "shared_vector", prompt: "hello",
+      cache_identity: fixture.identity,
+    });
+    const identity = decoded.cache_identity as CacheIdentity;
+    expect(identity.namespace_id).toBe(fixture.expected.namespace_u64);
+    expect(identity.tenant_root.slice(0, 16)).toBe(fixture.expected.tenant_u64_hex);
+    expect(identity.session_fingerprint?.slice(0, 16)).toBe(fixture.expected.session_u64_hex);
+  });
+
   test("parses all six request fixtures", async () => {
     const requests = (await fixtureLines("requests")).map(decodeWorkerRequest);
     expect(requests).toHaveLength(6);

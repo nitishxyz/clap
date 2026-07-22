@@ -347,7 +347,8 @@ describe("clap server", () => {
       const chat = (authorization?: string) => app.request("/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
-        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hello" }] }),
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hello" }],
+          cache: { tenant: "spoofed-shared-tenant" } }),
       });
       expect((await chat(`Bearer ${firstKey}`)).status).toBe(200);
       expect((await chat(`Bearer ${secondKey}`)).status).toBe(200);
@@ -389,9 +390,14 @@ describe("clap server", () => {
         .filter((request) => request.type === "generate");
       expect(envelopes).toHaveLength(6);
       expect(envelopes[0].cache_identity.tenant_root).not.toBe(envelopes[1].cache_identity.tenant_root);
+      expect(envelopes[0].cache_identity.display.namespace).toBe("spoofed-shared-tenant");
+      expect(envelopes[1].cache_identity.display.namespace).toBe("spoofed-shared-tenant");
+      expect(envelopes[0].cache_identity.namespace_fingerprint).not.toBe(envelopes[1].cache_identity.namespace_fingerprint);
       expect(envelopes[2].cache_identity).toEqual(envelopes[3].cache_identity);
       expect(envelopes[4].cache_identity.generation).not.toBe(envelopes[3].cache_identity.generation);
+      expect(envelopes[4].cache_identity.namespace_fingerprint).not.toBe(envelopes[3].cache_identity.namespace_fingerprint);
       expect(envelopes[5].cache_identity.generation).not.toBe(envelopes[4].cache_identity.generation);
+      expect(envelopes[5].cache_identity.namespace_fingerprint).not.toBe(envelopes[4].cache_identity.namespace_fingerprint);
       expect(envelopes.every((request) => request.cache_identity.scope === "tenant")).toBe(true);
       expect(JSON.stringify(envelopes)).not.toContain(firstKey);
       expect(JSON.stringify(envelopes)).not.toContain(secondKey);

@@ -32,6 +32,18 @@ for (const path of opaqueIdentitySources) {
   }
 }
 
+const sharedFixture = "packages/worker-protocol/fixtures/v1/cache-identity-vector.json";
+const consumers = [
+  "packages/worker-protocol/src/validation.test.ts",
+  "native/llama/CMakeLists.txt",
+  "native/mlx/Tests/ClapMLXCacheTests/TestCacheIdentity.swift",
+];
+if (!(await Bun.file(resolve(root, sharedFixture)).exists())) violations.push(`${sharedFixture}: missing shared vector`);
+for (const path of consumers) {
+  const text = await Bun.file(resolve(root, path)).text();
+  if (!text.includes("cache-identity-vector.json")) violations.push(`${path}: does not consume shared identity vector`);
+}
+
 if (violations.length > 0) {
   console.error("Cache identity security check failed:");
   for (const violation of violations) console.error(`  ${violation}`);

@@ -1,6 +1,18 @@
 import ClapMLXCache
 import Foundation
 
+func sharedCacheIdentityFixture() throws -> [String: Any] {
+  var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+  while !FileManager.default.fileExists(atPath: root.appendingPathComponent("package.json").path) {
+    let parent = root.deletingLastPathComponent()
+    guard parent.path != root.path else { throw CocoaError(.fileNoSuchFile) }
+    root = parent
+  }
+  let url = root.appendingPathComponent(
+    "packages/worker-protocol/fixtures/v1/cache-identity-vector.json")
+  return try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+}
+
 let testPhysicalCacheDescriptor = PhysicalCacheDescriptor(backend: "mlx",
   contextAllocation: 8192, kvFormat: "q8_0", unifiedKV: false, layoutVersion: 1)
 
