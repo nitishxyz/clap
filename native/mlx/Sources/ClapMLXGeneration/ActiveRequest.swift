@@ -28,6 +28,7 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
   public var generatedCount = 0
   public var finishReason = "stop"
   public private(set) var status: RequestStatus = .active
+  public private(set) var finalized = false
   public var anchorPlanted: Set<Int> = []
   public var materializedAnchors: Set<Int> = []
   public var schedulerWaitMs = 0.0
@@ -55,6 +56,44 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
     guard terminal.isTerminal, status == .active else { return false }
     status = terminal
     return true
+  }
+
+  public func finalize(using finalizer: GenerationFinalizer<Cache>) -> RequestFinalization? {
+    guard !finalized else { return nil }
+    finalized = true
+    if status == .active { _ = transition(to: .completed) }
+    finalizer.finalizeCache(slotIndex, slot, &caches, cacheSnapshots, promptTokens,
+      fedTokens, sampledTokens, generatedCount, failed)
+    guard !failed else { return .failure(RequestFailure()) }
+    var outputs: [CompletionOutput] = []
+    if streaming && !cancelled && emitted < collected.count {
+      let tail = String(collected.dropFirst(emitted))
+      if !tail.isEmpty { outputs.append(.token(tail)) }
+      emitted = collected.count
+    }
+    if !streaming && !collected.isEmpty && !cancelled {
+      outputs.append(.content(collected))
+    }
+    return .completion(RequestCompletion(status: status,
+      finishReason: cancelled ? "cancel" : finishReason, content: collected,
+      generatedTokens: generatedCount, outputs: outputs,
+      usage: CompletionUsageFacts(promptTokens: promptTokens.count,
+        completionTokens: generatedCount),
+      timing: CompletionTimingFacts(receivedToAdmittedMs: receivedToAdmittedMs,
+        templateTokenizeMs: templateTokenizeMs, coordinatorPlanMs: coordinatorPlanMs,
+        coordinatorApplyMs: coordinatorApplyMs, schedulerWaitMs: schedulerWaitMs,
+        cacheMaterializeMs: cacheMaterializeMs, prefillMs: prefillMs,
+        promptTokens: promptTokens.count, reusedTokens: reusedTokens,
+        prefillTokens: prefillTokens, prefillChunks: prefillChunks,
+        firstDecodeMs: firstDecodeMs, firstEmitMs: firstEmitMs),
+      cache: CompletionCacheFacts(identity: cacheIdentity, decision: cacheDecision,
+        candidates: cacheCandidates, evictions: cacheEvictions, fallback: cacheFallback,
+        slotIndex: slotIndex, promptTokens: promptTokens, reusedTokens: reusedTokens,
+        reuseKind: reuseKind, reuseScope: reuseScope, anchorPlantAt: anchorPlantAt,
+        resolvedBoundaries: resolvedBoundaries, boundaryTelemetry: boundaryTelemetry,
+        materializedAnchors: materializedAnchors,
+        automaticCheckpointProposed: automaticCheckpointProposed,
+        automaticCheckpointDeduped: automaticCheckpointDeduped)))
   }
 
   public var completed: Bool {

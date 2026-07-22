@@ -3,5 +3,4 @@ public enum GenerationEvent: Equatable, Sendable {
   case token(String)
   case content(String)
   case error(String)
-  case completed(RequestCompletion)
 }

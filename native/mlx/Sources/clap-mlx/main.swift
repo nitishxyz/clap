@@ -167,58 +167,55 @@ func main() async {
     var nextAdmissionOrder: UInt64 = 0
 
     func finalize(_ req: ActiveRequest) {
-      CacheExecutor.finalize(coordinator: cacheCoordinator, registry: retainedRegistry,
-        slotIndex: req.slotIndex, slot: req.slot, caches: &req.caches,
-        snapshots: req.cacheSnapshots, promptTokens: req.promptTokens,
-        fedTokens: req.fedTokens, sampledTokens: req.sampledTokens,
-        generatedCount: req.generatedCount, failed: req.failed,
-        operations: cacheOperations())
-      if req.failed {
-        return
+      let result = req.finalize(using: GenerationFinalizer { slotIndex, slot, caches,
+        snapshots, promptTokens, fedTokens, sampledTokens, generatedCount, failed in
+        CacheExecutor.finalize(coordinator: cacheCoordinator, registry: retainedRegistry,
+          slotIndex: slotIndex, slot: slot, caches: &caches, snapshots: snapshots,
+          promptTokens: promptTokens, fedTokens: fedTokens, sampledTokens: sampledTokens,
+          generatedCount: generatedCount, failed: failed, operations: cacheOperations())
+      })
+      guard case .completion(let completion)? = result else { return }
+      for output in completion.outputs {
+        switch output {
+        case .token(let token): emit(id: req.id, token: token)
+        case .content(let content): emit(id: req.id, content: content)
+        }
       }
-      // Flush any text held back for stop-sequence matching.
-      if req.streaming && !req.cancelled && req.emitted < req.collected.count {
-        let tail = String(req.collected.dropFirst(req.emitted))
-        if !tail.isEmpty { emit(id: req.id, token: tail) }
-        req.emitted = req.collected.count
-      }
-      if !req.streaming && !req.collected.isEmpty && !req.cancelled {
-        emit(id: req.id, content: req.collected)
-      }
-      let usage = workerUsage(promptTokens: req.promptTokens.count,
-        completionTokens: req.generatedCount)
+      let usage = workerUsage(promptTokens: completion.usage.promptTokens,
+        completionTokens: completion.usage.completionTokens)
+      let facts = completion.timing
       let timing = workerTiming(TimingTelemetryFacts(
-        receivedToAdmittedMs: req.receivedToAdmittedMs,
-        templateTokenizeMs: req.templateTokenizeMs,
-        coordinatorPlanMs: req.coordinatorPlanMs,
-        coordinatorApplyMs: req.coordinatorApplyMs,
-        schedulerWaitMs: req.schedulerWaitMs,
-        cacheMaterializeMs: req.cacheMaterializeMs,
-        prefillMs: req.prefillMs,
-        promptTokens: req.promptTokens.count,
-        reusedTokens: req.reusedTokens,
-        prefillTokens: req.prefillTokens,
-        prefillChunks: req.prefillChunks,
-        firstDecodeMs: req.firstDecodeMs,
-        firstEmitMs: req.firstEmitMs))
+        receivedToAdmittedMs: facts.receivedToAdmittedMs,
+        templateTokenizeMs: facts.templateTokenizeMs,
+        coordinatorPlanMs: facts.coordinatorPlanMs,
+        coordinatorApplyMs: facts.coordinatorApplyMs,
+        schedulerWaitMs: facts.schedulerWaitMs,
+        cacheMaterializeMs: facts.cacheMaterializeMs,
+        prefillMs: facts.prefillMs,
+        promptTokens: facts.promptTokens,
+        reusedTokens: facts.reusedTokens,
+        prefillTokens: facts.prefillTokens,
+        prefillChunks: facts.prefillChunks,
+        firstDecodeMs: facts.firstDecodeMs,
+        firstEmitMs: facts.firstEmitMs))
+      let cache = completion.cache
       let cacheInfo = WorkerCache(
-        hit: req.reusedTokens > 0,
-        reused_tokens: req.reusedTokens,
-        reuse_kind: req.reuseKind,
-        reuse_scope: req.reuseScope,
-        side_request: req.cacheIdentity.sideRequest,
-        namespace: req.cacheIdentity.exportedNamespace,
-        donor_slot: req.cacheDecision?.donor,
-        target_slot: req.slotIndex,
-        evicted_slots: req.cacheEvictions,
-        decision_us: req.cacheDecision?.decisionUs ?? 0,
-        planned_reuse_tokens: req.cacheDecision?.plannedReuseTokens ?? req.reusedTokens,
-        realized_reuse_tokens: req.cacheDecision?.realizedReuseTokens ?? req.reusedTokens,
-        fallback: req.cacheFallback,
-        miss_reason: req.reusedTokens > 0 ? nil : "no_shared_prefix",
-        candidates: req.cacheCandidates.map { candidate in
-          WorkerCacheCandidate(
-            slot: candidate.slot, generation: candidate.generation,
+        hit: cache.reusedTokens > 0,
+        reused_tokens: cache.reusedTokens,
+        reuse_kind: cache.reuseKind,
+        reuse_scope: cache.reuseScope,
+        side_request: cache.identity.sideRequest,
+        namespace: cache.identity.exportedNamespace,
+        donor_slot: cache.decision?.donor,
+        target_slot: cache.slotIndex,
+        evicted_slots: cache.evictions,
+        decision_us: cache.decision?.decisionUs ?? 0,
+        planned_reuse_tokens: cache.decision?.plannedReuseTokens ?? cache.reusedTokens,
+        realized_reuse_tokens: cache.decision?.realizedReuseTokens ?? cache.reusedTokens,
+        fallback: cache.fallback,
+        miss_reason: cache.reusedTokens > 0 ? nil : "no_shared_prefix",
+        candidates: cache.candidates.map { candidate in
+          WorkerCacheCandidate(slot: candidate.slot, generation: candidate.generation,
             state: cacheCandidateState(candidate.state),
             shared_prefix_tokens: candidate.sharedPrefixTokens,
             namespace_compatible: candidate.namespaceCompatible,
@@ -233,38 +230,36 @@ func main() async {
             eligible: candidate.eligible, selected: candidate.selected,
             rejection: cacheCandidateRejection(candidate.rejection))
         },
-        prompt_token_hash: tokenFingerprint(req.promptTokens, count: req.promptTokens.count),
-        prompt_token_count: req.promptTokens.count,
-        stable_boundary_token_hash: req.materializedAnchors.max().map {
-          tokenFingerprint(req.promptTokens, count: $0)
+        prompt_token_hash: tokenFingerprint(cache.promptTokens, count: cache.promptTokens.count),
+        prompt_token_count: cache.promptTokens.count,
+        stable_boundary_token_hash: cache.materializedAnchors.max().map {
+          tokenFingerprint(cache.promptTokens, count: $0)
         },
-        stable_boundary_token_count: req.materializedAnchors.max() ?? 0,
-        stable_boundary_kind: req.materializedAnchors.isEmpty ? nil : "prompt",
-        automatic_checkpoint_proposed: req.automaticCheckpointProposed,
-        automatic_checkpoint_authorized: req.anchorPlantAt.filter {
-          req.resolvedBoundaries[$0]?.kind == "automatic_token"
+        stable_boundary_token_count: cache.materializedAnchors.max() ?? 0,
+        stable_boundary_kind: cache.materializedAnchors.isEmpty ? nil : "prompt",
+        automatic_checkpoint_proposed: cache.automaticCheckpointProposed,
+        automatic_checkpoint_authorized: cache.anchorPlantAt.filter {
+          cache.resolvedBoundaries[$0]?.kind == "automatic_token"
         }.count,
-        automatic_checkpoint_materialized: req.materializedAnchors.filter {
-          req.resolvedBoundaries[$0]?.kind == "automatic_token"
+        automatic_checkpoint_materialized: cache.materializedAnchors.filter {
+          cache.resolvedBoundaries[$0]?.kind == "automatic_token"
         }.count,
-        automatic_checkpoint_deduped: req.automaticCheckpointDeduped,
-        automatic_checkpoint_skipped: max(0, req.automaticCheckpointProposed
-          - req.automaticCheckpointDeduped - req.anchorPlantAt.filter {
-            req.resolvedBoundaries[$0]?.kind == "automatic_token"
+        automatic_checkpoint_deduped: cache.automaticCheckpointDeduped,
+        automatic_checkpoint_skipped: max(0, cache.automaticCheckpointProposed
+          - cache.automaticCheckpointDeduped - cache.anchorPlantAt.filter {
+            cache.resolvedBoundaries[$0]?.kind == "automatic_token"
           }.count),
-        stable_boundaries: req.boundaryTelemetry.map { boundary in
-          return WorkerCacheBoundary(
-            token_hash: boundary.tokenCount.map { tokenFingerprint(req.promptTokens, count: $0) },
-            token_count: boundary.tokenCount,
-            kind: boundary.kind,
-            label: boundary.label,
-            requested: boundary.requested,
-            status: boundary.status,
+        stable_boundaries: cache.boundaryTelemetry.map { boundary in
+          WorkerCacheBoundary(
+            token_hash: boundary.tokenCount.map { tokenFingerprint(cache.promptTokens, count: $0) },
+            token_count: boundary.tokenCount, kind: boundary.kind, label: boundary.label,
+            requested: boundary.requested, status: boundary.status,
             skip_reason: boundary.skipReason,
-            materialized: boundary.tokenCount.map { req.materializedAnchors.contains($0) })
-        }
-      )
-      emit(id: req.id, done: true, cancelled: req.cancelled ? true : nil, finishReason: req.cancelled ? "cancel" : req.finishReason, usage: usage, cache: cacheInfo, timing: timing)
+            materialized: boundary.tokenCount.map { cache.materializedAnchors.contains($0) })
+        })
+      emit(id: req.id, done: true,
+        cancelled: completion.status == .cancelled ? true : nil,
+        finishReason: completion.finishReason, usage: usage, cache: cacheInfo, timing: timing)
     }
 
     func prepareRequest(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64) async -> ActiveRequest? {
@@ -505,13 +500,10 @@ func main() async {
           emit(id: req.id, content: content)
         case .error(let error):
           emit(id: req.id, error: error)
-        case .completed:
-          break
         }
       }
     }
 
-    // Returns true when the worker should shut down.
     // Returns true when the worker should shut down.
     func handleLine(_ line: String) async -> Bool {
       guard !line.isEmpty, let data = line.data(using: .utf8),
