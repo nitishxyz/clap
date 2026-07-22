@@ -11,6 +11,10 @@ import { createServer, idleTimeoutFromEnv, inferParserFamilies, normalizeCacheIn
 // Tests mutate fake model cache directories directly; disable the model list
 // memo so every request observes the current directory state.
 process.env.CLAP_MODEL_LIST_TTL_MS = "0";
+// Fixture artifacts are intentionally tiny; remove machine-dependent
+// production headroom so admission tests do not depend on host memory pressure.
+process.env.CLAP_MODEL_OS_HEADROOM_BYTES = "0";
+process.env.CLAP_MODEL_RUNTIME_HEADROOM_BYTES = "0";
 
 const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
 

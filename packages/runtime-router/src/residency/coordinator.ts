@@ -50,6 +50,7 @@ export interface ResidencyCoordinatorDependencies {
   readonly osHeadroomBytes?: number;
   readonly runtimeHeadroomBytes?: number;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly onDecision?: (decision: LoadAdmissionDecision, model: ResidencyModelDescriptor) => void;
 }
 
 export interface ResidencyLoadOperation<T> {
@@ -161,6 +162,7 @@ export class ResidencyCoordinator {
         evictedModelKeys: Object.freeze([...evictedModelKeys]),
         decidedAtMs: this.now(),
       });
+      this.dependencies.onDecision?.(decision, model);
       this.dependencies.lifecycle.setResidencyTransition(model.modelKey, "loading");
       loadStarted = true;
       loaded = await operation.performLoad();

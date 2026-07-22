@@ -51,7 +51,8 @@ import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleGpuUsage } from "./gpu-usage";
-import { cpuCoreCount, sampleProcessUsage, systemCpuPercent, systemMemoryBytes, systemMemoryUsedBytes } from "./process-usage";
+import { cpuCoreCount, processRssBytes, sampleProcessUsage, systemCpuPercent, systemMemoryBytes,
+  systemMemorySnapshot, systemMemoryUsedBytes } from "./process-usage";
 import { webAsset } from "./web-assets";
 
 const startedAt = Date.now();
@@ -195,17 +196,27 @@ export function createServer(
     event.serverLaunchId !== metrics.serverLaunchId
     || (event.workerLaunchId !== undefined && !warm.has(event.workerLaunchId));
   residents.memorySnapshot = async (pids) => {
-    const [usedBytes, processUsage] = await Promise.all([
-      systemMemoryUsedBytes(),
+    const [memory, processUsage] = await Promise.all([
+      systemMemorySnapshot(),
       sampleProcessUsage(pids),
     ]);
-    const physicalMemoryBytes = systemMemoryBytes();
     return {
-      physicalMemoryBytes,
-      availableMemoryBytes: Math.max(0, physicalMemoryBytes - usedBytes),
+      physicalMemoryBytes: memory.physicalBytes,
+      availableMemoryBytes: memory.availableBytes,
       residentBytesByPid: new Map([...processUsage].map(([pid, usage]) => [pid, usage.rssBytes])),
     };
   };
+  residents.rssSampler = processRssBytes;
+  residents.configureResidency({
+    lifecycle,
+    env: process.env,
+    osHeadroomBytes: configuredMemoryBytes("CLAP_MODEL_OS_HEADROOM_BYTES", 512 * 1024 ** 2),
+    runtimeHeadroomBytes: configuredMemoryBytes("CLAP_MODEL_RUNTIME_HEADROOM_BYTES", 512 * 1024 ** 2),
+    policy: { minimumHeadroomBytes: configuredMemoryBytes("CLAP_MODEL_MINIMUM_HEADROOM_BYTES", 1024 ** 3) },
+    onDecision: (decision, model) => metrics.event("load",
+      `model admission ${decision.reason} requested=${decision.requested.bytes} available=${decision.available.bytes} evicted=${decision.evictedModelKeys.length}`,
+      { model: model.modelId }),
+  });
   residents.workerEnv = (modelPath) => {
     let modelEnvironment: Record<string, string> = {};
     for (const modelId of Object.keys(config.models)) {
@@ -236,10 +247,15 @@ export function createServer(
             continue;
           }
           await assertResidentModelPath(resolved.model);
-          const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend,
-            resolved.model.modelPath ?? resolved.model.input, { modelId: resolved.model.id });
-          const info = await worker.load();
-          const model = lifecycle.load(resolved.model, { keepAlive, worker: info });
+          const model = lifecycle.load(resolved.model, { keepAlive });
+          const worker = residents.getOrCreate(model.key, resolved.model.backend,
+            resolved.model.modelPath ?? resolved.model.input, workerDescriptor(resolved.model));
+          try {
+            model.worker = await worker.load();
+          } catch (error) {
+            lifecycle.unload(resolved.model);
+            throw error;
+          }
           metrics.event("load", `${model.id} warmed on boot (keep-alive ${model.keepAlive})`, { model: model.id });
         } catch (error) {
           metrics.event("error", `warm-on-boot failed for ${modelId}: ${error instanceof Error ? error.message : error}`, { model: modelId });
@@ -671,17 +687,19 @@ export function createServer(
     const resolved = resolveAvailableModel(request.model, request.backend);
     if ("response" in resolved) return resolved.response(c);
     await assertResidentModelPath(resolved.model);
-    const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend,
-      resolved.model.modelPath ?? resolved.model.input, { modelId: resolved.model.id });
+    const model = lifecycle.load(resolved.model, { keepAlive: request.keepAlive });
+    const worker = residents.getOrCreate(model.key, resolved.model.backend,
+      resolved.model.modelPath ?? resolved.model.input, workerDescriptor(resolved.model));
     let info;
     try {
       info = await worker.load();
     } catch (error) {
+      lifecycle.unload(resolved.model);
       return c.json(ErrorResponseSchema.parse({
         error: { message: error instanceof Error ? error.message : String(error), type: "backend_error", code: "resident_worker_error" },
       }), 503);
     }
-    const model = lifecycle.load(resolved.model, { keepAlive: request.keepAlive, worker: info });
+    model.worker = info;
     metrics.event("load", `${model.id} loaded (keep-alive ${model.keepAlive})`, { model: model.id });
     return c.json(LoadModelResponseSchema.parse({ model }));
   });
@@ -953,6 +971,8 @@ export function createServer(
       throw error;
     }
     try {
+      residents.getOrCreate(lifecycleKey(model), model.backend, model.modelPath ?? model.input,
+        workerDescriptor(model));
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(model);
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
@@ -1469,6 +1489,31 @@ export function inferParserFamilies(markerText: string, nameText: string): strin
   add("gemma", /functiongemma/, /gemma/);
   add("hermes", /<tool_call>/, /hermes|xlam|functionary/);
   return hints;
+}
+
+function workerDescriptor(model: ResolvedModel) {
+  return {
+    modelId: model.id,
+    revision: model.revision,
+    artifactBytes: model.artifactBytes,
+    architecture: model.architecture,
+    modelType: model.modelType,
+    quantization: model.quantization,
+    context: model.context,
+    configuredContext: model.configuredContext ?? configuredContextForBackend(model.backend),
+    kv: model.kv,
+    cacheBudget: model.cacheBudget,
+  };
+}
+
+function configuredMemoryBytes(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? Math.ceil(value) : fallback;
+}
+
+function configuredContextForBackend(backend: ResolvedModel["backend"]): number | undefined {
+  const value = Number(process.env[backend === "mlx" ? "CLAP_MLX_CONTEXT" : "CLAP_LLAMA_CONTEXT"]);
+  return Number.isSafeInteger(value) && value > 0 ? value : 4_096;
 }
 
 async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity) {

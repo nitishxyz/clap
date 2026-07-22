@@ -1,6 +1,7 @@
 import { cpus, freemem, totalmem } from "node:os";
 
 export type ProcessUsage = { rssBytes: number; cpuPercent: number };
+export type SystemMemorySnapshot = { physicalBytes: number; usedBytes: number; availableBytes: number };
 
 let cache: { at: number; usage: Map<number, ProcessUsage> } | undefined;
 
@@ -37,6 +38,18 @@ export async function sampleProcessUsage(pids: number[]): Promise<Map<number, Pr
 
 export function systemMemoryBytes(): number {
   return totalmem();
+}
+
+export async function systemMemorySnapshot(): Promise<SystemMemorySnapshot> {
+  const physicalBytes = systemMemoryBytes();
+  const usedBytes = Math.min(physicalBytes, Math.max(0, await systemMemoryUsedBytes()));
+  return { physicalBytes, usedBytes, availableBytes: Math.max(0, physicalBytes - usedBytes) };
+}
+
+export async function processRssBytes(pid: number): Promise<number | undefined> {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  const rssBytes = (await sampleProcessUsage([pid])).get(pid)?.rssBytes;
+  return rssBytes !== undefined && Number.isFinite(rssBytes) && rssBytes > 0 ? rssBytes : undefined;
 }
 
 let memCache: { at: number; used: number } | undefined;

@@ -405,8 +405,10 @@ export function resolveModel(model: string, backend?: BackendOverride): Resolved
   if (isGgufModel(model) || existsSync(model)) {
     const cached = findCachedModel(model);
     if (cached) return cached;
-    if (isGgufModel(model)) return { id: model, input: model, backend: "llama", format: "gguf", status: "available", modelPath: model };
-    if (isMlxModelDirectorySync(model)) return { id: model, input: model, backend: "mlx", format: "mlx", status: "available", modelPath: model };
+    if (isGgufModel(model)) return { id: model, input: model, backend: "llama", format: "gguf", status: "available",
+      modelPath: model, artifactBytes: modelPathSizeBytes(model) };
+    if (isMlxModelDirectorySync(model)) return { id: model, input: model, backend: "mlx", format: "mlx", status: "available",
+      modelPath: model, artifactBytes: modelPathSizeBytes(model) };
   }
 
   const cachedRepo = findCachedRepoModel(model, backend);
@@ -433,6 +435,7 @@ export function resolveModel(model: string, backend?: BackendOverride): Resolved
       backend: target.backend === "mlx" ? "mlx" : "llama",
       format: target.backend === "mlx" ? "mlx" : "gguf",
       modelPath: cachedPath,
+      artifactBytes: modelPathSizeBytes(cachedPath),
       alias,
       target,
       status: "available",
@@ -448,6 +451,7 @@ export function resolveModel(model: string, backend?: BackendOverride): Resolved
         backend: fallbackTarget.backend === "mlx" ? "mlx" : "llama",
         format: fallbackTarget.backend === "mlx" ? "mlx" : "gguf",
         modelPath: fallbackCachedPath,
+        artifactBytes: modelPathSizeBytes(fallbackCachedPath),
         alias,
         target: fallbackTarget,
         status: "available",
@@ -544,6 +548,7 @@ function findCachedRepoModel(model: string, backend?: BackendOverride): Resolved
     backend: cached.backend,
     format: cached.format,
     modelPath: cached.modelPath,
+    artifactBytes: modelPathSizeBytes(cached.modelPath),
     target: {
       backend: cached.format,
       repo: cached.repo,
