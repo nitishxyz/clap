@@ -53,6 +53,7 @@ set(CLAP_LLAMA_SOURCES
   src/protocol.cpp
   src/sampling.cpp
   src/stop-buffer.cpp
+  src/telemetry.cpp
 )
 
 set(CLAP_LLAMA_HEADERS
@@ -60,6 +61,7 @@ set(CLAP_LLAMA_HEADERS
   include/clap/llama/protocol.h
   include/clap/llama/sampling.h
   include/clap/llama/stop-buffer.h
+  include/clap/llama/telemetry.h
 )
 
 add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
@@ -117,11 +119,25 @@ if(BUILD_TESTING)
   target_link_libraries(clap-llama-sampling PRIVATE llama)
   add_test(NAME clap-llama-sampling COMMAND clap-llama-sampling)
 
+  add_executable(clap-llama-telemetry
+    tests/telemetry.test.cpp
+    src/telemetry.cpp
+  )
+  target_include_directories(clap-llama-telemetry PRIVATE
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_compile_definitions(clap-llama-telemetry PRIVATE
+    CLAP_LLAMA_TELEMETRY_FIXTURE="${CLAP_ROOT}/packages/runtime-router/fixtures/legacy-worker-protocol/llama-events.jsonl"
+  )
+  add_test(NAME clap-llama-telemetry COMMAND clap-llama-telemetry)
+
   add_custom_target(clap-llama-tests DEPENDS
     clap-llama-characterization
     clap-llama-environment
     clap-llama-protocol
     clap-llama-sampling
     clap-llama-stop-buffer
+    clap-llama-telemetry
   )
 endif()

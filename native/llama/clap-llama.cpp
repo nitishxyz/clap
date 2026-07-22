@@ -5,6 +5,7 @@
 #include "clap/llama/protocol.h"
 #include "clap/llama/sampling.h"
 #include "clap/llama/stop-buffer.h"
+#include "clap/llama/telemetry.h"
 #include "native-characterization.h"
 #include "stable-boundary.h"
 
@@ -311,58 +312,42 @@ json retention_telemetry(const LoadedLlama& loaded, std::size_t active, std::siz
     retained_anchors = retention.anchor_slots;
     evictions = telemetry.evictions;
   }
-  return json{
-    {"max_active", loaded.max_active},
-    {"queued", queued},
-    {"previous_max_active", loaded.previous_max_active > 0
-        ? json(loaded.previous_max_active) : json(nullptr)},
-    {"last_adjustment_reason", loaded.last_adjustment_reason.empty()
-        ? json(nullptr) : json(loaded.last_adjustment_reason)},
-    {"last_adjustment_at", loaded.last_adjustment_at.empty()
-        ? json(nullptr) : json(loaded.last_adjustment_at)},
-    {"retained_growth_reserve_bytes", loaded.retained_growth_reserve_bytes},
-    {"global_resident_memory_bytes", loaded.global_resident_memory_bytes > 0
-        ? json(loaded.global_resident_memory_bytes) : json(nullptr)},
-    {"pressure_state", loaded.pressure_state.empty()
-        ? json(nullptr) : json(loaded.pressure_state)},
-    {"active_policy", {
-      {"mode", loaded.active_policy.mode},
-      {"selected_max", loaded.active_policy.selected_max},
-      {"backend_ceiling", loaded.active_policy.backend_ceiling},
-      {"hardware_ceiling", loaded.active_policy.hardware_ceiling},
-      {"model_ceiling", loaded.active_policy.model_ceiling},
-      {"memory_ceiling", loaded.active_policy.memory_ceiling},
-      {"reason", loaded.active_policy.reason},
-      {"inputs", {
-        {"startup_available_bytes", loaded.startup_available_bytes > 0
-            ? json(loaded.startup_available_bytes) : json(nullptr)},
-        {"model_file_bytes", loaded.model_file_bytes > 0
-            ? json(loaded.model_file_bytes) : json(nullptr)},
-        {"context_capacity", loaded.backend_allocation_cap},
-        {"context_ceiling", loaded.active_policy.context_ceiling},
-        {"per_active_reserve_cells", loaded.active_policy.per_active_reserve_cells},
-        {"per_active_reserve_bytes", loaded.active_policy.per_active_reserve_bytes},
-        {"processor_count", std::max(1u, std::thread::hardware_concurrency())},
-        {"hybrid_or_recurrent", loaded.hybrid},
-      }},
-    }},
-    {"active", active},
-    {"retained_total", retained_total},
-    {"retained_sessions", retained_sessions},
-    {"retained_anchors", retained_anchors},
-    // Byte pressure is intentionally disabled: pinned llama.cpp has no public
-    // authoritative KV byte or used/free-cell telemetry.
-    {"retained_bytes", 0}, {"session_bytes", 0}, {"anchor_bytes", 0},
-    {"budget_bytes", 0}, {"high_watermark_bytes", 0}, {"low_watermark_bytes", 0},
-    {"under_pressure", false},
-    {"hard_ceiling", loaded.retained_max},
-    {"eviction_reason", loaded.last_eviction_reason.empty()
-        ? json(nullptr) : json(loaded.last_eviction_reason)},
-    {"eviction_count", evictions},
-    {"physical_cell_capacity", loaded.backend_allocation_cap},
-    {"physical_cells_used", nullptr},
-    {"physical_cells_free", nullptr},
+  const clap::llama::RetentionTelemetrySnapshot snapshot{
+    loaded.max_active,
+    queued,
+    loaded.previous_max_active,
+    loaded.last_adjustment_reason,
+    loaded.last_adjustment_at,
+    loaded.retained_growth_reserve_bytes,
+    loaded.global_resident_memory_bytes,
+    loaded.pressure_state,
+    {
+      loaded.active_policy.mode,
+      loaded.active_policy.selected_max,
+      loaded.active_policy.backend_ceiling,
+      loaded.active_policy.hardware_ceiling,
+      loaded.active_policy.model_ceiling,
+      loaded.active_policy.memory_ceiling,
+      loaded.active_policy.reason,
+      loaded.startup_available_bytes,
+      loaded.model_file_bytes,
+      loaded.backend_allocation_cap,
+      loaded.active_policy.context_ceiling,
+      loaded.active_policy.per_active_reserve_cells,
+      loaded.active_policy.per_active_reserve_bytes,
+      std::max(1u, std::thread::hardware_concurrency()),
+      loaded.hybrid,
+    },
+    active,
+    retained_total,
+    retained_sessions,
+    retained_anchors,
+    loaded.retained_max,
+    loaded.last_eviction_reason,
+    evictions,
+    loaded.backend_allocation_cap,
   };
+  return clap::llama::serialize_retention_telemetry(snapshot);
 }
 
 void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits, llama_seq_id seq) {
