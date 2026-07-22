@@ -54,6 +54,7 @@ set(CLAP_LLAMA_SOURCES
   src/model-runtime.cpp
   src/prompt.cpp
   src/protocol.cpp
+  src/request-state.cpp
   src/sampling.cpp
   src/stop-buffer.cpp
   src/telemetry.cpp
@@ -65,6 +66,7 @@ set(CLAP_LLAMA_HEADERS
   include/clap/llama/model-runtime.h
   include/clap/llama/prompt.h
   include/clap/llama/protocol.h
+  include/clap/llama/request-state.h
   include/clap/llama/sampling.h
   include/clap/llama/stop-buffer.h
   include/clap/llama/telemetry.h
@@ -151,6 +153,20 @@ if(BUILD_TESTING)
   )
   add_test(NAME clap-llama-protocol COMMAND clap-llama-protocol)
 
+  add_executable(clap-llama-request-state
+    tests/request-state.test.cpp
+    src/cache-executor.cpp
+    src/request-state.cpp
+  )
+  add_dependencies(clap-llama-request-state clap-cache-ffi-build)
+  target_include_directories(clap-llama-request-state PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-request-state PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-request-state COMMAND clap-llama-request-state)
+
   add_executable(clap-llama-stop-buffer
     tests/stop-buffer.test.cpp
     src/stop-buffer.cpp
@@ -190,6 +206,7 @@ if(BUILD_TESTING)
     clap-llama-model-runtime
     clap-llama-prompt
     clap-llama-protocol
+    clap-llama-request-state
     clap-llama-sampling
     clap-llama-stop-buffer
     clap-llama-telemetry

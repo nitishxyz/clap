@@ -105,6 +105,9 @@ class CacheLease {
   explicit operator bool() const noexcept { return owner_ != nullptr; }
   uint32_t slot() const noexcept { return slot_; }
   uint64_t generation() const noexcept { return generation_; }
+  uint64_t advance(const int32_t* tokens, std::size_t count, uint32_t state, bool busy);
+  uint64_t invalidate_and_clear(bool keep_busy = false);
+  uint64_t reset_for_retry();
   void release();
 
  private:
@@ -137,6 +140,7 @@ class CacheExecutor {
                                   const clap::llama_cache::Identity& identity,
                                   uint32_t source_slot, bool protect);
   CacheLease acquire(uint32_t slot);
+  CacheLease lease_admitted(uint32_t slot, uint64_t generation);
   CacheSlotSnapshot slot(uint32_t slot) const;
   std::size_t slot_count() const noexcept { return slots_.size(); }
   uint64_t reset();

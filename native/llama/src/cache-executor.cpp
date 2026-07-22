@@ -49,6 +49,25 @@ void CacheLease::release() {
   owner->release(slot_, generation_);
 }
 
+uint64_t CacheLease::advance(const int32_t* tokens, std::size_t count,
+                             uint32_t state, bool busy) {
+  if (!owner_) throw std::runtime_error("cache lease is not active");
+  generation_ = owner_->advance(slot_, generation_, tokens, count, state, busy);
+  return generation_;
+}
+
+uint64_t CacheLease::invalidate_and_clear(bool keep_busy) {
+  if (!owner_) return 0;
+  generation_ = owner_->invalidate_and_clear(slot_, generation_, keep_busy);
+  return generation_;
+}
+
+uint64_t CacheLease::reset_for_retry() {
+  if (!owner_) throw std::runtime_error("cache lease is not active");
+  generation_ = owner_->reset_for_retry(slot_);
+  return generation_;
+}
+
 CacheExecutor::CacheExecutor(CacheExecutorConfig config,
                              std::unique_ptr<PhysicalCacheBackend> backend)
     : backend_(std::move(backend)) {
@@ -243,6 +262,14 @@ CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) 
     slots_[target].is_anchor = false;
     std::rethrow_exception(failure);
   }
+}
+
+CacheLease CacheExecutor::lease_admitted(uint32_t slot_id, uint64_t generation) {
+  if (slot_id >= slots_.size()) throw std::out_of_range("cache slot is out of range");
+  if (!slots_[slot_id].busy || slots_[slot_id].generation != generation) {
+    throw std::runtime_error("cache admission lease is stale");
+  }
+  return CacheLease(this, slot_id, generation);
 }
 
 CacheLease CacheExecutor::acquire(uint32_t slot_id) {

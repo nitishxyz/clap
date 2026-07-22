@@ -6,6 +6,7 @@
 #include "clap/llama/model-runtime.h"
 #include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
+#include "clap/llama/request-state.h"
 #include "clap/llama/sampling.h"
 #include "clap/llama/stop-buffer.h"
 #include "clap/llama/telemetry.h"
@@ -40,6 +41,7 @@ using clap::llama::RequestError;
 using clap::llama::sampling_from_request;
 using clap::llama::SamplingParams;
 using clap::llama::StdinReader;
+using clap::llama::ActiveRequest;
 
 struct LoadedLlama {
   clap::llama::ModelRuntime runtime;
@@ -193,63 +195,6 @@ std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
   if (n < 0) return "";
   return std::string(big.data(), n);
 }
-
-// One in-flight chat request bound to a KV slot. The continuous-batching
-// scheduler advances all active requests together: each decoding request
-// contributes one token per step and prefilling requests fill the remaining
-// batch budget with prompt chunks, so long ingests never stall other streams.
-struct ActiveRequest {
-  std::string id;
-  SamplingParams params;
-  llama_sampler* sampler = nullptr;
-  llama_seq_id seq = 0;
-  LoadedLlama::CacheSlot* slot = nullptr;
-  clap::llama_cache::Coordinator* coordinator = nullptr;
-  clap::llama::CacheExecutor* cache_executor = nullptr;
-  clap::llama_cache::Identity cache_identity;
-
-  std::vector<llama_token> prompt_tokens;       // un-ingested remainder
-  std::vector<llama_token> full_prompt_tokens;  // for the one ingest retry
-  std::size_t ingested = 0;
-  int32_t n_pos = 0;
-  int prompt_token_count = 0;
-  int cached_prompt_tokens = 0;
-  std::string cache_reuse_kind;
-  std::string cache_reuse_scope;
-  std::string cache_namespace;
-  int cache_donor_slot = -1;
-  uint64_t cache_donor_generation = 0;
-  uint64_t cache_target_generation = 0;
-  std::vector<uint32_t> cache_evicted_slots;
-  uint64_t cache_planned_reuse_tokens = 0;
-  uint64_t cache_realized_reuse_tokens = 0;
-  uint64_t cache_decision_us = 0;
-  std::string cache_fallback;
-  std::string prompt_token_hash;
-  clap::llama_boundary::StableBoundary stable_boundary;
-  std::vector<std::size_t> anchor_boundaries;
-  std::vector<std::size_t> structural_boundaries;
-  std::vector<std::size_t> materialized_boundaries;
-  std::vector<clap::llama::ResolvedPromptBoundary> resolved_boundaries;
-  json cache_candidates = json::array();
-  bool cache_side_request = false;
-
-  enum class Phase { Prefill, Decode };
-  Phase phase = Phase::Prefill;
-  llama_token pending_token = 0;  // sampled but not yet decoded
-  clap::llama::StopBuffer stop_buffer;
-  int completion_tokens = 0;
-  std::string finish_reason = "stop";
-  bool cancelled = false;
-  bool retried = false;
-  bool done = false;
-  int32_t anchor_at = -1;
-  bool anchor_planted = false;
-
-  // per-step scratch
-  int32_t logits_index = -1;
-  int32_t step_tokens = 0;
-};
 
 std::string cache_string(const json& cache, const char* key) {
   if (!cache.is_object() || !cache.contains(key) || !cache[key].is_string()) return "";
@@ -435,10 +380,9 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
     req.cache_evicted_slots.push_back(victim);
     loaded.last_eviction_reason = "hard_ceiling";
   }
-  req.coordinator = loaded.coordinator;
-  req.cache_executor = loaded.cache_executor.get();
-  req.slot = &slot;
   req.seq = static_cast<llama_seq_id>(target);
+  req.cache_lease = loaded.cache_executor->lease_admitted(
+      static_cast<uint32_t>(target), decision.target_generation);
   req.n_pos = static_cast<int32_t>(resident);
   req.cached_prompt_tokens = static_cast<int>(decision.realized_reuse_tokens);
   req.cache_planned_reuse_tokens = decision.planned_reuse_tokens;
@@ -481,10 +425,10 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
 }
 
 void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
-  if (req.anchor_at < 0 || !req.coordinator) return;
+  if (req.anchor_at < 0 || !req.cache_lease) return;
   const std::size_t count = static_cast<std::size_t>(req.anchor_at);
   if (count < 16 || static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested != count ||
-      req.slot == nullptr) return;
+      !req.cache_lease) return;
   const auto next = std::upper_bound(
       req.anchor_boundaries.begin(), req.anchor_boundaries.end(), count);
   req.anchor_at = next == req.anchor_boundaries.end()
@@ -517,19 +461,13 @@ void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
   }
 }
 
-void finalize(ActiveRequest& req) {
-  if (req.sampler) {
-    llama_sampler_free(req.sampler);
-    req.sampler = nullptr;
+void finalize(LoadedLlama& loaded, ActiveRequest& req) {
+  req.sampler.reset();
+  if (req.cache_lease) {
+    loaded.slots[static_cast<std::size_t>(req.seq)].busy = false;
+    req.cache_lease.release();
   }
-  if (req.slot) {
-    req.slot->busy = false;
-    if (req.cache_executor && req.slot->coordinator_generation != 0) {
-      req.cache_executor->release(
-          static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
-    }
-  }
-  req.done = true;
+  if (!req.mark_terminal(ActiveRequest::TerminalState::Completed)) return;
   json cache{
     {"hit", req.cached_prompt_tokens > 0},
     {"reused_tokens", req.cached_prompt_tokens},
@@ -587,23 +525,21 @@ void finalize(ActiveRequest& req) {
 }
 
 void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& message) {
-  if (req.sampler) {
-    llama_sampler_free(req.sampler);
-    req.sampler = nullptr;
-  }
-  if (req.slot) {
-    req.slot->busy = false;
-    req.slot->tokens.clear();
-    if (req.cache_executor && req.slot->coordinator_generation != 0) {
+  req.sampler.reset();
+  if (req.cache_lease) {
+    auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
+    slot.busy = false;
+    slot.tokens.clear();
+    if (req.cache_lease.generation() != 0) {
       try {
-        req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
-            static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
+        slot.coordinator_generation = req.cache_lease.invalidate_and_clear();
       } catch (const std::exception& error) {
         fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n", error.what());
       }
     }
+    req.cache_lease.release();
   }
-  req.done = true;
+  req.mark_terminal(ActiveRequest::TerminalState::Failed);
   emit_error(req.id, message);
 }
 
@@ -613,7 +549,7 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
   if (llama_vocab_is_eog(vocab, token)) {
     const std::string visible = req.stop_buffer.finish();
     if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(req);
+    finalize(loaded, req);
     return;
   }
   req.completion_tokens += 1;
@@ -623,7 +559,7 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
     if (!result.visible.empty()) emit(req.id, json{{"token", result.visible}});
     if (result.stop_complete) {
       req.finish_reason = "stop";
-      finalize(req);
+      finalize(loaded, req);
       return;
     }
   }
@@ -631,7 +567,7 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
     req.finish_reason = "length";
     const std::string visible = req.stop_buffer.finish();
     if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(req);
+    finalize(loaded, req);
     return;
   }
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.runtime.context()));
@@ -639,7 +575,7 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
     req.finish_reason = "length";
     const std::string visible = req.stop_buffer.finish();
     if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(req);
+    finalize(loaded, req);
     return;
   }
   req.pending_token = token;
@@ -651,27 +587,22 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
   if (req.phase == ActiveRequest::Phase::Prefill) {
     const std::size_t chunk = static_cast<std::size_t>(req.step_tokens);
     const std::size_t chunk_start = req.ingested;
-    if (req.slot) {
-      req.slot->tokens.insert(
-        req.slot->tokens.end(),
+    if (req.cache_lease) {
+      auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
+      slot.tokens.insert(
+        slot.tokens.end(),
         req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested),
         req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested + chunk));
-      if (req.coordinator && req.slot->coordinator_generation != 0) {
+      if (req.cache_lease.generation() != 0) {
         try {
-          req.slot->coordinator_generation = req.cache_executor->advance(
-              static_cast<uint32_t>(req.seq), req.slot->coordinator_generation,
+          slot.coordinator_generation = req.cache_lease.advance(
               req.prompt_tokens.data() + chunk_start, chunk, CLAP_CACHE_SLOT_SESSION, true);
         } catch (const std::exception& error) {
           req.cache_fallback = "coordinator_advance_failed";
-          try {
-            req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
-                static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
-          } catch (...) {
-            req.slot->coordinator_generation = 0;
-          }
+          slot.coordinator_generation = 0;
           emit(req.id, json{{"error", "cache coordinator advance failed closed"},
                             {"code", "cache_coordinator_error"}});
-          req.done = true;
+          req.mark_terminal(ActiveRequest::TerminalState::Failed);
           fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
           return;
         }
@@ -691,31 +622,31 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
       }}});
     }
     if (req.logits_index >= 0) {
-      const llama_token token = llama_sampler_sample(req.sampler, loaded.runtime.context(), req.logits_index);
+      const llama_token token = llama_sampler_sample(req.sampler.get(), loaded.runtime.context(), req.logits_index);
       process_sampled(loaded, req, vocab, token);
     }
     return;
   }
   req.n_pos += 1;
-  if (req.slot) {
-    req.slot->tokens.push_back(req.pending_token);
-    if (req.coordinator && req.slot->coordinator_generation != 0) {
+  if (req.cache_lease) {
+    auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
+    slot.tokens.push_back(req.pending_token);
+    if (req.cache_lease.generation() != 0) {
       try {
-        req.slot->coordinator_generation = req.cache_executor->advance(
-            static_cast<uint32_t>(req.seq), req.slot->coordinator_generation,
+        slot.coordinator_generation = req.cache_lease.advance(
             &req.pending_token, 1, CLAP_CACHE_SLOT_SESSION, true);
       } catch (const std::exception& error) {
         req.cache_fallback = "coordinator_advance_failed";
-        req.slot->coordinator_generation = 0;
+        slot.coordinator_generation = 0;
         emit(req.id, json{{"error", "cache coordinator advance failed closed"},
                           {"code", "cache_coordinator_error"}});
-        req.done = true;
+        req.mark_terminal(ActiveRequest::TerminalState::Failed);
         fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
         return;
       }
     }
   }
-  const llama_token token = llama_sampler_sample(req.sampler, loaded.runtime.context(), req.logits_index);
+  const llama_token token = llama_sampler_sample(req.sampler.get(), loaded.runtime.context(), req.logits_index);
   process_sampled(loaded, req, vocab, token);
 }
 
@@ -729,16 +660,16 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
         s.tokens.clear();
         s.is_anchor = false;
       }
-      if (req.cache_executor) {
-        req.slot->coordinator_generation = req.cache_executor->reset_for_retry(
-            static_cast<uint32_t>(req.seq));
+      if (req.cache_lease) {
+        loaded.slots[static_cast<std::size_t>(req.seq)].coordinator_generation =
+            req.cache_lease.reset_for_retry();
       }
     } else {
-      if (req.slot) {
-        req.slot->tokens.clear();
-        if (req.cache_executor && req.slot->coordinator_generation != 0) {
-          req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
-              static_cast<uint32_t>(req.seq), req.slot->coordinator_generation, true);
+      if (req.cache_lease) {
+        auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
+        slot.tokens.clear();
+        if (req.cache_lease.generation() != 0) {
+          slot.coordinator_generation = req.cache_lease.invalidate_and_clear(true);
         }
       }
     }
@@ -813,7 +744,7 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
   for (auto& req : active) {
     if (!req->done && req->cancelled) {
       req->finish_reason = "cancel";
-      finalize(*req);
+      finalize(loaded, *req);
     }
   }
 
@@ -942,18 +873,17 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     req->prompt_tokens = { decoder_start };
     req->full_prompt_tokens = req->prompt_tokens;
     req->seq = 0;
-    req->slot = &loaded.slots[0];
-    req->cache_executor = loaded.cache_executor.get();
-    req->slot->busy = true;
-    req->slot->last_used = ++loaded.use_counter;
-    req->sampler = make_sampler(req->params);
+    loaded.slots[0].busy = true;
+    loaded.slots[0].last_used = ++loaded.use_counter;
+    if (loaded.cache_executor) req->cache_lease = loaded.cache_executor->acquire(0);
+    req->sampler.reset(make_sampler(req->params));
     return req;
   }
 
   if (prepare_with_coordinator(
           loaded, *req, prompt_tokens, output_reserve, stable_boundaries)) {
     req->prompt_tokens = std::move(prompt_tokens);
-    req->sampler = make_sampler(req->params);
+    req->sampler.reset(make_sampler(req->params));
     return req;
   }
 
@@ -971,16 +901,13 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   if (loaded.cache_executor) loaded.cache_executor->remove_sequence(
       static_cast<int32_t>(target), -1, -1);
   loaded.slots[target] = {};
-  auto* slot = &loaded.slots[target];
-  slot->last_used = ++loaded.use_counter;
-  slot->busy = true;
-  req->slot = slot;
-  req->cache_executor = loaded.cache_executor.get();
+  loaded.slots[target].last_used = ++loaded.use_counter;
+  loaded.slots[target].busy = true;
   req->seq = static_cast<llama_seq_id>(target);
   req->n_pos = 0;
   req->cache_fallback = "coordinator_unavailable_no_cache";
   req->prompt_tokens = std::move(prompt_tokens);
-  req->sampler = make_sampler(req->params);
+  req->sampler.reset(make_sampler(req->params));
   return req;
 }
 
@@ -1147,7 +1074,7 @@ int main() {
       if (!req->done) {
         req->finish_reason = "cancel";
         req->cancelled = true;
-        finalize(*req);
+        finalize(loaded, *req);
       }
     }
     unload(loaded);
