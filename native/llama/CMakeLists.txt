@@ -48,6 +48,7 @@ set_target_properties(clap-cache-ffi PROPERTIES
 # This is the sole explicit production source manifest. Add extracted worker
 # translation units here as the native worker is decomposed.
 set(CLAP_LLAMA_SOURCES
+  src/cache-executor.cpp
   clap-llama.cpp
   src/environment.cpp
   src/model-runtime.cpp
@@ -59,6 +60,7 @@ set(CLAP_LLAMA_SOURCES
 )
 
 set(CLAP_LLAMA_HEADERS
+  include/clap/llama/cache-executor.h
   include/clap/llama/environment.h
   include/clap/llama/model-runtime.h
   include/clap/llama/prompt.h
@@ -71,6 +73,7 @@ set(CLAP_LLAMA_HEADERS
 add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
 add_dependencies(clap-llama clap-cache-ffi-build)
 target_include_directories(clap-llama PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CLAP_LLAMA_INCLUDE_DIR}"
   "${CLAP_LLAMA_VENDOR_DIR}/vendor"
 )
@@ -82,6 +85,24 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-cache-adapter cache-adapter.test.cpp)
+  add_dependencies(clap-llama-cache-adapter clap-cache-ffi-build)
+  target_link_libraries(clap-llama-cache-adapter PRIVATE clap-cache-ffi)
+  add_test(NAME clap-llama-cache-adapter COMMAND clap-llama-cache-adapter)
+
+  add_executable(clap-llama-cache-executor
+    tests/cache-executor.test.cpp
+    src/cache-executor.cpp
+  )
+  add_dependencies(clap-llama-cache-executor clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-executor PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-executor PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-executor COMMAND clap-llama-cache-executor)
+
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)
 
@@ -162,6 +183,8 @@ if(BUILD_TESTING)
   add_test(NAME clap-llama-telemetry COMMAND clap-llama-telemetry)
 
   add_custom_target(clap-llama-tests DEPENDS
+    clap-llama-cache-adapter
+    clap-llama-cache-executor
     clap-llama-characterization
     clap-llama-environment
     clap-llama-model-runtime
