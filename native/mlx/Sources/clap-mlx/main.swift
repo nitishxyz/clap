@@ -9,43 +9,6 @@ import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
-func tokenFingerprint(_ tokens: [Int], count: Int) -> String {
-  let limit = min(max(count, 0), tokens.count)
-  var bytes = Array((cacheTelemetryKey + "|tokens-v1|\(limit)|").utf8)
-  for token in tokens.prefix(limit) {
-    var value = UInt32(truncatingIfNeeded: token).littleEndian
-    withUnsafeBytes(of: &value) { bytes.append(contentsOf: $0) }
-  }
-  return (0..<4).map { domain -> String in
-    var hash = UInt64(1_469_598_103_934_665_603) ^ UInt64(domain)
-    for byte in bytes {
-      hash ^= UInt64(byte)
-      hash &*= 1_099_511_628_211
-    }
-    return String(format: "%016llx", hash)
-  }.joined()
-}
-
-func cacheCandidateState(_ state: UInt32) -> String {
-  switch state {
-  case UInt32(CC_SLOT_SESSION): return "session"
-  case UInt32(CC_SLOT_PROMPT_BOUNDARY): return "prompt_boundary"
-  case UInt32(CC_SLOT_ANCHOR): return "anchor"
-  default: return "empty"
-  }
-}
-
-func cacheCandidateRejection(_ rejection: UInt32) -> String? {
-  [1: "namespace", 2: "model_domain", 3: "generation", 4: "busy_lease",
-   5: "materialization", 6: "session", 7: "nontrim", 8: "capability",
-   9: "min_prefix", 10: "capacity", 11: "absent_anchor", 12: "lower_rank"][rejection]
-}
-
-func memorySnapshot() -> WorkerMemory {
-  let snapshot = Memory.snapshot()
-  return WorkerMemory(active_bytes: snapshot.activeMemory, cache_bytes: snapshot.cacheMemory, peak_active_bytes: snapshot.peakMemory)
-}
-
 func debugLog(_ message: String) {
   FileHandle.standardError.write(Data("[clap-mlx] \(message)\n".utf8))
 }
@@ -194,50 +157,15 @@ func main() async {
     func retentionSnapshot(queued: Int = 0) -> WorkerRetention? {
       guard let coordinator = cacheCoordinator,
             let telemetry = try? coordinator.retentionTelemetry() else { return nil }
-      let retainedBytes = min(telemetry.total_bytes, retentionConfig.physicalByteBudget)
-      let remainingBudget = retentionConfig.physicalByteBudget - retainedBytes
-      let growthReserve = min(remainingBudget, max(retainedGrowthMinimumBytes,
-        remainingBudget / 100 * min(100, retainedGrowthReservePercent)))
-      let policy = WorkerActivePolicy(mode: activePolicy.mode,
-        selected_max: maxActive, backend_ceiling: activePolicy.backendCeiling,
-        hardware_ceiling: activePolicy.hardwareCeiling, model_ceiling: activePolicy.modelCeiling,
-        memory_ceiling: activePolicy.memoryCeiling,
-        reason: coordinatedLimitingReason ?? activePolicy.reason,
-        inputs: WorkerActivePolicyInputs(physical_memory_bytes: physicalMemoryBytes,
-          startup_available_bytes: availableMemoryAtStartup,
-          model_active_bytes: activePolicyModelBytes,
-          retained_budget_bytes: retentionConfig.physicalByteBudget,
-          retained_bytes: retainedBytes,
-          retained_growth_reserve_bytes: growthReserve,
-          os_reserve_bytes: activePolicy.osReserveBytes,
-          usable_runtime_bytes: activePolicy.usableRuntimeBytes,
-          per_active_reserve_bytes: activePolicy.perActiveReserveBytes,
-          processor_count: configuration.processorCount,
-          hybrid_or_recurrent: activePolicyHybrid))
-      return WorkerRetention(max_active: maxActive, queued: queued,
-        previous_max_active: previousMaxActive,
-        last_adjustment_reason: lastAdjustmentReason,
-        last_adjustment_at: lastAdjustmentAt,
-        retained_growth_reserve_bytes: coordinatedGrowthReserveBytes ?? growthReserve,
-        global_resident_memory_bytes: globalResidentMemoryBytes,
-        pressure_state: pressureState, active_policy: policy,
-        active: retainedRegistry.activeCount,
-        retained_total: Int(telemetry.total_slots), retained_sessions: Int(telemetry.session_slots),
-        retained_anchors: Int(telemetry.anchor_slots), retained_bytes: telemetry.total_bytes,
-        session_bytes: telemetry.session_bytes, anchor_bytes: telemetry.anchor_bytes,
-        automatic_checkpoint_count: Int(telemetry.automatic_checkpoint_slots),
-        automatic_checkpoint_bytes: telemetry.automatic_checkpoint_bytes,
-        automatic_checkpoint_budget_bytes: telemetry.automatic_checkpoint_byte_budget,
-        automatic_checkpoints_enabled: configuration.checkpoints.enabled,
-        automatic_checkpoint_minimum_tokens: configuration.checkpoints.minimumTokens,
-        automatic_checkpoint_interval_tokens: configuration.checkpoints.intervalTokens,
-        automatic_checkpoint_max: configuration.checkpoints.maximum,
-        budget_bytes: telemetry.physical_byte_budget,
-        high_watermark_bytes: telemetry.high_watermark_bytes,
-        low_watermark_bytes: telemetry.low_watermark_bytes,
-        under_pressure: telemetry.under_pressure != 0,
-        hard_ceiling: retentionConfig.hardCeiling, eviction_reason: lastEvictionReason,
-        eviction_count: telemetry.evictions)
+      return workerRetention(RetentionTelemetryFacts(telemetry: telemetry,
+        configuration: configuration, activePolicy: activePolicy,
+        maxActive: maxActive, queued: queued, previousMaxActive: previousMaxActive,
+        limitingReason: coordinatedLimitingReason,
+        lastAdjustmentReason: lastAdjustmentReason, lastAdjustmentAt: lastAdjustmentAt,
+        coordinatedGrowthReserveBytes: coordinatedGrowthReserveBytes,
+        globalResidentMemoryBytes: globalResidentMemoryBytes, pressureState: pressureState,
+        modelActiveBytes: activePolicyModelBytes, hybridOrRecurrent: activePolicyHybrid,
+        activeCount: retainedRegistry.activeCount, lastEvictionReason: lastEvictionReason))
     }
 
     func loadModel(_ model: String, directory: URL) async throws {
@@ -522,23 +450,22 @@ func main() async {
       if !req.streaming && !req.collected.isEmpty && !req.cancelled {
         emit(id: req.id, content: req.collected)
       }
-      let usage = WorkerUsage(prompt_tokens: req.promptTokens.count, completion_tokens: req.generatedCount)
-      let timing = WorkerTiming(
-        received_to_admitted_ms: req.receivedToAdmittedMs,
-        template_tokenize_ms: req.templateTokenizeMs,
-        coordinator_wait_ms: req.receivedToAdmittedMs,
-        coordinator_plan_ms: req.coordinatorPlanMs,
-        coordinator_apply_ms: req.coordinatorApplyMs,
-        scheduler_wait_ms: req.schedulerWaitMs,
-        cache_materialize_ms: req.cacheMaterializeMs,
-        prefill_ms: req.prefillMs,
-        residual_prefill_tokens: req.promptTokens.count - req.reusedTokens,
-        prefill_tokens: req.prefillTokens,
-        prefill_chunks: req.prefillChunks,
-        first_decode_ms: req.firstDecodeMs,
-        first_emit_ms: req.firstEmitMs,
-        normal_prefill_quantum: LatencyScheduler.normalPrefillQuantum,
-        contended_prefill_quantum: LatencyScheduler.contendedPrefillQuantum)
+      let usage = workerUsage(promptTokens: req.promptTokens.count,
+        completionTokens: req.generatedCount)
+      let timing = workerTiming(TimingTelemetryFacts(
+        receivedToAdmittedMs: req.receivedToAdmittedMs,
+        templateTokenizeMs: req.templateTokenizeMs,
+        coordinatorPlanMs: req.coordinatorPlanMs,
+        coordinatorApplyMs: req.coordinatorApplyMs,
+        schedulerWaitMs: req.schedulerWaitMs,
+        cacheMaterializeMs: req.cacheMaterializeMs,
+        prefillMs: req.prefillMs,
+        promptTokens: req.promptTokens.count,
+        reusedTokens: req.reusedTokens,
+        prefillTokens: req.prefillTokens,
+        prefillChunks: req.prefillChunks,
+        firstDecodeMs: req.firstDecodeMs,
+        firstEmitMs: req.firstEmitMs))
       let cacheInfo = WorkerCache(
         hit: req.reusedTokens > 0,
         reused_tokens: req.reusedTokens,
