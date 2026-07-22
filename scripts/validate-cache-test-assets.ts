@@ -5,27 +5,37 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 export type Backend = "gguf" | "mlx";
 export type AssetPin = {
+  source: string;
   architecture: string;
   revision: string;
   maxBytes: number;
   sha256?: string;
   manifestSha256?: string;
   requiredFiles?: Record<string, string>;
+  expectedProbe?: {
+    scenarios: string[];
+    logicalTokenSha256: string;
+    physicalStateSha256: string;
+    selectedNextToken: number;
+    top16QuantizedLogitSha256: string;
+  };
 };
 export type AssetConfiguration = {
   schemaVersion: 1;
-  assets: Record<Backend, { required: boolean; pin: AssetPin | null }>;
+  assets: Record<Backend, { required: boolean; provisioning?: "pinned" | "unprovisioned";
+    skipReason?: string; pin: AssetPin | null }>;
 };
 export type ValidatedAsset = {
   backend: Backend;
   path: string;
   architecture: string;
   revision: string;
+  expectedProbe?: AssetPin["expectedProbe"];
 };
 export type ValidationResult = {
   status: "ready" | "skipped";
   assets: ValidatedAsset[];
-  skipped: Backend[];
+  skipped: Array<{ backend: Backend; reason: string }>;
 };
 
 const aliases: Record<Backend, string[]> = {
@@ -56,6 +66,7 @@ export async function validateCacheTestAssets(options: {
     path: aliases[backend].map((name) => env[name]).find(Boolean),
   }));
   const missing = configured.filter((entry) => !entry.path).map((entry) => entry.backend);
+  const provisioned = missing.filter((backend) => config.assets[backend].pin !== null);
   const policyRequired = missing.filter((backend) => config.assets[backend].required);
   if (missing.length > 0 && fetchAssets) {
     const unpinned = missing.filter((backend) => !config.assets[backend].pin);
@@ -64,14 +75,17 @@ export async function validateCacheTestAssets(options: {
     }
     throw new Error("asset fetch was requested but no fetch transport is configured");
   }
-  if (policyRequired.length > 0 || (missing.length > 0 && requireAssets)) {
+  if (policyRequired.length > 0 || (provisioned.length > 0 && requireAssets)) {
     throw new Error(`required cache correctness assets are absent: ${
-      policyRequired.length > 0 ? policyRequired.join(",") : missing.join(",")}`);
+      policyRequired.length > 0 ? policyRequired.join(",") : provisioned.join(",")}`);
   }
 
   const supplied = configured.filter((entry): entry is { backend: Backend; path: string } =>
     Boolean(entry.path));
-  if (supplied.length === 0) return { status: "skipped", assets: [], skipped: missing };
+  const skipped = missing.map((backend) => ({ backend,
+    reason: config.assets[backend].pin ? "asset_not_installed" :
+      config.assets[backend].skipReason ?? "asset_unprovisioned" }));
+  if (supplied.length === 0) return { status: "skipped", assets: [], skipped };
   const rootInput = env.CLAP_CACHE_TEST_ASSET_ROOT;
   if (!rootInput || !isAbsolute(rootInput)) {
     throw new Error("CLAP_CACHE_TEST_ASSET_ROOT must be an absolute canonical asset root");
@@ -121,13 +135,14 @@ export async function validateCacheTestAssets(options: {
       if (digest !== pin.manifestSha256) throw new Error("mlx asset manifest checksum mismatch");
     }
     assets.push({ backend: entry.backend, path: canonical,
-      architecture: pin.architecture, revision: pin.revision });
+      architecture: pin.architecture, revision: pin.revision,
+      expectedProbe: pin.expectedProbe });
   }
-  return { status: "ready", assets, skipped: missing };
+  return { status: "ready", assets, skipped };
 }
 
 function validatePin(backend: Backend, pin: AssetPin) {
-  if (!pin.architecture?.trim() || !pin.revision?.trim() ||
+  if (!pin.source?.trim() || !pin.architecture?.trim() || !pin.revision?.trim() ||
       !Number.isSafeInteger(pin.maxBytes) || pin.maxBytes <= 0) {
     throw new Error(`${backend} pin metadata is incomplete`);
   }
@@ -138,6 +153,13 @@ function validatePin(backend: Backend, pin: AssetPin) {
       !pin.requiredFiles || Object.keys(pin.requiredFiles).length === 0 ||
       Object.values(pin.requiredFiles).some((value) => !shaPattern.test(value)))) {
     throw new Error("mlx pin requires a checksummed non-empty manifest");
+  }
+  if (pin.expectedProbe && (pin.expectedProbe.scenarios.length === 0 ||
+      !shaPattern.test(pin.expectedProbe.logicalTokenSha256) ||
+      !shaPattern.test(pin.expectedProbe.physicalStateSha256) ||
+      !Number.isSafeInteger(pin.expectedProbe.selectedNextToken) ||
+      !shaPattern.test(pin.expectedProbe.top16QuantizedLogitSha256))) {
+    throw new Error(`${backend} pin contains invalid expected probe metadata`);
   }
 }
 

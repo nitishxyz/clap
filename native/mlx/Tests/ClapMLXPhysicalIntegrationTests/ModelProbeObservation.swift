@@ -7,6 +7,7 @@ struct QuantizedLogit: Codable, Equatable {
 }
 
 struct ModelProbeObservation: Codable, Equatable {
+  let scenario: String
   let operation: UInt32
   let reused: Int
   let generation: UInt64
@@ -17,7 +18,7 @@ struct ModelProbeObservation: Codable, Equatable {
   let top16QuantizedLogits: [QuantizedLogit]
 
   enum CodingKeys: String, CodingKey {
-    case operation, reused, generation
+    case scenario, operation, reused, generation
     case logicalTokenSHA256 = "logical_token_sha256"
     case physicalStateSHA256 = "physical_state_sha256"
     case selectedNextToken = "selected_next_token"

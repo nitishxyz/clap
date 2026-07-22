@@ -22,6 +22,7 @@ export type MatrixReport = {
     revision?: string;
     status: "passed" | "skipped" | "failed";
     durationMs: number;
+    reason?: string;
     error?: string;
   }>;
 };
@@ -30,11 +31,15 @@ export function scenariosFor(assets: ValidatedAsset[]): MatrixScenario[] {
   return assets.map((asset) => asset.backend === "gguf" ? {
     backend: "gguf",
     command: ["bun", "run", "runtime:llama:physical:test"],
-    environment: { CLAP_TEST_GGUF_MODEL: asset.path },
+    environment: { CLAP_TEST_GGUF_MODEL: asset.path,
+      ...(asset.expectedProbe ? { CLAP_CACHE_TEST_EXPECTED_PROBE:
+        JSON.stringify(asset.expectedProbe) } : {}) },
   } : {
     backend: "mlx",
     command: ["bun", "run", "runtime:mlx:physical:test"],
-    environment: { CLAP_TEST_MLX_MODEL: asset.path },
+    environment: { CLAP_TEST_MLX_MODEL: asset.path,
+      ...(asset.expectedProbe ? { CLAP_CACHE_TEST_EXPECTED_PROBE:
+        JSON.stringify(asset.expectedProbe) } : {}) },
   });
 }
 
@@ -52,8 +57,8 @@ export async function runCacheCorrectnessMatrix(options: {
   const timeoutMs = positiveInteger(env.CLAP_CACHE_TEST_TIMEOUT_MS, 10 * 60_000);
   const clapHome = await mkdtemp(resolve(tmpdir(), "clap-cache-correctness-"));
   const execute = options.execute ?? executeScenario;
-  const backends: MatrixReport["backends"] = validation.skipped.map((backend) => ({
-    backend, status: "skipped", durationMs: 0,
+  const backends: MatrixReport["backends"] = validation.skipped.map(({ backend, reason }) => ({
+    backend, status: "skipped", durationMs: 0, reason,
   }));
   try {
     for (const scenario of scenariosFor(validation.assets)) {

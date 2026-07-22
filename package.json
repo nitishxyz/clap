@@ -32,7 +32,7 @@
     "runtime:mlx:build": "bun run scripts/build-mlx.ts",
     "runtime:mlx:protocol:test": "bun run scripts/check-mlx-worker-protocol.ts",
     "runtime:mlx:test": "cargo build --release --locked -p clap-cache-ffi --manifest-path native/cache/Cargo.toml && swift test --package-path native/mlx",
-    "runtime:mlx:physical:test": "cargo build --release --locked -p clap-cache-ffi --manifest-path native/cache/Cargo.toml && swift test --package-path native/mlx --filter ClapMLXPhysicalIntegrationTests.ModelProbeTests.realModel",
+    "runtime:mlx:physical:test": "bun run scripts/run-mlx-physical-test.ts",
     "llama:vendor": "bun run runtime:llama:vendor",
     "llama:build": "bun run runtime:llama:build",
     "mlx:build": "bun run runtime:mlx:build",

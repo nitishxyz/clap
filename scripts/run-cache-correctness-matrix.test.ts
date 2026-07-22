@@ -14,8 +14,8 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 
 function config(checksum: string): AssetConfiguration {
   return { schemaVersion: 1, assets: {
-    gguf: { required: false, pin: { architecture: "llama-test", revision: "pin-1",
-      maxBytes: 100, sha256: checksum } },
+    gguf: { required: false, pin: { source: "fixture", architecture: "llama-test",
+      revision: "pin-1", maxBytes: 100, sha256: checksum } },
     mlx: { required: false, pin: null },
   } };
 }
@@ -24,13 +24,18 @@ describe("cache correctness Tier B matrix", () => {
   test("has backend-specific physical probe commands", () => {
     const plans = scenariosFor([
       { backend: "gguf", path: "/asset/a", architecture: "a", revision: "1" },
-      { backend: "mlx", path: "/asset/b", architecture: "b", revision: "2" },
+      { backend: "mlx", path: "/asset/b", architecture: "b", revision: "2",
+        expectedProbe: { scenarios: ["cold"], logicalTokenSha256: "a".repeat(64),
+          physicalStateSha256: "b".repeat(64), selectedNextToken: 1,
+          top16QuantizedLogitSha256: "c".repeat(64) } },
     ]);
     expect(plans.map((plan) => plan.command.at(-1))).toEqual([
       "runtime:llama:physical:test", "runtime:mlx:physical:test",
     ]);
     expect(plans[0].environment.CLAP_TEST_GGUF_MODEL).toBe("/asset/a");
     expect(plans[1].environment.CLAP_TEST_MLX_MODEL).toBe("/asset/b");
+    expect(JSON.parse(plans[1].environment.CLAP_CACHE_TEST_EXPECTED_PROBE).scenarios)
+      .toEqual(["cold"]);
   });
 
   test("no assets produces an explicit successful skip", async () => {
@@ -40,6 +45,9 @@ describe("cache correctness Tier B matrix", () => {
     } });
     expect(report.status).toBe("skipped");
     expect(report.backends.map((entry) => entry.status)).toEqual(["skipped", "skipped"]);
+    expect(report.backends.map((entry) => entry.reason)).toEqual([
+      "asset_unprovisioned", "asset_unprovisioned",
+    ]);
   });
 
   test("runs with isolated CLAP_HOME and reports only pinned metadata", async () => {

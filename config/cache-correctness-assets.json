@@ -1,29 +1,44 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schemaVersion": 1,
-  "description": "Optional pinned assets for cache correctness Tier B. A backend remains disabled until its pin is populated with reviewed metadata and real checksums.",
+  "description": "Reviewed immutable assets for cache correctness Tier B. Local paths and model bytes are never committed.",
   "assets": {
     "gguf": {
       "required": false,
+      "provisioning": "unprovisioned",
+      "skipReason": "no_reviewed_local_asset",
       "pin": null
     },
     "mlx": {
       "required": false,
-      "pin": null
+      "provisioning": "pinned",
+      "pin": {
+        "source": "huggingface:fdtn-ai/antares-1b",
+        "architecture": "GraniteMoeHybridForCausalLM",
+        "revision": "10417eb35641b32e7141157db19c76eb545193b6",
+        "maxBytes": 3681742983,
+        "manifestSha256": "dc79860bc0e28941b3af186b68e4ac2cbbf9170840d42c19508b4d87c1fb1074",
+        "expectedProbe": {
+          "scenarios": ["cold", "continuation", "branch", "anchor", "namespace", "reset", "cancellation", "checkpoint"],
+          "logicalTokenSha256": "cb5e676b403ae6ebdac77c7cc43b949df8237f2628b5bd9ea6ff2b1e785f7f96",
+          "physicalStateSha256": "76d8105c3ed3e973516022016213f98a8af4f9835d3bd23e0d5b107c3ed033c3",
+          "selectedNextToken": 330,
+          "top16QuantizedLogitSha256": "d74f21eaf235675cb042ba535f08c74384be77c8d3ba2283b237b6142baac42e"
+        },
+        "requiredFiles": {
+          "chat_template.jinja": "3918efe7ae4fece012bc33b5668fed8d2c8900b105a61d7b490eb122627cbceb",
+          "config.json": "9d3c6d19fc0f344d46d38e88a97bc7150c4fcba11f2b4586866a5263e064774a",
+          "generation_config.json": "7f692db5f3d411563b3fc96e96c3f1f1592a061f639d6e9fbec3313a61ad750f",
+          "model.safetensors": "6ba4155a50cd0cede3e10285b0d84b460dcc3caa0175a424e14d3bb606fda675",
+          "tokenizer.json": "24665f2815ee47aba521e4710bfc52f8ca045a552ec3f60925cce5e0edecb657",
+          "tokenizer_config.json": "906d1ae36e4a0ef8c518468c2bf686aa1ddd90cda8dbaeb159cfba1f1ddfad71"
+        }
+      }
     }
   },
   "pinSchema": {
-    "required": [
-      "architecture",
-      "revision",
-      "maxBytes"
-    ],
-    "ggufRequired": [
-      "sha256"
-    ],
-    "mlxRequired": [
-      "manifestSha256",
-      "requiredFiles"
-    ]
+    "required": ["source", "architecture", "revision", "maxBytes"],
+    "ggufRequired": ["sha256"],
+    "mlxRequired": ["manifestSha256", "requiredFiles"]
   }
 }

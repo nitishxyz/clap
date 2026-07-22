@@ -18,12 +18,17 @@ const base = (): AssetConfiguration => ({ schemaVersion: 1, assets: {
 describe("cache correctness asset validation", () => {
   test("explicitly skips when optional assets are absent", async () => {
     expect(await validateCacheTestAssets({ env: {}, config: base() })).toEqual({
-      status: "skipped", assets: [], skipped: ["gguf", "mlx"],
+      status: "skipped", assets: [], skipped: [
+        { backend: "gguf", reason: "asset_unprovisioned" },
+        { backend: "mlx", reason: "asset_unprovisioned" },
+      ],
     });
   });
 
   test("required assets and unsupported fetch fail without pins", async () => {
-    expect(validateCacheTestAssets({ env: { REQUIRE_ASSETS: "1" }, config: base() }))
+    const required = base();
+    required.assets.gguf.required = true;
+    expect(validateCacheTestAssets({ env: { REQUIRE_ASSETS: "1" }, config: required }))
       .rejects.toThrow("required cache correctness assets are absent");
     expect(validateCacheTestAssets({ env: { FETCH: "1" }, config: base() }))
       .rejects.toThrow("unsupported until reviewed pins exist");
@@ -34,7 +39,7 @@ describe("cache correctness asset validation", () => {
     const model = join(root, "model.gguf");
     await writeFile(model, "real fixture bytes");
     const config = base();
-    config.assets.gguf.pin = { architecture: "test-arch", revision: "rev-1",
+    config.assets.gguf.pin = { source: "fixture", architecture: "test-arch", revision: "rev-1",
       maxBytes: 100, sha256: hash("real fixture bytes") };
     const result = await validateCacheTestAssets({ env: {
       CLAP_CACHE_TEST_ASSET_ROOT: root, CLAP_CACHE_TEST_GGUF_MODEL: model,
@@ -54,7 +59,7 @@ describe("cache correctness asset validation", () => {
     const manifest = Object.entries(requiredFiles).map(([file, digest]) =>
       `${file}\0${digest}\n`).sort().join("");
     const config = base();
-    config.assets.mlx.pin = { architecture: "test-mlx", revision: "rev-2",
+    config.assets.mlx.pin = { source: "fixture", architecture: "test-mlx", revision: "rev-2",
       maxBytes: 100, requiredFiles, manifestSha256: hash(manifest) };
     const result = await validateCacheTestAssets({ env: {
       CLAP_CACHE_TEST_ASSET_ROOT: root, CLAP_TEST_MLX_MODEL: model,
@@ -68,7 +73,7 @@ describe("cache correctness asset validation", () => {
     await writeFile(join(outside, "model.gguf"), "bytes");
     await symlink(join(outside, "model.gguf"), join(root, "escape.gguf"));
     const config = base();
-    config.assets.gguf.pin = { architecture: "test", revision: "rev", maxBytes: 100,
+    config.assets.gguf.pin = { source: "fixture", architecture: "test", revision: "rev", maxBytes: 100,
       sha256: hash("bytes") };
     expect(validateCacheTestAssets({ env: { CLAP_CACHE_TEST_ASSET_ROOT: root,
       CLAP_TEST_GGUF_MODEL: join(root, "escape.gguf") }, config }))
