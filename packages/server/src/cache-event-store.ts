@@ -217,7 +217,7 @@ export class CacheEventStore {
     return createHmac("sha256", this.key).update(encoded).digest("hex");
   }
 
-  workerLaunchKey(): string | undefined {
+  tokenFingerprintKey(): string | undefined {
     return this.key?.toString("hex");
   }
 

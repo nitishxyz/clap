@@ -215,9 +215,9 @@ export function createServer(
         break;
       }
     }
-    const telemetryKey = cacheEvents.workerLaunchKey();
-    return telemetryKey
-      ? { ...modelEnvironment, CLAP_TELEMETRY_HMAC_KEY: telemetryKey }
+    const tokenFingerprintKey = cacheEvents.tokenFingerprintKey();
+    return tokenFingerprintKey
+      ? { ...modelEnvironment, CLAP_TOKEN_FINGERPRINT_KEY: tokenFingerprintKey }
       : modelEnvironment;
   };
   // Warm-on-boot: models marked pinned (or given keep_alive) in config load

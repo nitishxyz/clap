@@ -94,9 +94,9 @@ int32_t WorkerState::set_max_active(const MaxActiveUpdate& update) {
   return max_active_;
 }
 
-const std::string& WorkerState::telemetry_key() {
+const std::string& WorkerState::token_fingerprint_key() {
   static const std::string key = [] {
-    if (const char* installed = std::getenv("CLAP_TELEMETRY_HMAC_KEY"); installed && *installed) {
+    if (const char* installed = std::getenv("CLAP_TOKEN_FINGERPRINT_KEY"); installed && *installed) {
       return std::string(installed);
     }
     std::random_device random;
@@ -111,7 +111,7 @@ std::string WorkerState::fingerprint(const std::vector<llama_token>& tokens,
                                      std::size_t count) {
   count = std::min(count, tokens.size());
   std::ostringstream encoded;
-  encoded << telemetry_key() << "|tokens-v1|" << count << '|';
+  encoded << token_fingerprint_key() << "|tokens-v1|" << count << '|';
   for (std::size_t index = 0; index < count; ++index) {
     const uint32_t token = static_cast<uint32_t>(tokens[index]);
     encoded.write(reinterpret_cast<const char*>(&token), sizeof(token));

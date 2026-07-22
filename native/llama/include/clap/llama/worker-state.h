@@ -67,7 +67,7 @@ class WorkerState {
     bool is_anchor = false;
   };
 
-  static const std::string& telemetry_key();
+  static const std::string& token_fingerprint_key();
   static std::string fingerprint(const std::vector<llama_token>& tokens,
                                  std::size_t count);
   void reconcile(const GenerationEvent& event);
