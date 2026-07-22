@@ -422,6 +422,9 @@
                 "localPath": {
                   "type": "string"
                 },
+                "revision": {
+                  "type": "string"
+                },
                 "pull": {
                   "type": "object",
                   "properties": {
@@ -672,6 +675,22 @@
                       "type": "integer",
                       "minimum": 0,
                       "exclusiveMinimum": true
+                    },
+                    "launchId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "stderrLogPath": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "launchMetadataPath": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "crashClassification": {
+                      "type": "string",
+                      "minLength": 1
                     },
                     "state": {
                       "type": "string",
@@ -1115,6 +1134,22 @@
                     "minimum": 0,
                     "exclusiveMinimum": true
                   },
+                  "launchId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "stderrLogPath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "launchMetadataPath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "crashClassification": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "state": {
                     "type": "string",
                     "enum": [
@@ -1544,6 +1579,22 @@
                     "type": "integer",
                     "minimum": 0,
                     "exclusiveMinimum": true
+                  },
+                  "launchId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "stderrLogPath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "launchMetadataPath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "crashClassification": {
+                    "type": "string",
+                    "minLength": 1
                   },
                   "state": {
                     "type": "string",
@@ -2508,6 +2559,9 @@
                     "localPath": {
                       "type": "string"
                     },
+                    "revision": {
+                      "type": "string"
+                    },
                     "pull": {
                       "type": "object",
                       "properties": {
@@ -2919,27 +2973,39 @@
             "properties": {
               "namespace": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative display/reuse label. Authenticated server identity controls isolation."
               },
               "tenant": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Deprecated alias for namespace. This caller label is not an authoritative tenant identity."
               },
               "project": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative project display/reuse label."
               },
               "harness": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative harness display/reuse label."
               },
               "agent": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative agent display/reuse label."
               },
               "session": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative session display/reuse label."
               },
               "priority": {
                 "type": "string",
@@ -3600,27 +3666,39 @@
             "properties": {
               "namespace": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative display/reuse label. Authenticated server identity controls isolation."
               },
               "tenant": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Deprecated alias for namespace. This caller label is not an authoritative tenant identity."
               },
               "project": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative project display/reuse label."
               },
               "harness": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative harness display/reuse label."
               },
               "agent": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative agent display/reuse label."
               },
               "session": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Optional non-authoritative session display/reuse label."
               },
               "priority": {
                 "type": "string",
@@ -5245,6 +5323,9 @@
                           "localPath": {
                             "type": "string"
                           },
+                          "revision": {
+                            "type": "string"
+                          },
                           "pull": {
                             "type": "object",
                             "properties": {
@@ -5589,6 +5670,22 @@
                                 "type": "integer",
                                 "minimum": 0,
                                 "exclusiveMinimum": true
+                              },
+                              "launchId": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "stderrLogPath": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "launchMetadataPath": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "crashClassification": {
+                                "type": "string",
+                                "minLength": 1
                               },
                               "state": {
                                 "type": "string",
@@ -6581,6 +6678,22 @@
                               "minimum": 0,
                               "exclusiveMinimum": true
                             },
+                            "launchId": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "stderrLogPath": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "launchMetadataPath": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "crashClassification": {
+                              "type": "string",
+                              "minLength": 1
+                            },
                             "state": {
                               "type": "string",
                               "enum": [
@@ -7063,6 +7176,22 @@
                               "type": "integer",
                               "minimum": 0,
                               "exclusiveMinimum": true
+                            },
+                            "launchId": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "stderrLogPath": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "launchMetadataPath": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "crashClassification": {
+                              "type": "string",
+                              "minLength": 1
                             },
                             "state": {
                               "type": "string",
@@ -8411,6 +8540,9 @@
                               "localPath": {
                                 "type": "string"
                               },
+                              "revision": {
+                                "type": "string"
+                              },
                               "pull": {
                                 "type": "object",
                                 "properties": {
@@ -8867,27 +8999,39 @@
                     "properties": {
                       "namespace": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative display/reuse label. Authenticated server identity controls isolation."
                       },
                       "tenant": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Deprecated alias for namespace. This caller label is not an authoritative tenant identity."
                       },
                       "project": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative project display/reuse label."
                       },
                       "harness": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative harness display/reuse label."
                       },
                       "agent": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative agent display/reuse label."
                       },
                       "session": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative session display/reuse label."
                       },
                       "priority": {
                         "type": "string",
@@ -9601,27 +9745,39 @@
                     "properties": {
                       "namespace": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative display/reuse label. Authenticated server identity controls isolation."
                       },
                       "tenant": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Deprecated alias for namespace. This caller label is not an authoritative tenant identity."
                       },
                       "project": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative project display/reuse label."
                       },
                       "harness": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative harness display/reuse label."
                       },
                       "agent": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative agent display/reuse label."
                       },
                       "session": {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional non-authoritative session display/reuse label."
                       },
                       "priority": {
                         "type": "string",

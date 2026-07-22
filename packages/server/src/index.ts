@@ -80,6 +80,18 @@ export type ServerOptions = {
   idleTimeout?: number;
 };
 
+export function normalizeCacheIntent(request: ChatCompletionRequest): ChatCompletionRequest {
+  if (!request.cache) return request;
+  const { tenant, ...cache } = request.cache;
+  return {
+    ...request,
+    cache: {
+      ...cache,
+      namespace: cache.namespace ?? tenant,
+    },
+  };
+}
+
 type ServerEnv = {
   Bindings: {
     requestIP?: (request: Request) => { address?: string } | null;
@@ -773,7 +785,7 @@ export function createServer(
   });
 
   app.post("/v1/chat/completions", async (c) => {
-    const request = ChatCompletionRequestSchema.parse(await c.req.json());
+    const request = normalizeCacheIntent(ChatCompletionRequestSchema.parse(await c.req.json()));
     const handle = metrics.start(request.model, "/v1/chat/completions", request.stream);
     handle.capture(request);
     const resolved = resolveAvailableModel(request.model, request.backend);

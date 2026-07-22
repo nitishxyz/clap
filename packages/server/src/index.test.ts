@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
-import { createServer, idleTimeoutFromEnv, inferParserFamilies } from "./index";
+import { createServer, idleTimeoutFromEnv, inferParserFamilies, normalizeCacheIntent } from "./index";
 
 // Tests mutate fake model cache directories directly; disable the model list
 // memo so every request observes the current directory state.
@@ -15,6 +15,16 @@ process.env.CLAP_MODEL_LIST_TTL_MS = "0";
 const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
 
 describe("clap server", () => {
+  test("normalizes deprecated tenant display alias without treating it as authority", () => {
+    const base = { model: "model", messages: [{ role: "user" as const, content: "hello" }], stream: false };
+    expect(normalizeCacheIntent({ ...base, cache: { tenant: "legacy", project: "payments" } }).cache).toEqual({
+      namespace: "legacy",
+      project: "payments",
+    });
+    expect(normalizeCacheIntent({ ...base, cache: { namespace: "current" } }).cache).toEqual({ namespace: "current" });
+    expect(normalizeCacheIntent({ ...base, cache: { priority: "background" } }).cache).toEqual({ priority: "background" });
+  });
+
   test("serves health", async () => {
     const response = await createServer().request("/clap/v1/health");
     expect(response.status).toBe(200);

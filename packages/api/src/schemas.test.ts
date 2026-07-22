@@ -44,7 +44,7 @@ describe("cache intent schema", () => {
       model: "org/model",
       messages: [{ role: "user", content: "hello" }],
       cache: {
-        tenant: "acme",
+        tenant: "acme-private",
         namespace: "acme-private",
         project: "payments",
         harness: "coding-v4",
@@ -55,7 +55,7 @@ describe("cache intent schema", () => {
       },
     });
     expect(parsed.cache).toEqual({
-      tenant: "acme",
+      tenant: "acme-private",
       namespace: "acme-private",
       project: "payments",
       harness: "coding-v4",
@@ -66,12 +66,35 @@ describe("cache intent schema", () => {
     });
   });
 
-  test("requires an isolation namespace", () => {
-    expect(() => ChatCompletionRequestSchema.parse({
+  test("allows cache intent without identity labels", () => {
+    const parsed = ChatCompletionRequestSchema.parse({
       model: "org/model",
       messages: [{ role: "user", content: "hello" }],
-      cache: { project: "payments" },
-    })).toThrow();
+      cache: { project: "payments", priority: "interactive", side_request: false },
+    });
+    expect(parsed.cache).toEqual({ project: "payments", priority: "interactive", side_request: false });
+  });
+
+  test("bounds all public labels and rejects conflicting deprecated tenant alias", () => {
+    const base = { model: "org/model", messages: [{ role: "user", content: "hello" }] };
+    for (const label of ["namespace", "tenant", "project", "harness", "agent", "session"] as const) {
+      expect(() => ChatCompletionRequestSchema.parse({
+        ...base,
+        cache: { [label]: "x".repeat(129) },
+      })).toThrow();
+      expect(ChatCompletionRequestSchema.parse({
+        ...base,
+        cache: { [label]: `  ${label}  ` },
+      }).cache?.[label]).toBe(label);
+    }
+    expect(() => ChatCompletionRequestSchema.parse({
+      ...base,
+      cache: { namespace: "preferred", tenant: "different" },
+    })).toThrow("deprecated tenant alias must match");
+    expect(ChatCompletionRequestSchema.parse({
+      ...base,
+      cache: { namespace: "same", tenant: "same" },
+    }).cache).toMatchObject({ namespace: "same", tenant: "same" });
   });
 
   test("accepts ordered generic slices with zero-based inclusive message indexes", () => {

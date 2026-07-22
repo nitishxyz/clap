@@ -363,18 +363,21 @@ export const CacheBoundarySchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+const CacheIntentLabelSchema = z.string().trim().min(1).max(128);
+
 export const CacheIntentSchema = z.object({
-  namespace: z.string().min(1).optional(),
-  tenant: z.string().min(1).optional(),
-  project: z.string().min(1).optional(),
-  harness: z.string().min(1).optional(),
-  agent: z.string().min(1).optional(),
-  session: z.string().min(1).optional(),
+  namespace: CacheIntentLabelSchema.describe("Optional non-authoritative display/reuse label. Authenticated server identity controls isolation.").optional(),
+  tenant: CacheIntentLabelSchema.describe("Deprecated alias for namespace. This caller label is not an authoritative tenant identity.").optional(),
+  project: CacheIntentLabelSchema.describe("Optional non-authoritative project display/reuse label.").optional(),
+  harness: CacheIntentLabelSchema.describe("Optional non-authoritative harness display/reuse label.").optional(),
+  agent: CacheIntentLabelSchema.describe("Optional non-authoritative agent display/reuse label.").optional(),
+  session: CacheIntentLabelSchema.describe("Optional non-authoritative session display/reuse label.").optional(),
   priority: z.enum(["interactive", "background"]).optional(),
   side_request: z.boolean().optional(),
   boundaries: z.array(CacheBoundarySchema).max(8).optional(),
-}).refine((value) => value.namespace || value.tenant, {
-  message: "cache intent requires namespace or tenant",
+}).refine((value) => value.namespace === undefined || value.tenant === undefined || value.namespace === value.tenant, {
+  message: "cache namespace and deprecated tenant alias must match when both are provided",
+  path: ["tenant"],
 });
 
 function validateCacheBoundaries(
