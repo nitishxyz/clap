@@ -8,6 +8,41 @@ import { ResidentWorkerRegistry } from "../resident";
 import { ModelLifecycleManager } from "../lifecycle";
 import type { ResolvedModel } from "@clap/models";
 import type { WorkerLaunchMetadata, WorkerLoadStateEvent } from "./types";
+import type { LifecycleResidencySnapshot } from "../lifecycle";
+
+class RegistryResidencyLifecycle {
+  snapshots: LifecycleResidencySnapshot[] = [];
+  transitions = new Map<string, string>();
+  evictionGate?: Promise<void>;
+  evicted: string[] = [];
+  snapshotForResidency() { return this.snapshots; }
+  async tryEvictIdle(snapshot: LifecycleResidencySnapshot) {
+    await this.evictionGate;
+    this.evicted.push(snapshot.key);
+    this.snapshots = this.snapshots.filter((entry) => entry.key !== snapshot.key);
+    return "evicted" as const;
+  }
+  setResidencyTransition(key: string, state: "starting" | "loading" | "closing") { this.transitions.set(key, state); }
+  clearResidencyTransition(key: string) { this.transitions.delete(key); }
+}
+
+function configureAdmission(registry: ResidentWorkerRegistry, lifecycle = new RegistryResidencyLifecycle(),
+  available = 700 * 1024 ** 2) {
+  registry.memorySnapshot = async () => ({
+    physicalMemoryBytes: 8 * 1024 ** 3,
+    availableMemoryBytes: available,
+    residentBytesByPid: new Map(),
+  });
+  registry.rssSampler = async () => 600 * 1024 ** 2;
+  registry.configureResidency({
+    lifecycle,
+    osHeadroomBytes: 0,
+    runtimeHeadroomBytes: 0,
+    policy: { minimumHeadroomBytes: 0 },
+    env: {},
+  });
+  return lifecycle;
+}
 
 const originalHome = process.env.CLAP_HOME;
 const originalWorker = process.env.CLAP_LLAMA_WORKER;
@@ -238,6 +273,88 @@ describe.serial("resident worker lifecycle races", () => {
     expect(await registry.observeWorkerRss("sample")).toEqual({
       kind: "unavailable", bytes: null, basis: "not_reported",
     });
+    await registry.shutdownAsync();
+  });
+
+  test("registry admission joins same-key loads under one visible reservation", async () => {
+    const fixture = await setup("terminal", "80");
+    const registry = new ResidentWorkerRegistry();
+    configureAdmission(registry);
+    const worker = registry.getOrCreate("admitted", "llama", fixture.worker.modelPath,
+      { artifactBytes: 1_000, configuredContext: 1, kv: { bytesPerToken: 1 } });
+    const first = worker.load();
+    const second = worker.load();
+    await Bun.sleep(20);
+    expect(registry.residencyReservations()).toHaveLength(1);
+    expect(await first).toEqual(await second);
+    expect((await commandTypes(fixture.commands)).filter((type) => type === "load")).toHaveLength(1);
+    expect(registry.residencyReservations()).toEqual([]);
+    await registry.shutdownAsync();
+  });
+
+  test("registry serializes different physical loads and does not reuse a stale snapshot", async () => {
+    const fixture = await setup("terminal", "60");
+    const registry = new ResidentWorkerRegistry();
+    let memoryCalls = 0;
+    registry.memorySnapshot = async () => ({
+      physicalMemoryBytes: 8 * 1024 ** 3,
+      availableMemoryBytes: ++memoryCalls === 1 ? 700 * 1024 ** 2 : 100 * 1024 ** 2,
+      residentBytesByPid: new Map(),
+    });
+    registry.configureResidency({ lifecycle: new RegistryResidencyLifecycle(), osHeadroomBytes: 0,
+      runtimeHeadroomBytes: 0, policy: { minimumHeadroomBytes: 0 }, env: {} });
+    const descriptor = { artifactBytes: 1_000, configuredContext: 1, kv: { bytesPerToken: 1 } };
+    const first = registry.getOrCreate("first", "llama", fixture.worker.modelPath, descriptor).load();
+    const second = registry.getOrCreate("second", "llama", fixture.worker.modelPath, descriptor).load();
+    await first;
+    await expect(second).rejects.toMatchObject({ code: "insufficient_model_memory" });
+    expect(memoryCalls).toBe(2);
+    expect(registry.residencyReservations()).toEqual([]);
+    await registry.shutdownAsync();
+  });
+
+  test("registry rollback closes partial loads and rotation blocks new admission", async () => {
+    const fixture = await setup("terminal", "80");
+    const registry = new ResidentWorkerRegistry();
+    configureAdmission(registry);
+    const worker = registry.getOrCreate("rotating", "llama", fixture.worker.modelPath,
+      { artifactBytes: 1_000, configuredContext: 1, kv: { bytesPerToken: 1 } });
+    const load = worker.load();
+    await Bun.sleep(20);
+    const rotation = registry.rotateCacheIdentityGeneration();
+    await load;
+    expect(await rotation).toBe(1);
+    expect(registry.residencyReservations()).toEqual([]);
+    await expect(worker.load()).rejects.toThrow("retired");
+    expect(worker.info().loadState).toBe("not_started");
+  });
+
+  test("registry admission awaits eviction before starting its worker", async () => {
+    const fixture = await setup();
+    const registry = new ResidentWorkerRegistry();
+    const lifecycle = new RegistryResidencyLifecycle();
+    let release!: () => void;
+    lifecycle.evictionGate = new Promise<void>((resolve) => { release = resolve; });
+    lifecycle.snapshots = [{
+      key: "victim", state: "idle", activeRequests: 0, pinned: false, always: false,
+      loadedAtMs: 1, lastUsedAtMs: 1, lifecycleVersion: 1, retainedValueScore: 0,
+      memory: { kind: "measured", bytes: 600 * 1024 ** 2, basis: "resident_rss" },
+    }];
+    let samples = 0;
+    registry.memorySnapshot = async () => ({ physicalMemoryBytes: 8 * 1024 ** 3,
+      availableMemoryBytes: ++samples === 1 ? 100 * 1024 ** 2 : 700 * 1024 ** 2,
+      residentBytesByPid: new Map() });
+    registry.configureResidency({ lifecycle, osHeadroomBytes: 0, runtimeHeadroomBytes: 0,
+      policy: { minimumHeadroomBytes: 0 }, env: {} });
+    const worker = registry.getOrCreate("target", "llama", fixture.worker.modelPath,
+      { artifactBytes: 1_000, configuredContext: 1, kv: { bytesPerToken: 1 } });
+    const load = worker.load();
+    await Bun.sleep(20);
+    expect(worker.info().loadState).toBe("not_started");
+    release();
+    await load;
+    expect(lifecycle.evicted).toEqual(["victim"]);
+    expect(samples).toBe(2);
     await registry.shutdownAsync();
   });
 });

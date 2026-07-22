@@ -7,6 +7,9 @@ import { ResidentWorkerProcess } from "./process/resident-worker-process";
 import type { ResidentCacheInfo } from "./process/types";
 import { measuredMemory, unavailableMemory, type MemoryValue } from "./residency/types";
 import type { WorkerLoadState, WorkerLoadStateEvent, WorkerRssSampler } from "./process/types";
+import { ResidencyCoordinator, measuredResidencyMemory,
+  type ResidencyCoordinatorDependencies, type ResidencyLifecycleAdapter } from "./residency/coordinator";
+import type { LoadReservation, ResidencyModelDescriptor } from "./residency/types";
 
 export { ResidentWorkerProcess } from "./process/resident-worker-process";
 export type { ResidentCacheInfo } from "./process/types";
@@ -123,6 +126,75 @@ export type ResidentWorkerHandle = {
   shutdownAsync?(): Promise<void>;
   drainAndShutdownAsync?(): Promise<void>;
 };
+
+export type RegistryResidencyConfiguration = Omit<ResidencyCoordinatorDependencies,
+  "memorySnapshot" | "lifecycle"> & {
+  lifecycle: ResidencyLifecycleAdapter;
+};
+
+class RegistryResidentWorkerHandle implements ResidentWorkerHandle {
+  retired = false;
+
+  constructor(
+    readonly process: ResidentWorkerProcess,
+    private readonly registry: ResidentWorkerRegistry,
+    readonly descriptor: ResidencyModelDescriptor,
+  ) {}
+
+  get key() { return this.process.key; }
+  get backend() { return this.process.backend; }
+  get modelPath() { return this.process.modelPath; }
+  info() { return this.process.info(); }
+  onLoadState(listener: (event: WorkerLoadStateEvent) => void) { return this.process.onLoadState(listener); }
+  observeRss(sampler: WorkerRssSampler) { return this.process.observeRss(sampler); }
+  load() { return this.registry.loadHandle(this); }
+  async chat(...args: Parameters<ResidentWorkerProcess["chat"]>) {
+    await this.load();
+    return this.process.chat(...args);
+  }
+  async setMaxActive(...args: Parameters<ResidentWorkerProcess["setMaxActive"]>) {
+    await this.load();
+    return this.process.setMaxActive(...args);
+  }
+  unload() { return this.process.unload(); }
+  shutdown() { this.process.shutdown(); }
+  shutdownAsync() { return this.process.shutdownAsync(); }
+  drainAndShutdownAsync() { return this.process.drainAndShutdownAsync(); }
+}
+
+class RegistryOperationGate {
+  private active = 0;
+  private exclusive = false;
+  private exclusiveTail: Promise<void> = Promise.resolve();
+  private waiters: Array<() => void> = [];
+
+  async shared<T>(operation: () => Promise<T>): Promise<T> {
+    while (this.exclusive) await new Promise<void>((resolve) => this.waiters.push(resolve));
+    this.active += 1;
+    try { return await operation(); } finally {
+      this.active -= 1;
+      this.wake();
+    }
+  }
+
+  async exclusiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.exclusiveTail;
+    let releaseExclusive!: () => void;
+    this.exclusiveTail = new Promise<void>((resolve) => { releaseExclusive = resolve; });
+    await previous;
+    this.exclusive = true;
+    while (this.active > 0) await new Promise<void>((resolve) => this.waiters.push(resolve));
+    try { return await operation(); } finally {
+      this.exclusive = false;
+      releaseExclusive();
+      this.wake();
+    }
+  }
+
+  private wake(): void {
+    for (const resolve of this.waiters.splice(0)) resolve();
+  }
+}
 
 export type ActiveLimitTelemetry = {
   previousMaxActive: number;
@@ -320,6 +392,7 @@ export function validateTokenBudget(capabilities: ModelTokenCapabilities, prompt
 
 export class ResidentWorkerRegistry {
   private readonly workers = new Map<string, ResidentWorkerProcess>();
+  private readonly handles = new Map<string, RegistryResidentWorkerHandle>();
   private readonly workerEnvironments = new Map<string, Record<string, string>>();
   private readonly recentRetainedGrowth = new Map<string, { bytes: number; at: number }>();
   private readonly lastAdjustments = new Map<string, { at: number; reason: string; previous: number }>();
@@ -327,6 +400,8 @@ export class ResidentWorkerRegistry {
   private pressureTimer?: ReturnType<typeof setInterval>;
   private rebalanceScheduled = false;
   private rebalancing = false;
+  private readonly operationGate = new RegistryOperationGate();
+  private residencyCoordinator?: ResidencyCoordinator;
   onCrash?: ResidentCrashListener;
   memorySnapshot: (pids: number[]) => Promise<{
     physicalMemoryBytes: number;
@@ -341,9 +416,33 @@ export class ResidentWorkerRegistry {
   // consulted once when the worker handle is first created.
   workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
   rssSampler: WorkerRssSampler = async () => undefined;
+  configureResidency(configuration: RegistryResidencyConfiguration): ResidencyCoordinator {
+    const lifecycle: ResidencyLifecycleAdapter = {
+      snapshotForResidency: () => configuration.lifecycle.snapshotForResidency(),
+      tryEvictIdle: (snapshot) => configuration.lifecycle.tryEvictIdle(snapshot),
+      setResidencyTransition: (key, state) => configuration.lifecycle.setResidencyTransition(key, state),
+      clearResidencyTransition: (key) => configuration.lifecycle.clearResidencyTransition(key),
+    };
+    this.residencyCoordinator = new ResidencyCoordinator({
+      ...configuration,
+      lifecycle,
+      memorySnapshot: async () => {
+        const pids = [...this.workers.values()].map((worker) => worker.info().pid)
+          .filter((pid): pid is number => pid !== undefined);
+        const snapshot = await this.memorySnapshot(pids);
+        return measuredResidencyMemory(snapshot.availableMemoryBytes, snapshot.physicalMemoryBytes);
+      },
+    });
+    return this.residencyCoordinator;
+  }
+
+  residencyReservations(): readonly LoadReservation[] {
+    return this.residencyCoordinator?.reservations() ?? [];
+  }
+
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string,
     descriptor: Partial<import("./process/types").WorkerModelDescriptor> = {}): ResidentWorkerHandle {
-    const existing = this.workers.get(key);
+    const existing = this.handles.get(key);
     if (existing) return existing;
     const environment = this.workerEnv?.(modelPath, backend) ?? {};
     const worker = new ResidentWorkerProcess(key, backend, modelPath,
@@ -351,12 +450,48 @@ export class ResidentWorkerRegistry {
       (source, previous, current) => this.handleTelemetry(source, previous, current),
       { ...descriptor, modelId: descriptor.modelId ?? key });
     this.workers.set(key, worker);
+    const handle = new RegistryResidentWorkerHandle(worker, this, {
+      modelKey: key,
+      backend,
+      modelId: descriptor.modelId ?? key,
+      revision: descriptor.revision,
+      artifactBytes: descriptor.artifactBytes,
+      architecture: descriptor.architecture,
+      modelType: descriptor.modelType,
+      quantization: descriptor.quantization,
+      context: descriptor.context,
+      configuredContext: descriptor.configuredContext,
+      kv: descriptor.kv,
+      cacheBudget: descriptor.cacheBudget,
+    });
+    this.handles.set(key, handle);
     this.workerEnvironments.set(key, environment);
     if (!this.pressureTimer) {
       this.pressureTimer = setInterval(() => this.scheduleRebalance("pressure_poll"), 5_000);
       this.pressureTimer.unref?.();
     }
-    return worker;
+    return handle;
+  }
+
+  async loadHandle(handle: RegistryResidentWorkerHandle): Promise<ResidentWorkerInfo> {
+    if (handle.retired) throw new Error("resident worker handle is retired");
+    if (handle.process.info().loadState === "resident" || !this.residencyCoordinator) {
+      return handle.process.load();
+    }
+    return this.operationGate.shared(async () => {
+      if (handle.retired) throw new Error("resident worker handle is retired");
+      if (handle.process.info().loadState === "resident") return handle.process.info();
+      const result = await this.residencyCoordinator!.load(handle.descriptor, {
+        performLoad: () => handle.process.load(),
+        stabilize: async () => { await Bun.sleep(0); },
+        observeRss: async () => {
+          const observed = await handle.process.observeRss(this.rssSampler);
+          return observed.kind === "measured" ? observed.bytes : undefined;
+        },
+        shutdownPartial: () => handle.process.shutdownAsync(),
+      });
+      return result.value;
+    });
   }
 
   async observeWorkerRss(key: string): Promise<MemoryValue> {
@@ -368,12 +503,15 @@ export class ResidentWorkerRegistry {
   }
 
   get(key: string): ResidentWorkerHandle | undefined {
-    return this.workers.get(key);
+    return this.handles.get(key);
   }
 
   async unload(key: string): Promise<void> {
     const worker = this.workers.get(key);
+    const handle = this.handles.get(key);
+    if (handle) handle.retired = true;
     this.workers.delete(key);
+    this.handles.delete(key);
     this.workerEnvironments.delete(key);
     this.recentRetainedGrowth.delete(key);
     this.lastAdjustments.delete(key);
@@ -387,14 +525,22 @@ export class ResidentWorkerRegistry {
 
   async shutdownAsync(key?: string): Promise<void> {
     if (key === undefined) {
-      const keys = [...this.workers.keys()];
-      await Promise.all(keys.map((entry) => this.shutdownAsync(entry)));
-      if (this.pressureTimer) clearInterval(this.pressureTimer);
-      this.pressureTimer = undefined;
-      return;
+      return this.operationGate.exclusiveOperation(async () => {
+        const keys = [...this.workers.keys()];
+        await Promise.all(keys.map((entry) => this.shutdownKey(entry)));
+        if (this.pressureTimer) clearInterval(this.pressureTimer);
+        this.pressureTimer = undefined;
+      });
     }
+    await this.shutdownKey(key);
+  }
+
+  private async shutdownKey(key: string): Promise<void> {
     const worker = this.workers.get(key);
+    const handle = this.handles.get(key);
+    if (handle) handle.retired = true;
     this.workers.delete(key);
+    this.handles.delete(key);
     this.workerEnvironments.delete(key);
     this.recentRetainedGrowth.delete(key);
     this.lastAdjustments.delete(key);
@@ -413,16 +559,20 @@ export class ResidentWorkerRegistry {
 
   /** Drains every old-generation worker after the new secret is durable. */
   async rotateCacheIdentityGeneration(): Promise<number> {
-    const workers = [...this.workers.values()];
-    const cleared = workers.length;
-    this.workers.clear();
-    this.workerEnvironments.clear();
-    this.recentRetainedGrowth.clear();
-    this.lastAdjustments.clear();
-    await Promise.all(workers.map((worker) => worker.drainAndShutdownAsync?.() ?? worker.shutdownAsync?.()));
-    if (this.pressureTimer) clearInterval(this.pressureTimer);
-    this.pressureTimer = undefined;
-    return cleared;
+    return this.operationGate.exclusiveOperation(async () => {
+      const workers = [...this.workers.values()];
+      const cleared = workers.length;
+      for (const handle of this.handles.values()) handle.retired = true;
+      this.workers.clear();
+      this.handles.clear();
+      this.workerEnvironments.clear();
+      this.recentRetainedGrowth.clear();
+      this.lastAdjustments.clear();
+      await Promise.all(workers.map((worker) => worker.drainAndShutdownAsync?.() ?? worker.shutdownAsync?.()));
+      if (this.pressureTimer) clearInterval(this.pressureTimer);
+      this.pressureTimer = undefined;
+      return cleared;
+    });
   }
 
   async rebalance(reason = "manual"): Promise<void> {
