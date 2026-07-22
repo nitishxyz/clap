@@ -29,7 +29,8 @@ import {
 import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
-import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
+import { InsufficientModelMemoryError, listBackends, ModelLifecycleManager, ResidentWorkerRegistry,
+  type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { readFile, stat } from "node:fs/promises";
@@ -295,6 +296,7 @@ export function createServer(
         },
       }, 400);
     }
+    if (error instanceof InsufficientModelMemoryError) return insufficientMemoryResponse(c, error);
     if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) &&
         (error.code === "context_length_exceeded" || error.code === "max_output_tokens_exceeded" || error.code === "token_capability_unknown" ||
           error.code === "invalid_cache_boundary" || error.code === "unsafe_cache_boundary" || error.code === "non_prefix_cache_boundary")) {
@@ -695,6 +697,7 @@ export function createServer(
       info = await worker.load();
     } catch (error) {
       lifecycle.unload(resolved.model);
+      if (error instanceof InsufficientModelMemoryError) return insufficientMemoryResponse(c, error);
       return c.json(ErrorResponseSchema.parse({
         error: { message: error instanceof Error ? error.message : String(error), type: "backend_error", code: "resident_worker_error" },
       }), 503);
@@ -971,8 +974,9 @@ export function createServer(
       throw error;
     }
     try {
-      residents.getOrCreate(lifecycleKey(model), model.backend, model.modelPath ?? model.input,
+      const worker = residents.getOrCreate(lifecycleKey(model), model.backend, model.modelPath ?? model.input,
         workerDescriptor(model));
+      await worker.load();
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(model);
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
@@ -1838,10 +1842,32 @@ function workerResultMetrics(result?: ResidentChatResult) {
 }
 
 function backendErrorBody(error: unknown) {
+  if (error instanceof InsufficientModelMemoryError) return insufficientMemoryBody(error);
   const message = error instanceof Error ? error.message : String(error);
   return ErrorResponseSchema.parse({
     error: { message, type: "backend_error", code: "resident_worker_error" },
   });
+}
+
+function insufficientMemoryBody(error: InsufficientModelMemoryError) {
+  return ErrorResponseSchema.parse({
+    error: {
+      message: "Insufficient memory to load the requested model safely",
+      type: "model_error",
+      code: error.code,
+      details: error.details,
+    },
+  });
+}
+
+function insufficientMemoryResponse(c: Context, error: InsufficientModelMemoryError) {
+  const mapped = mapInsufficientModelMemoryError(error);
+  c.header("Retry-After", mapped.retryAfter);
+  return c.json(mapped.body, mapped.status);
+}
+
+export function mapInsufficientModelMemoryError(error: InsufficientModelMemoryError) {
+  return { status: 503 as const, retryAfter: "5", body: insufficientMemoryBody(error) };
 }
 
 export function startServer(options: ServerOptions = {}) {

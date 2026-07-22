@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
 import { createServer, idleTimeoutFromEnv, inferParserFamilies, normalizeCacheIntent } from "./index";
+import { mapInsufficientModelMemoryError } from "./index";
+import { InsufficientModelMemoryError } from "@clap/runtime-router";
 
 // Tests mutate fake model cache directories directly; disable the model list
 // memo so every request observes the current directory state.
@@ -19,6 +21,30 @@ process.env.CLAP_MODEL_RUNTIME_HEADROOM_BYTES = "0";
 const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
 
 describe("clap server", () => {
+  test("maps memory admission failures to a safe retryable model error", () => {
+    const secret = "/private/models/secret.gguf";
+    const error = new InsufficientModelMemoryError({
+      reason: "insufficient_available_memory",
+      requestedBytes: 10,
+      availableBytes: 5,
+      reservedBytes: 2,
+      headroomBytes: 3,
+      evictableModelCount: 0,
+    }, new Error(secret));
+    const mapped = mapInsufficientModelMemoryError(error);
+    expect(mapped).toMatchObject({
+      status: 503,
+      retryAfter: "5",
+      body: { error: {
+        message: "Insufficient memory to load the requested model safely",
+        type: "model_error",
+        code: "insufficient_model_memory",
+        details: { requestedBytes: 10, availableBytes: 5, reservedBytes: 2, headroomBytes: 3 },
+      } },
+    });
+    expect(JSON.stringify(mapped)).not.toContain(secret);
+  });
+
   test("normalizes deprecated tenant display alias without treating it as authority", () => {
     const base = { model: "model", messages: [{ role: "user" as const, content: "hello" }], stream: false };
     expect(normalizeCacheIntent({ ...base, cache: { tenant: "legacy", project: "payments" } }).cache).toEqual({

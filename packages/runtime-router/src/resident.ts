@@ -21,12 +21,23 @@ export type ResidentWorkerInfo = {
   stderrLogPath?: string; launchMetadataPath?: string; crashClassification?: string;
   state: LoadedModel["worker"]["state"];
   loadState: WorkerLoadState;
+  residency?: ResidentWorkerResidencyInfo;
   limitation?: string;
   crashes?: number;
   lastCrashAt?: string;
   memory?: ResidentMlxMemory;
   retention?: ResidentMlxRetention;
   tokenCapabilities?: ModelTokenCapabilities;
+};
+
+export type ResidentWorkerResidencyInfo = {
+  estimateBytes: number | null;
+  estimateSource: import("./residency/types").EstimatedMemoryBasis | null;
+  observedRssBytes: number | null;
+  observedRssSource: "resident_rss" | null;
+  reservationBytes: number;
+  lastAdmissionReason: import("./residency/types").AdmissionReason | null;
+  lastEvictionReason: "memory_admission" | null;
 };
 
 export type ResidentMlxMemory = {
@@ -134,6 +145,7 @@ export type RegistryResidencyConfiguration = Omit<ResidencyCoordinatorDependenci
 
 class RegistryResidentWorkerHandle implements ResidentWorkerHandle {
   retired = false;
+  residency?: ResidentWorkerResidencyInfo;
 
   constructor(
     readonly process: ResidentWorkerProcess,
@@ -144,7 +156,7 @@ class RegistryResidentWorkerHandle implements ResidentWorkerHandle {
   get key() { return this.process.key; }
   get backend() { return this.process.backend; }
   get modelPath() { return this.process.modelPath; }
-  info() { return this.process.info(); }
+  info() { return { ...this.process.info(), residency: this.residency }; }
   onLoadState(listener: (event: WorkerLoadStateEvent) => void) { return this.process.onLoadState(listener); }
   observeRss(sampler: WorkerRssSampler) { return this.process.observeRss(sampler); }
   load() { return this.registry.loadHandle(this); }
@@ -490,7 +502,17 @@ export class ResidentWorkerRegistry {
         },
         shutdownPartial: () => handle.process.shutdownAsync(),
       });
-      return result.value;
+      const observed = await handle.process.observeRss(this.rssSampler);
+      handle.residency = {
+        estimateBytes: result.decision.requested.bytes,
+        estimateSource: result.decision.requested.kind === "estimated" ? result.decision.requested.basis : null,
+        observedRssBytes: observed.kind === "measured" ? observed.bytes : null,
+        observedRssSource: observed.kind === "measured" ? "resident_rss" : null,
+        reservationBytes: result.reservation.bytes,
+        lastAdmissionReason: result.decision.reason,
+        lastEvictionReason: result.decision.evictedModelKeys.length > 0 ? "memory_admission" : null,
+      };
+      return handle.info();
     });
   }
 

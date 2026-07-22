@@ -8,6 +8,7 @@ export const ErrorResponseSchema = z.object({
     message: z.string(),
     type: z.string().default("invalid_request_error"),
     code: z.string().optional(),
+    details: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
   }),
 });
 
@@ -209,6 +210,20 @@ export const LoadedModelSchema = z.object({
     launchMetadataPath: z.string().min(1).optional(),
     crashClassification: z.string().min(1).optional(),
     state: z.enum(["not_started", "one_shot", "resident", "exited"]),
+    loadState: z.enum(["not_started", "starting", "loading", "resident", "closing"]).optional(),
+    residency: z.object({
+      estimateBytes: z.number().int().nonnegative().nullable(),
+      estimateSource: z.enum(["prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "conservative_fallback"]).nullable(),
+      observedRssBytes: z.number().int().positive().nullable(),
+      observedRssSource: z.literal("resident_rss").nullable(),
+      reservationBytes: z.number().int().nonnegative(),
+      lastAdmissionReason: z.enum(["within_budget", "within_budget_after_eviction", "insufficient_available_memory", "memory_state_unavailable", "no_evictable_models"]).nullable(),
+      lastEvictionReason: z.enum(["memory_admission"]).nullable(),
+    }).superRefine((value, context) => {
+      if ((value.observedRssBytes === null) !== (value.observedRssSource === null)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "observed RSS bytes and source must both be available" });
+      }
+    }).optional(),
     limitation: z.string().optional(),
     crashes: z.number().int().nonnegative().optional(),
     lastCrashAt: z.string().optional(),

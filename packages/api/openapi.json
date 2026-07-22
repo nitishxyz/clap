@@ -26,6 +26,28 @@
               },
               "code": {
                 "type": "string"
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "nullable": true
+                    },
+                    {
+                      "nullable": true
+                    }
+                  ]
+                }
               }
             },
             "required": [
@@ -701,6 +723,81 @@
                         "exited"
                       ]
                     },
+                    "loadState": {
+                      "type": "string",
+                      "enum": [
+                        "not_started",
+                        "starting",
+                        "loading",
+                        "resident",
+                        "closing"
+                      ]
+                    },
+                    "residency": {
+                      "type": "object",
+                      "properties": {
+                        "estimateBytes": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0
+                        },
+                        "estimateSource": {
+                          "type": "string",
+                          "nullable": true,
+                          "enum": [
+                            "prior_observation",
+                            "model_artifacts",
+                            "architecture_metadata",
+                            "configured_cache",
+                            "conservative_fallback"
+                          ]
+                        },
+                        "observedRssBytes": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "observedRssSource": {
+                          "type": "string",
+                          "nullable": true,
+                          "enum": [
+                            "resident_rss"
+                          ]
+                        },
+                        "reservationBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "lastAdmissionReason": {
+                          "type": "string",
+                          "nullable": true,
+                          "enum": [
+                            "within_budget",
+                            "within_budget_after_eviction",
+                            "insufficient_available_memory",
+                            "memory_state_unavailable",
+                            "no_evictable_models"
+                          ]
+                        },
+                        "lastEvictionReason": {
+                          "type": "string",
+                          "nullable": true,
+                          "enum": [
+                            "memory_admission"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "estimateBytes",
+                        "estimateSource",
+                        "observedRssBytes",
+                        "observedRssSource",
+                        "reservationBytes",
+                        "lastAdmissionReason",
+                        "lastEvictionReason"
+                      ]
+                    },
                     "limitation": {
                       "type": "string"
                     },
@@ -1159,6 +1256,81 @@
                       "exited"
                     ]
                   },
+                  "loadState": {
+                    "type": "string",
+                    "enum": [
+                      "not_started",
+                      "starting",
+                      "loading",
+                      "resident",
+                      "closing"
+                    ]
+                  },
+                  "residency": {
+                    "type": "object",
+                    "properties": {
+                      "estimateBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "estimateSource": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "prior_observation",
+                          "model_artifacts",
+                          "architecture_metadata",
+                          "configured_cache",
+                          "conservative_fallback"
+                        ]
+                      },
+                      "observedRssBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "observedRssSource": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "resident_rss"
+                        ]
+                      },
+                      "reservationBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastAdmissionReason": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "within_budget",
+                          "within_budget_after_eviction",
+                          "insufficient_available_memory",
+                          "memory_state_unavailable",
+                          "no_evictable_models"
+                        ]
+                      },
+                      "lastEvictionReason": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "memory_admission"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "estimateBytes",
+                      "estimateSource",
+                      "observedRssBytes",
+                      "observedRssSource",
+                      "reservationBytes",
+                      "lastAdmissionReason",
+                      "lastEvictionReason"
+                    ]
+                  },
                   "limitation": {
                     "type": "string"
                   },
@@ -1603,6 +1775,81 @@
                       "one_shot",
                       "resident",
                       "exited"
+                    ]
+                  },
+                  "loadState": {
+                    "type": "string",
+                    "enum": [
+                      "not_started",
+                      "starting",
+                      "loading",
+                      "resident",
+                      "closing"
+                    ]
+                  },
+                  "residency": {
+                    "type": "object",
+                    "properties": {
+                      "estimateBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "estimateSource": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "prior_observation",
+                          "model_artifacts",
+                          "architecture_metadata",
+                          "configured_cache",
+                          "conservative_fallback"
+                        ]
+                      },
+                      "observedRssBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "observedRssSource": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "resident_rss"
+                        ]
+                      },
+                      "reservationBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastAdmissionReason": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "within_budget",
+                          "within_budget_after_eviction",
+                          "insufficient_available_memory",
+                          "memory_state_unavailable",
+                          "no_evictable_models"
+                        ]
+                      },
+                      "lastEvictionReason": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "memory_admission"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "estimateBytes",
+                      "estimateSource",
+                      "observedRssBytes",
+                      "observedRssSource",
+                      "reservationBytes",
+                      "lastAdmissionReason",
+                      "lastEvictionReason"
                     ]
                   },
                   "limitation": {
@@ -4841,6 +5088,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -4914,6 +5183,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5010,6 +5301,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5393,6 +5706,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5576,6 +5911,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -5694,6 +6051,81 @@
                                   "one_shot",
                                   "resident",
                                   "exited"
+                                ]
+                              },
+                              "loadState": {
+                                "type": "string",
+                                "enum": [
+                                  "not_started",
+                                  "starting",
+                                  "loading",
+                                  "resident",
+                                  "closing"
+                                ]
+                              },
+                              "residency": {
+                                "type": "object",
+                                "properties": {
+                                  "estimateBytes": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0
+                                  },
+                                  "estimateSource": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "enum": [
+                                      "prior_observation",
+                                      "model_artifacts",
+                                      "architecture_metadata",
+                                      "configured_cache",
+                                      "conservative_fallback"
+                                    ]
+                                  },
+                                  "observedRssBytes": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "observedRssSource": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "enum": [
+                                      "resident_rss"
+                                    ]
+                                  },
+                                  "reservationBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "lastAdmissionReason": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "enum": [
+                                      "within_budget",
+                                      "within_budget_after_eviction",
+                                      "insufficient_available_memory",
+                                      "memory_state_unavailable",
+                                      "no_evictable_models"
+                                    ]
+                                  },
+                                  "lastEvictionReason": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "enum": [
+                                      "memory_admission"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "estimateBytes",
+                                  "estimateSource",
+                                  "observedRssBytes",
+                                  "observedRssSource",
+                                  "reservationBytes",
+                                  "lastAdmissionReason",
+                                  "lastEvictionReason"
                                 ]
                               },
                               "limitation": {
@@ -6050,6 +6482,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -6347,6 +6801,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -6546,6 +7022,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -6701,6 +7199,81 @@
                                 "one_shot",
                                 "resident",
                                 "exited"
+                              ]
+                            },
+                            "loadState": {
+                              "type": "string",
+                              "enum": [
+                                "not_started",
+                                "starting",
+                                "loading",
+                                "resident",
+                                "closing"
+                              ]
+                            },
+                            "residency": {
+                              "type": "object",
+                              "properties": {
+                                "estimateBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "estimateSource": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "prior_observation",
+                                    "model_artifacts",
+                                    "architecture_metadata",
+                                    "configured_cache",
+                                    "conservative_fallback"
+                                  ]
+                                },
+                                "observedRssBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "observedRssSource": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "resident_rss"
+                                  ]
+                                },
+                                "reservationBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lastAdmissionReason": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "within_budget",
+                                    "within_budget_after_eviction",
+                                    "insufficient_available_memory",
+                                    "memory_state_unavailable",
+                                    "no_evictable_models"
+                                  ]
+                                },
+                                "lastEvictionReason": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "memory_admission"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "estimateBytes",
+                                "estimateSource",
+                                "observedRssBytes",
+                                "observedRssSource",
+                                "reservationBytes",
+                                "lastAdmissionReason",
+                                "lastEvictionReason"
                               ]
                             },
                             "limitation": {
@@ -7056,6 +7629,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -7200,6 +7795,81 @@
                                 "one_shot",
                                 "resident",
                                 "exited"
+                              ]
+                            },
+                            "loadState": {
+                              "type": "string",
+                              "enum": [
+                                "not_started",
+                                "starting",
+                                "loading",
+                                "resident",
+                                "closing"
+                              ]
+                            },
+                            "residency": {
+                              "type": "object",
+                              "properties": {
+                                "estimateBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "estimateSource": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "prior_observation",
+                                    "model_artifacts",
+                                    "architecture_metadata",
+                                    "configured_cache",
+                                    "conservative_fallback"
+                                  ]
+                                },
+                                "observedRssBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "observedRssSource": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "resident_rss"
+                                  ]
+                                },
+                                "reservationBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "lastAdmissionReason": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "within_budget",
+                                    "within_budget_after_eviction",
+                                    "insufficient_available_memory",
+                                    "memory_state_unavailable",
+                                    "no_evictable_models"
+                                  ]
+                                },
+                                "lastEvictionReason": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "enum": [
+                                    "memory_admission"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "estimateBytes",
+                                "estimateSource",
+                                "observedRssBytes",
+                                "observedRssSource",
+                                "reservationBytes",
+                                "lastAdmissionReason",
+                                "lastEvictionReason"
                               ]
                             },
                             "limitation": {
@@ -7555,6 +8225,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -7776,6 +8468,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -7989,6 +8703,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -8179,6 +8915,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -8621,6 +9379,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -9346,6 +10126,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10143,6 +10945,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10265,6 +11089,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10336,6 +11182,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10412,6 +11280,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10690,6 +11580,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [
@@ -10820,6 +11732,28 @@
                         },
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
                         }
                       },
                       "required": [

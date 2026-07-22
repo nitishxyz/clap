@@ -287,6 +287,15 @@ describe.serial("resident worker lifecycle races", () => {
     await Bun.sleep(20);
     expect(registry.residencyReservations()).toHaveLength(1);
     expect(await first).toEqual(await second);
+    expect(worker.info().residency).toMatchObject({
+      estimateBytes: 512 * 1024 ** 2 + 1_201,
+      estimateSource: "architecture_metadata",
+      observedRssBytes: 600 * 1024 ** 2,
+      observedRssSource: "resident_rss",
+      reservationBytes: 512 * 1024 ** 2 + 1_201,
+      lastAdmissionReason: "within_budget",
+      lastEvictionReason: null,
+    });
     expect((await commandTypes(fixture.commands)).filter((type) => type === "load")).toHaveLength(1);
     expect(registry.residencyReservations()).toEqual([]);
     await registry.shutdownAsync();

@@ -5,7 +5,7 @@ export { ModelLifecycleManager, normalizeKeepAlive, parseKeepAliveMs, modelLifec
   type IdleEvictionResult, type LifecycleRemovalHook, type LifecycleResidencySnapshot,
   type LifecycleResidencySnapshotOptions, type LifecycleResidencyState } from "./lifecycle";
 export { ResidentWorkerProcess, ResidentWorkerRegistry, type ResidentChatOptions, type ResidentChatResult, type ResidentUsage,
-  type RegistryResidencyConfiguration, type ResidentWorkerHandle } from "./resident";
+  type RegistryResidencyConfiguration, type ResidentWorkerHandle, type ResidentWorkerResidencyInfo } from "./resident";
 export type { CacheIdentity } from "@clap/worker-protocol";
 export { WorkerProtocolFault, protocolFault, type ProtocolFaultCode, type ProtocolFaultScope } from "./protocol/errors";
 export { MAX_WORKER_PROTOCOL_LINE_BYTES, V1WorkerProtocolDecoder } from "./protocol/v1-decoder";

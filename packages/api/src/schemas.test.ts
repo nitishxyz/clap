@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ChatCompletionRequestSchema, LoadedModelSchema, ResponseRequestSchema } from "./schemas";
+import { ChatCompletionRequestSchema, ErrorResponseSchema, LoadedModelSchema, ResponseRequestSchema } from "./schemas";
 
 describe("loaded model retention schema", () => {
   const model = {
@@ -35,6 +35,40 @@ describe("loaded model retention schema", () => {
     };
     expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, ...launch } }).worker)
       .toMatchObject(launch);
+  });
+
+  test("preserves residency state without treating estimates as observed RSS", () => {
+    const residency = {
+      estimateBytes: 1_000,
+      estimateSource: "model_artifacts" as const,
+      observedRssBytes: null,
+      observedRssSource: null,
+      reservationBytes: 1_000,
+      lastAdmissionReason: "within_budget" as const,
+      lastEvictionReason: null,
+    };
+    const parsed = LoadedModelSchema.parse({
+      ...model,
+      worker: { ...model.worker, loadState: "resident", residency },
+    });
+    expect(parsed.worker).toMatchObject({ loadState: "resident", residency });
+    expect(() => LoadedModelSchema.parse({
+      ...model,
+      worker: { ...model.worker, residency: { ...residency, observedRssBytes: 1_000, observedRssSource: null } },
+    })).toThrow();
+  });
+});
+
+describe("structured model memory errors", () => {
+  test("accepts safe scalar admission details", () => {
+    expect(ErrorResponseSchema.parse({
+      error: {
+        message: "Insufficient memory to load the requested model safely",
+        type: "model_error",
+        code: "insufficient_model_memory",
+        details: { requestedBytes: 10, availableBytes: null, retryable: true },
+      },
+    }).error.details).toEqual({ requestedBytes: 10, availableBytes: null, retryable: true });
   });
 });
 
