@@ -6,11 +6,8 @@ import { freemem, totalmem } from "node:os";
 import { dirname } from "node:path";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
-import { LegacyWorkerProtocol } from "./protocol/legacy-worker-protocol";
 import { V1RequestTracker, type ResidentProtocolFact } from "./protocol/request-tracker";
 import { WorkerProtocolFault } from "./protocol/errors";
-
-export type ResidentWorkerProtocolMode = "legacy" | "v1" | "auto";
 
 export type ResidentBackend = LoadedModel["backend"];
 
@@ -224,9 +221,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private retention?: ResidentMlxRetention;
   private tokenCapabilities?: ModelTokenCapabilities;
   private workerLaunchId?: string;
-  private readonly legacyProtocol = new LegacyWorkerProtocol();
   private v1Tracker?: V1RequestTracker;
-  private activeProtocol: "legacy" | "v1" = "v1";
   private handshake?: Promise<void>;
   private resolveHandshake?: () => void;
   private rejectHandshake?: (error: Error) => void;
@@ -241,7 +236,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     private readonly envOverrides?: Record<string, string>,
     private readonly onTelemetry?: (worker: ResidentWorkerProcess,
       previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void,
-    private readonly protocolMode: ResidentWorkerProtocolMode = "auto",
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -310,11 +304,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         // Deliberate termination (unload/server shutdown): the SIGTERM exit
         // (143) must not count as a crash or trigger restart backoff.
         this.expectedExit = true;
-        if (this.activeProtocol === "v1") {
-          const id = `cmd_${crypto.randomUUID()}`;
-          this.v1Tracker?.register(id);
-          this.write({ protocol: 1, type: "shutdown", request_id: id });
-        } else this.write({ type: "shutdown" });
+        const id = `cmd_${crypto.randomUUID()}`;
+        this.v1Tracker?.register(id);
+        this.write({ protocol: 1, type: "shutdown", request_id: id });
         this.proc.kill();
       }
     } catch {
@@ -362,10 +354,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       command: status.command,
     }, null, 2) + "\n");
     const environment = { ...process.env, ...this.envOverrides };
-    if (status.source === "bundled") delete environment.CLAP_WORKER_PROTOCOL;
-    else if (this.protocolMode === "legacy" || this.protocolMode === "v1") {
-      environment.CLAP_WORKER_PROTOCOL = this.protocolMode;
-    }
     const proc = Bun.spawn(status.command, {
       stdin: "pipe",
       stdout: "pipe",
@@ -374,25 +362,19 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     });
     this.proc = proc;
     this.logPath = status.logPath;
-    this.startProtocol(status.source);
+    this.startProtocol();
     void this.readLoop(proc);
   }
 
-  private startProtocol(source: "configured" | "bundled" | "missing"): void {
+  private startProtocol(): void {
     this.clearHandshake();
-    if (this.protocolMode === "legacy" && source === "configured") {
-      this.activeProtocol = "legacy";
-      this.handshake = Promise.resolve();
-      return;
-    }
-    this.activeProtocol = "v1";
     this.v1Tracker = new V1RequestTracker();
     this.handshake = new Promise<void>((resolve, reject) => {
       this.resolveHandshake = resolve;
       this.rejectHandshake = reject;
     });
     this.handshakeTimer = setTimeout(() => {
-      if (this.activeProtocol !== "v1" || !this.resolveHandshake) return;
+      if (!this.resolveHandshake) return;
       this.protocolUnhealthy(new WorkerProtocolFault("handshake_timeout",
         "Worker did not send ready within 1000ms", "worker"));
     }, 1_000);
@@ -466,28 +448,18 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private handleProtocolLine(line: string): void {
-    if (this.activeProtocol === "v1") {
-      try {
-        const fact = this.v1Tracker!.consumeLine(line);
-        if (fact.kind === "ready") {
-          this.resolveHandshake?.();
-          this.resolveHandshake = undefined;
-          this.rejectHandshake = undefined;
-          if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-          this.handshakeTimer = undefined;
-        } else this.handleV1Fact(fact);
-      } catch (error) {
-        this.protocolUnhealthy(error instanceof Error ? error : new Error(String(error)));
-      }
-      return;
+    try {
+      const fact = this.v1Tracker!.consumeLine(line);
+      if (fact.kind === "ready") {
+        this.resolveHandshake?.();
+        this.resolveHandshake = undefined;
+        this.rejectHandshake = undefined;
+        if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+        this.handshakeTimer = undefined;
+      } else this.handleV1Fact(fact);
+    } catch (error) {
+      this.protocolUnhealthy(error instanceof Error ? error : new Error(String(error)));
     }
-    const decoded = this.legacyProtocol.decode(line);
-    if (decoded.kind === "malformed") {
-      this.protocolUnhealthy(new WorkerProtocolFault("malformed_stdout",
-        "Legacy worker stdout line is not valid JSON", "worker"));
-      return;
-    }
-    this.handleLegacyMessage(decoded.message);
   }
 
   private handleLegacyMessage(message: Record<string, unknown>): void {
@@ -731,11 +703,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       const cancel = () => {
         if (!this.pending.has(id)) return;
         try {
-          if (this.activeProtocol === "v1") {
-            const cancelId = `cmd_${crypto.randomUUID()}`;
-            this.v1Tracker!.register(cancelId);
-            this.write({ protocol: 1, type: "cancel", request_id: cancelId, target_request_id: id });
-          } else this.write({ id, type: "cancel" });
+          const cancelId = `cmd_${crypto.randomUUID()}`;
+          this.v1Tracker!.register(cancelId);
+          this.write({ protocol: 1, type: "cancel", request_id: cancelId, target_request_id: id });
         } catch {
           // worker already gone; pending will be rejected by shutdown paths
         }
@@ -743,14 +713,12 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       if (signal.aborted) queueMicrotask(cancel);
       else signal.addEventListener("abort", cancel, { once: true });
     }
-    if (this.activeProtocol === "v1") {
-      this.v1Tracker!.register(id);
-      const requestType = type === "chat" ? "generate" : type;
-      const envelope = requestType === "generate"
-        ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body }
-        : { protocol: 1, type: requestType, request_id: id, ...body };
-      this.write(envelope);
-    } else this.write({ id, type, ...body });
+    this.v1Tracker!.register(id);
+    const requestType = type === "chat" ? "generate" : type;
+    const envelope = requestType === "generate"
+      ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body }
+      : { protocol: 1, type: requestType, request_id: id, ...body };
+    this.write(envelope);
     return promise;
   }
 
@@ -765,7 +733,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private workerError(message: string, code = "resident_worker_error"): Error {
-    const detail = code === "resident_worker_error" ? enrichWorkerError(message, this.backend, this.logPath) : message;
+    const detail = code === "worker_protocol_error" || code === "context_length_exceeded"
+      ? message : enrichWorkerError(message, this.backend, this.logPath);
     if (this.backend === "mlx") return new MlxWorkerError(detail, code);
     return new LlamaWorkerError(detail, code);
   }
@@ -974,17 +943,13 @@ export class ResidentWorkerRegistry {
   // Per-model worker environment (e.g. [models."x"] config sections);
   // consulted once when the worker handle is first created.
   workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
-  /** Configured workers may coexist in auto/legacy mode; bundled workers always require v1. */
-  workerProtocolMode: ResidentWorkerProtocolMode = "auto";
-
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string): ResidentWorkerHandle {
     const existing = this.workers.get(key);
     if (existing) return existing;
     const environment = this.workerEnv?.(modelPath, backend) ?? {};
     const worker = new ResidentWorkerProcess(key, backend, modelPath,
       (info) => this.onCrash?.(info), environment,
-      (source, previous, current) => this.handleTelemetry(source, previous, current),
-      this.workerProtocolMode);
+      (source, previous, current) => this.handleTelemetry(source, previous, current));
     this.workers.set(key, worker);
     this.workerEnvironments.set(key, environment);
     if (!this.pressureTimer) {

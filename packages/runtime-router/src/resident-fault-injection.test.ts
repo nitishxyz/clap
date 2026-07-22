@@ -76,7 +76,6 @@ for await (const chunk of Bun.stdin.stream()) {
     await rm(dir, { recursive: true, force: true });
   });
   const registry = new ResidentWorkerRegistry();
-  registry.workerProtocolMode = "v1";
   cleanup.push(async () => registry.shutdownAll());
   return registry.getOrCreate(scenario, "llama", join(dir, "model.gguf"));
 }
@@ -88,7 +87,7 @@ function protocolCode(error: unknown) {
   return String((error as Error).message).match(/worker protocol ([a-z_]+)/)?.[1];
 }
 
-describe("resident v1 fault-injection matrix", () => {
+describe.serial("resident v1 fault-injection matrix", () => {
   for (const [scenario, code] of [
     ["malformed_ready", "malformed_event"], ["version_mismatch", "version_mismatch"],
     ["timeout", "handshake_timeout"], ["non_json", "malformed_stdout"],

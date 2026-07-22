@@ -2554,7 +2554,7 @@ describe("clap server", () => {
 
       expect(response.status).toBe(503);
       const body = await response.json();
-      expect(body.error.message).toContain("resident worker exited with code 134");
+      expect(body.error.message).toContain("resident worker exited during request with code 134");
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_EXIT_ON_CHAT", previousExit);
@@ -2937,6 +2937,12 @@ async function fakeWorker(dir: string): Promise<string> {
   await writeFile(path, `#!/usr/bin/env bun
 const decoder = new TextDecoder();
 let buffer = "";
+const sequence = new Map();
+const send = (type, id, fields = {}) => {
+  const next = sequence.get(id) ?? 0; sequence.set(id, next + 1);
+  console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields }));
+};
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
 for await (const chunk of Bun.stdin.stream()) {
   buffer += decoder.decode(chunk, { stream: true });
   let newline;
@@ -2945,22 +2951,30 @@ for await (const chunk of Bun.stdin.stream()) {
     buffer = buffer.slice(newline + 1);
     if (!line) continue;
     const request = JSON.parse(line);
+    const id = request.request_id;
+    send("accepted", id);
     if (request.type === "shutdown") {
-      console.log(JSON.stringify({ id: request.id, done: true }));
+      send("completed", id, { result: { kind: "shutdown" } });
       process.exit(0);
     }
     if (request.type === "load") {
-      console.log(JSON.stringify({ id: request.id, loaded: true, done: true }));
+      send("started", id); send("completed", id, { result: { kind: "loaded" } });
       continue;
     }
     if (request.type === "unload") {
-      console.log(JSON.stringify({ id: request.id, unloaded: true, done: true }));
+      send("started", id); send("completed", id, { result: { kind: "unloaded" } });
       continue;
     }
+    if (request.type === "cancel") {
+      send("completed", request.target_request_id, { result: { kind: "cancelled", finish_reason: "cancel" } });
+      send("completed", id, { result: { kind: "cancelled" } });
+      continue;
+    }
+    send("started", id);
+    const body = request.request;
     if (process.env.CLAP_FAKE_WORKER_ERROR) {
-      if (process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN) console.log(JSON.stringify({ id: request.id, token: process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN }));
-      const extra = process.env.CLAP_FAKE_WORKER_ERROR_CODE ? { code: process.env.CLAP_FAKE_WORKER_ERROR_CODE } : {};
-      console.log(JSON.stringify({ id: request.id, error: process.env.CLAP_FAKE_WORKER_ERROR, ...extra }));
+      if (process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN) send("token", id, { text: process.env.CLAP_FAKE_WORKER_PARTIAL_TOKEN });
+      send("failed", id, { error: { code: process.env.CLAP_FAKE_WORKER_ERROR_CODE ?? "worker_error", message: process.env.CLAP_FAKE_WORKER_ERROR, retryable: false, fatal: false } });
       continue;
     }
     if (process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT) {
@@ -2968,17 +2982,17 @@ for await (const chunk of Bun.stdin.stream()) {
     }
     if (process.env.CLAP_FAKE_WORKER_TOKENS) {
       for (const token of JSON.parse(process.env.CLAP_FAKE_WORKER_TOKENS)) {
-        console.log(JSON.stringify({ id: request.id, token }));
+        send("token", id, { text: token });
         await Bun.sleep(2);
       }
       const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
-      console.log(JSON.stringify({ id: request.id, done: true, ...doneExtras }));
+      send("completed", id, { result: { kind: "generated", content: "", ...doneExtras } });
       continue;
     }
-    const content = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS ? String(request.max_tokens) : (process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok");
-    console.log(JSON.stringify({ id: request.id, content }));
+    const content = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS ? String(body.max_tokens) : (process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok");
+    send("content", id, { content });
     const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
-    console.log(JSON.stringify({ id: request.id, done: true, ...doneExtras }));
+    send("completed", id, { result: { kind: "generated", content, ...doneExtras } });
   }
 }
 `);

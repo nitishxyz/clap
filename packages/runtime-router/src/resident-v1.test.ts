@@ -53,9 +53,9 @@ for await (const chunk of Bun.stdin.stream()) {
   return { path, log };
 }
 
-async function legacyWorker(dir: string) {
-  const log = join(dir, "legacy-commands.jsonl");
-  const path = join(dir, "legacy-worker");
+async function noReadyWorker(dir: string) {
+  const log = join(dir, "no-ready-commands.jsonl");
+  const path = join(dir, "no-ready-worker");
   await executable(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const log = ${JSON.stringify(log)}; const decoder = new TextDecoder(); let buffer = "";
@@ -63,12 +63,12 @@ for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, 
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue;
 const command = JSON.parse(raw); appendFileSync(log, raw + "\\n"); if (command.type === "shutdown") process.exit(0);
 if (command.type === "load") console.log(JSON.stringify({ id: command.id, loaded: true, done: true }));
-if (command.type === "chat") console.log(command.messages[0].content === "malformed" ? "poison" : JSON.stringify({ id: command.id, content: "legacy", done: true }));
+if (command.type === "generate") console.log(JSON.stringify({ id: command.request_id, content: "old-shape", done: true }));
 }}`);
   return { path, log };
 }
 
-describe("resident worker v1 migration", () => {
+describe.serial("resident worker v1 migration", () => {
   test("terminates a worker that violates the v1 handshake", async () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-v1-bad-"));
     try {
@@ -86,7 +86,7 @@ describe("resident worker v1 migration", () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-v1-exit-"));
     try {
       process.env.CLAP_LLAMA_WORKER = await executable(join(dir, "exit-worker"), "#!/usr/bin/env bun\nprocess.exit(0);\n");
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "v1";
+      const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("exit", "llama", join(dir, "model.gguf"));
       await expect(worker.load()).rejects.toThrow("exited during protocol handshake with code 0");
       registry.shutdownAll();
@@ -125,7 +125,7 @@ describe("resident worker v1 migration", () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-v1-cancel-"));
     try {
       const fake = await v1Worker(dir); process.env.CLAP_LLAMA_WORKER = fake.path; await writeFile(join(dir, "model.gguf"), "gguf");
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "v1";
+      const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("v1", "llama", join(dir, "model.gguf")); const controller = new AbortController();
       const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "cancel" }], stream: true }, () => controller.abort(), controller.signal);
       expect(result.finishReason).toBe("cancel");
@@ -136,27 +136,12 @@ describe("resident worker v1 migration", () => {
     } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
   });
 
-  test("explicit legacy mode rejects malformed stdout instead of exposing content", async () => {
-    const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-legacy-malformed-"));
-    try {
-      const fake = await legacyWorker(dir); process.env.CLAP_LLAMA_WORKER = fake.path;
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
-      const worker = registry.getOrCreate("legacy-malformed", "llama", join(dir, "model.gguf"));
-      const tokens: string[] = [];
-      await expect(worker.chat({ model: "model", messages: [{ role: "user", content: "malformed" }], stream: true },
-        (token) => tokens.push(token))).rejects.toMatchObject({ code: "worker_protocol_error" });
-      expect(tokens).toEqual([]);
-      expect(worker.info().state).toBe("not_started");
-      registry.shutdownAll();
-    } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
-  });
-
-  test("does not infer legacy from configured workers with no startup bytes", async () => {
+  test("rejects configured workers that do not send ready/v1", async () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-auto-"));
     try {
-      const fake = await legacyWorker(dir); process.env.CLAP_LLAMA_WORKER = fake.path; await writeFile(join(dir, "model.gguf"), "gguf");
+      const fake = await noReadyWorker(dir); process.env.CLAP_LLAMA_WORKER = fake.path; await writeFile(join(dir, "model.gguf"), "gguf");
       const registry = new ResidentWorkerRegistry();
-      const worker = registry.getOrCreate("legacy", "llama", join(dir, "model.gguf"));
+      const worker = registry.getOrCreate("no-ready", "llama", join(dir, "model.gguf"));
       await expect(worker.load()).rejects.toMatchObject({ code: "worker_protocol_error" });
       await expect(Bun.file(fake.log).exists()).resolves.toBe(false);
       registry.shutdownAll();

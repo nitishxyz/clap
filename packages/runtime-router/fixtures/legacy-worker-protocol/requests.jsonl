@@ -1,7 +1,0 @@
-{"id":"req_load","type":"load","model":"/models/example"}
-{"id":"req_chat","type":"chat","model":"/models/example","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":32,"cache":{"namespace":"tenant-a","project":"project-a","session":"session-a","side_request":false}}
-{"id":"req_default_chat","model":"/models/example","messages":[{"role":"user","content":"legacy default chat"}],"stream":false}
-{"id":"req_chat","type":"cancel"}
-{"id":"req_set_max_active","type":"set_max_active","max_active":2,"previous_max_active":1,"limiting_reason":"memory_ceiling","last_adjustment_reason":"pressure_warning","last_adjustment_at":"2026-07-20T11:29:00.000Z","retained_growth_reserve_bytes":67108864,"global_resident_memory_bytes":1073741824,"pressure_state":"warning"}
-{"id":"req_unload","type":"unload","model":"/models/example"}
-{"type":"shutdown"}
