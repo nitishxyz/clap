@@ -58,6 +58,7 @@ set(CLAP_LLAMA_SOURCES
   src/request-state.cpp
   src/request-preparer.cpp
   src/sampling.cpp
+  src/scheduler.cpp
   src/stop-buffer.cpp
   src/telemetry.cpp
   src/worker-state.cpp
@@ -73,6 +74,7 @@ set(CLAP_LLAMA_HEADERS
   include/clap/llama/request-state.h
   include/clap/llama/request-preparer.h
   include/clap/llama/sampling.h
+  include/clap/llama/scheduler.h
   include/clap/llama/stop-buffer.h
   include/clap/llama/telemetry.h
   include/clap/llama/worker-state.h
@@ -93,6 +95,23 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-scheduler
+    tests/scheduler.test.cpp
+    src/cache-executor.cpp
+    src/protocol.cpp
+    src/request-state.cpp
+    src/scheduler.cpp
+    src/stop-buffer.cpp
+  )
+  add_dependencies(clap-llama-scheduler clap-cache-ffi-build)
+  target_include_directories(clap-llama-scheduler PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-scheduler PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-scheduler COMMAND clap-llama-scheduler)
+
   add_executable(clap-llama-worker-state
     tests/worker-state.test.cpp
     src/cache-executor.cpp
@@ -280,6 +299,7 @@ if(BUILD_TESTING)
     clap-llama-request-state
     clap-llama-request-preparer
     clap-llama-sampling
+    clap-llama-scheduler
     clap-llama-stop-buffer
     clap-llama-telemetry
     clap-llama-worker-state

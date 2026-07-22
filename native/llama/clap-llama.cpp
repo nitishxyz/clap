@@ -1,18 +1,12 @@
 #include "llama.h"
-#include "active-concurrency.h"
-#include "cache-adapter.h"
 #include "clap/llama/protocol.h"
-#include "clap/llama/request-preparer.h"
 #include "clap/llama/request-state.h"
+#include "clap/llama/scheduler.h"
 #include "clap/llama/worker-state.h"
-#include "native-characterization.h"
 
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
 #include <cstdio>
-#include <deque>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -24,11 +18,9 @@ namespace {
 
 using clap::llama::emit;
 using clap::llama::emit_error;
-using clap::llama::make_sampler;
 using clap::llama::RequestError;
 using clap::llama::StdinReader;
 using clap::llama::ActiveRequest;
-using clap::llama::CacheBackpressure;
 
 void emit_completion(const clap::llama::RequestCompletion& completion) {
   const auto& facts = completion.cache;
@@ -91,50 +83,50 @@ void emit_failure(const clap::llama::RequestFailure& failure) {
   else emit(failure.id, json{{"error", failure.message}, {"code", failure.code}});
 }
 
-void step(clap::llama::WorkerState& worker,
-          std::vector<std::unique_ptr<ActiveRequest>>& active) {
-  for (auto& req : active) {
-    if (!req->done && req->cancelled) {
-      req->finish_reason = "cancel";
-      auto completion = worker.complete(*req, false);
-      if (completion) emit_completion(*completion);
-    }
-  }
-
-  std::vector<clap::llama_native::ScheduleRequest> schedule_requests;
-  schedule_requests.reserve(active.size());
-  for (const auto& req : active) {
-    const bool has_work = req->phase == ActiveRequest::Phase::Decode ||
-        req->prompt_tokens.size() != req->ingested;
-    schedule_requests.push_back({
-        req->phase == ActiveRequest::Phase::Decode
-            ? clap::llama_native::SchedulePhase::Decode
-            : clap::llama_native::SchedulePhase::Prefill,
-        !req->done && has_work,
-    });
-  }
-  std::vector<ActiveRequest*> ordered;
-  for (const std::size_t index : clap::llama_native::decode_first_order(schedule_requests)) {
-    ordered.push_back(active[index].get());
-  }
-
-  for (const auto& event : worker.step(ordered, active.size() == 1)) {
-    auto& req = *event.request;
+void emit_scheduler_events(clap::llama::WorkerState& worker,
+                           const std::vector<clap::llama::SchedulerEvent>& events) {
+  for (const auto& event : events) {
     switch (event.type) {
-      case clap::llama::GenerationEvent::Type::Token:
-        emit(req.id, json{{"token", event.text}});
+      case clap::llama::SchedulerEvent::Type::Started:
+        emit(event.id, json{{"started", true},
+            {"retention", worker.retention(event.active, event.queued)}});
         break;
-      case clap::llama::GenerationEvent::Type::Prefill:
-        emit(req.id, json{{"prefill", {{"done", event.done}, {"total", event.total}}}});
+      case clap::llama::SchedulerEvent::Type::QueuedCancelled:
+        emit(event.id, json{{"done", true}, {"finish_reason", "cancel"},
+                            {"cancelled", true}});
         break;
-      case clap::llama::GenerationEvent::Type::Complete:
+      case clap::llama::SchedulerEvent::Type::Error:
+        if (event.code.empty()) emit_error(event.id, event.message);
+        else emit_error(event.id, event.message, event.code);
+        break;
+      case clap::llama::SchedulerEvent::Type::Completion:
         if (event.completion) emit_completion(*event.completion);
         break;
-      case clap::llama::GenerationEvent::Type::Failure:
-        if (event.failure) emit_failure(*event.failure);
+      case clap::llama::SchedulerEvent::Type::Topology:
+        emit("", json{{"retention", worker.retention(event.active, event.queued)}});
         break;
-      default:
+      case clap::llama::SchedulerEvent::Type::Generation: {
+        if (!event.generation) break;
+        const auto& generation = *event.generation;
+        switch (generation.type) {
+          case clap::llama::GenerationEvent::Type::Token:
+            emit(event.id, json{{"token", generation.text}});
+            break;
+          case clap::llama::GenerationEvent::Type::Prefill:
+            emit(event.id, json{{"prefill", {{"done", generation.done},
+                                               {"total", generation.total}}}});
+            break;
+          case clap::llama::GenerationEvent::Type::Complete:
+            if (generation.completion) emit_completion(*generation.completion);
+            break;
+          case clap::llama::GenerationEvent::Type::Failure:
+            if (generation.failure) emit_failure(*generation.failure);
+            break;
+          default:
+            break;
+        }
         break;
+      }
     }
   }
 }
@@ -143,8 +135,18 @@ void step(clap::llama::WorkerState& worker,
 
 int main() {
   clap::llama::WorkerState worker;
-  std::vector<std::unique_ptr<ActiveRequest>> active;
-  std::deque<std::pair<std::string, json>> waiting;
+  clap::llama::Scheduler scheduler({
+    [&] { return worker.loaded(); },
+    [&](const std::string& path) { return worker.same_path(path); },
+    [&](const std::string& path) { worker.load(path); },
+    [&] { return worker.has_encoder(); },
+    [&] { return worker.max_active(); },
+    [&](const std::string& id, const json& request) { return worker.prepare(id, request); },
+    [&](const std::vector<ActiveRequest*>& ordered, bool sole) {
+      return worker.step(ordered, sole);
+    },
+    [&](ActiveRequest& request, bool flush) { return worker.complete(request, flush); },
+  });
 
   try {
     ggml_backend_load_all();
@@ -167,18 +169,7 @@ int main() {
         }
         if (type == "cancel") {
           const std::string target = message.value("id", "");
-          for (auto& req : active) {
-            if (!req->done && clap::llama_native::active_cancel_matches(target, req->id)) {
-              req->cancelled = true;
-            }
-          }
-          for (auto it = waiting.begin(); it != waiting.end(); ++it) {
-            if (clap::llama_native::queued_cancel_matches(target, it->first)) {
-              emit(target, json{{"done", true}, {"finish_reason", "cancel"}, {"cancelled", true}});
-              waiting.erase(it);
-              break;
-            }
-          }
+          emit_scheduler_events(worker, scheduler.cancel(target));
           return true;
         }
         if (type == "set_max_active") {
@@ -191,11 +182,12 @@ int main() {
               message.value("retained_growth_reserve_bytes", UINT64_C(0)),
               message.value("global_resident_memory_bytes", UINT64_C(0)),
               message.value("pressure_state", "")});
-          emit(id, json{{"done", true}, {"retention", worker.retention(active.size(), waiting.size())}});
+          emit(id, json{{"done", true}, {"retention", worker.retention(
+              scheduler.active_count(), scheduler.queued_count())}});
           return true;
         }
         if (type == "unload") {
-          if (!active.empty()) throw std::runtime_error("cannot unload while requests are active");
+          if (scheduler.has_active()) throw std::runtime_error("cannot unload while requests are active");
           worker.unload();
           emit(id, json{{"unloaded", true}, {"done", true}});
           return true;
@@ -203,7 +195,7 @@ int main() {
         if (type == "load") {
           const std::string model = message.value("model", "");
           if (model.empty()) throw std::runtime_error("load.model is required");
-          if (!active.empty() && worker.loaded() && !worker.same_path(model)) {
+          if (scheduler.has_active() && worker.loaded() && !worker.same_path(model)) {
             throw std::runtime_error("cannot switch models while requests are active");
           }
           worker.load(model);
@@ -215,12 +207,13 @@ int main() {
             {"max_output_tokens", worker.max_output_tokens() > 0 ? json(worker.max_output_tokens()) : json(nullptr)},
             {"backend_allocation_cap", worker.effective_context_window()},
             {"user_configured_override", worker.context_override() > 0 ? json(worker.context_override()) : json(nullptr)},
-          }}, {"retention", worker.retention(active.size())}});
+          }}, {"retention", worker.retention(scheduler.active_count())}});
           return true;
         }
         // Anything else is a chat request; it queues until a slot frees up.
-        waiting.emplace_back(id, message);
-        emit("", json{{"retention", worker.retention(active.size(), waiting.size())}});
+        scheduler.enqueue(id, message);
+        emit("", json{{"retention", worker.retention(
+            scheduler.active_count(), scheduler.queued_count())}});
         return true;
       } catch (const RequestError& error) {
         emit_error(id, error.what(), error.code);
@@ -233,7 +226,7 @@ int main() {
 
     while (running) {
       std::string line;
-      if (active.empty() && waiting.empty()) {
+      if (scheduler.idle()) {
         if (!reader.next(line)) break;  // idle: block until work or EOF
         running = handle_message(line);
         if (!running) break;
@@ -244,63 +237,10 @@ int main() {
       }
       if (!running) break;
 
-      // Admit queued requests to free slots.
-      while (!waiting.empty()) {
-        const std::string req_model = waiting.front().second.value("model", "");
-        if (req_model.empty()) {
-          emit_error(waiting.front().first, "chat.model is required");
-          waiting.pop_front();
-          continue;
-        }
-        // Drain in-flight requests before switching models.
-        if (!active.empty() && worker.loaded() && !worker.same_path(req_model)) break;
-        try {
-          worker.load(req_model);
-        } catch (const std::exception& error) {
-          emit_error(waiting.front().first, error.what());
-          waiting.pop_front();
-          continue;
-        }
-        if (worker.has_encoder() && !active.empty()) break;
-        if (!clap::llama_cache::can_admit(active.size(),
-                                          static_cast<uint32_t>(worker.max_active()))) break;
-        auto [wid, wreq] = std::move(waiting.front());
-        waiting.pop_front();
-        try {
-          auto prepared = worker.prepare(wid, wreq);
-          active.push_back(std::move(prepared));
-          emit(wid, json{{"started", true},
-                         {"retention", worker.retention(active.size(), waiting.size())}});
-        } catch (const CacheBackpressure&) {
-          waiting.emplace_front(std::move(wid), std::move(wreq));
-          break;
-        } catch (const RequestError& error) {
-          emit_error(wid, error.what(), error.code);
-        } catch (const std::exception& error) {
-          emit_error(wid, error.what());
-        }
-      }
-
-      if (!active.empty()) {
-        step(worker, active);
-        const std::size_t before_cleanup = active.size();
-        active.erase(
-          std::remove_if(active.begin(), active.end(), [](const std::unique_ptr<ActiveRequest>& r) { return r->done; }),
-          active.end());
-        if (active.size() != before_cleanup) {
-          emit("", json{{"retention", worker.retention(active.size(), waiting.size())}});
-        }
-      }
+      emit_scheduler_events(worker, scheduler.tick());
     }
 
-    for (auto& req : active) {
-      if (!req->done) {
-        req->finish_reason = "cancel";
-        req->cancelled = true;
-        auto completion = worker.complete(*req, false);
-        if (completion) emit_completion(*completion);
-      }
-    }
+    emit_scheduler_events(worker, scheduler.cancel_all());
     worker.unload();
     return 0;
   } catch (const std::exception& error) {
