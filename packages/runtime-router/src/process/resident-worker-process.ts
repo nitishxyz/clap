@@ -12,26 +12,39 @@ import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResul
   type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
 import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerModelDescriptor } from "./types";
 
+type WorkerProcess = Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
+type CloseReason = "shutdown" | "unload";
+
+type ActiveLaunch = {
+  context: WorkerLaunchContext;
+  proc: WorkerProcess;
+  tracker: V1RequestTracker;
+  handshake: Promise<void>;
+  resolveHandshake?: () => void;
+  rejectHandshake?: (error: Error) => void;
+  handshakeTimer?: ReturnType<typeof setTimeout>;
+  lastDiagnostic?: string;
+  expectedExit: boolean;
+  shutdownId?: string;
+  resolveShutdown?: () => void;
+  closePromise?: Promise<void>;
+  exited: Promise<void>;
+  resolveExited: () => void;
+};
+
 export class ResidentWorkerProcess implements ResidentWorkerHandle {
-  private proc?: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
   private readonly pending = new Map<string, PendingWorkerResult>();
+  private active?: ActiveLaunch;
+  private starting?: Promise<ActiveLaunch>;
+  private loadPromise?: Promise<ResidentWorkerInfo>;
   private loaded = false;
-  private launch?: WorkerLaunchContext;
-  private starting?: Promise<void>;
   private crashes = 0;
   private consecutiveCrashes = 0;
   private lastCrashAt?: number;
-  private expectedExit = false;
   private memory?: ResidentMlxMemory;
   private retention?: ResidentMlxRetention;
   private tokenCapabilities?: ModelTokenCapabilities;
   private workerLaunchId?: string;
-  private v1Tracker?: V1RequestTracker;
-  private handshake?: Promise<void>;
-  private resolveHandshake?: () => void;
-  private rejectHandshake?: (error: Error) => void;
-  private handshakeTimer?: ReturnType<typeof setTimeout>;
-  private lastDiagnostic?: string;
 
   constructor(
     public readonly key: string,
@@ -47,9 +60,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   info(): ResidentWorkerInfo {
     return {
-      pid: this.proc?.pid,
-      launchId: this.workerLaunchId,
-      state: this.proc ? "resident" : "not_started",
+      pid: this.active?.proc.pid,
+      launchId: this.active?.context.paths.launchId ?? this.workerLaunchId,
+      state: this.active ? "resident" : "not_started",
       crashes: this.crashes,
       lastCrashAt: this.lastCrashAt ? new Date(this.lastCrashAt).toISOString() : undefined,
       memory: this.memory,
@@ -58,11 +71,23 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     };
   }
 
-  async load(): Promise<ResidentWorkerInfo> {
+  load(): Promise<ResidentWorkerInfo> {
+    if (this.loaded && this.active && !this.active.closePromise) return Promise.resolve(this.info());
+    if (this.loadPromise) return this.loadPromise;
+    const load = this.loadOnce();
+    this.loadPromise = load;
+    void load.finally(() => { if (this.loadPromise === load) this.loadPromise = undefined; }).catch(() => {});
+    return load;
+  }
+
+  private async loadOnce(): Promise<ResidentWorkerInfo> {
     await this.awaitRestartBackoff();
-    await this.ensureStarted();
+    const launch = await this.ensureStarted();
+    if (launch.closePromise) throw this.workerError("resident worker is shutting down");
     if (!this.loaded) {
-      const result = await this.sendControl("load", { model: this.modelPath });
+      const result = await this.sendControl("load", { model: this.modelPath }, undefined, undefined,
+        undefined, undefined, launch);
+      if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
       this.tokenCapabilities = result.tokenCapabilities;
       this.loaded = true;
       this.consecutiveCrashes = 0;
@@ -70,7 +95,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     return this.info();
   }
 
-  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
+  async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal,
+    onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
     await this.load();
     return this.sendControl("chat", request, onToken, signal, onProgress, onDispatch);
   }
@@ -93,231 +119,176 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   async unload(): Promise<void> {
-    if (!this.proc) return;
+    const launch = this.active;
+    if (!launch) return;
     try {
-      await this.sendControl("unload", { model: this.modelPath });
+      await this.sendControl("unload", { model: this.modelPath }, undefined, undefined,
+        undefined, undefined, launch);
     } catch {
-      // The process may already be gone; shutdown below is authoritative.
+      // Closing below is authoritative when unload races an exit.
     }
     this.loaded = false;
-    this.shutdown();
+    await this.close(launch, "unload");
   }
 
   shutdown(): void {
-    for (const pending of this.pending.values()) {
-      pending.reject(this.workerError("resident worker shut down", "resident_worker_error",
-        pending.launchPaths?.stderrPath));
-    }
-    this.pending.clear();
-    try {
-      if (this.proc && this.proc.exitCode === null) {
-        // Deliberate termination (unload/server shutdown): the SIGTERM exit
-        // (143) must not count as a crash or trigger restart backoff.
-        this.expectedExit = true;
-        const id = `cmd_${crypto.randomUUID()}`;
-        this.v1Tracker?.register(id);
-        this.write({ protocol: 1, type: "shutdown", request_id: id });
-        this.proc.kill();
-      }
-    } catch {
-      // ignore shutdown races
-    }
-    this.proc = undefined;
+    void this.shutdownAsync();
+  }
+
+  shutdownAsync(): Promise<void> {
+    const starting = this.starting;
+    if (starting) return starting.then((launch) => this.close(launch, "shutdown"), () => {});
+    const launch = this.active;
+    return launch ? this.close(launch, "shutdown") : Promise.resolve();
+  }
+
+  private async ensureStarted(): Promise<ActiveLaunch> {
+    if (this.active && this.active.proc.exitCode === null && !this.active.closePromise) return this.active;
+    if (this.starting) return this.starting;
+    const starting = this.startWorker();
+    this.starting = starting;
+    try { return await starting; } finally { if (this.starting === starting) this.starting = undefined; }
+  }
+
+  private async startWorker(): Promise<ActiveLaunch> {
     this.loaded = false;
     this.memory = undefined;
     this.retention = undefined;
     this.tokenCapabilities = undefined;
-    this.lastDiagnostic = undefined;
-    this.clearHandshake();
-  }
-
-  private async ensureStarted(): Promise<void> {
-    if (this.proc && this.proc.exitCode === null) return;
-    if (this.starting) return this.starting;
-    this.starting = this.startWorker();
-    try { await this.starting; } finally { this.starting = undefined; }
-  }
-
-  private async startWorker(): Promise<void> {
-    if (this.proc && this.proc.exitCode === null) return;
-    this.expectedExit = false;
-    this.memory = undefined;
-    this.retention = undefined;
-    this.tokenCapabilities = undefined;
-    this.lastDiagnostic = undefined;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
       if (this.backend === "mlx") throw new MlxWorkerError(message, "worker_not_found");
       throw new LlamaWorkerError(message, "worker_not_found");
     }
-    const launch = await this.launchLogs.prepareLaunch({
-      backend: this.backend,
-      modelId: this.descriptor.modelId,
-      revision: this.descriptor.revision,
-      modelPath: this.modelPath,
-    }, status.command);
-    const environment = { ...process.env, ...this.envOverrides };
-    let proc: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
+    const context = await this.launchLogs.prepareLaunch({ backend: this.backend,
+      modelId: this.descriptor.modelId, revision: this.descriptor.revision, modelPath: this.modelPath }, status.command);
+    let proc: WorkerProcess;
     try {
-      proc = Bun.spawn(status.command, {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: Bun.file(launch.paths.stderrPath),
-        env: environment,
-      });
+      proc = Bun.spawn(status.command, { stdin: "pipe", stdout: "pipe",
+        stderr: Bun.file(context.paths.stderrPath), env: { ...process.env, ...this.envOverrides } });
     } catch (error) {
-      await this.launchLogs.finalize(launch, null, "spawn_failure");
+      await this.launchLogs.finalize(context, null, "spawn_failure");
       throw error;
     }
-    this.proc = proc;
-    this.launch = launch;
-    this.workerLaunchId = launch.paths.launchId;
-    await this.launchLogs.markSpawned(launch, proc.pid);
-    this.startProtocol();
-    void this.readLoop(proc, launch);
-  }
-
-  private startProtocol(): void {
-    this.clearHandshake();
-    this.v1Tracker = new V1RequestTracker();
-    this.handshake = new Promise<void>((resolve, reject) => {
-      this.resolveHandshake = resolve;
-      this.rejectHandshake = reject;
-    });
-    this.handshakeTimer = setTimeout(() => {
-      if (!this.resolveHandshake) return;
-      this.protocolUnhealthy(new WorkerProtocolFault("handshake_timeout",
-        "Worker did not send ready within 1000ms", "worker"));
+    let resolveHandshake!: () => void;
+    let rejectHandshake!: (error: Error) => void;
+    let resolveExited!: () => void;
+    const launch: ActiveLaunch = {
+      context, proc, tracker: new V1RequestTracker(), expectedExit: false,
+      handshake: new Promise<void>((resolve, reject) => { resolveHandshake = resolve; rejectHandshake = reject; }),
+      resolveHandshake, rejectHandshake,
+      exited: new Promise<void>((resolve) => { resolveExited = resolve; }), resolveExited,
+    };
+    this.active = launch;
+    this.workerLaunchId = context.paths.launchId;
+    await this.launchLogs.markSpawned(context, proc.pid);
+    launch.handshakeTimer = setTimeout(() => {
+      if (this.active === launch && launch.resolveHandshake) this.protocolUnhealthy(launch,
+        new WorkerProtocolFault("handshake_timeout", "Worker did not send ready within 1000ms", "worker"));
     }, 1_000);
+    void this.readLoop(launch);
+    return launch;
   }
 
-  private clearHandshake(): void {
-    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-    this.handshakeTimer = undefined;
-    this.handshake = undefined;
-    this.resolveHandshake = undefined;
-    this.rejectHandshake = undefined;
-    this.v1Tracker = undefined;
-  }
-
-  private async readLoop(proc: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>,
-    launch: WorkerLaunchContext): Promise<void> {
+  private async readLoop(launch: ActiveLaunch): Promise<void> {
     const decoder = new TextDecoder();
     let buffer = "";
     try {
-      for await (const chunk of proc.stdout) {
+      for await (const chunk of launch.proc.stdout) {
         buffer += decoder.decode(chunk, { stream: true });
         let newlineIndex: number;
         while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, newlineIndex).trim();
           buffer = buffer.slice(newlineIndex + 1);
-          if (line) this.handleProtocolLine(line);
+          if (line) this.handleProtocolLine(launch, line);
         }
       }
-
       const tail = buffer.trim();
-      if (tail) this.handleProtocolLine(tail);
+      if (tail) this.handleProtocolLine(launch, tail);
     } catch (error) {
-      this.rejectAll(error instanceof Error ? error : new Error(String(error)));
+      if (this.active === launch) this.rejectLaunchPending(launch,
+        error instanceof Error ? error.message : String(error));
     }
-    const exitCode = await proc.exited;
-    if (this.proc === proc) this.proc = undefined;
-    this.loaded = false;
-    const phase = classifyWorkerExitPhase(Boolean(this.resolveHandshake), this.pending.size);
-    const classification = classifyWorkerCrash({ protocolFault: launch.protocolFault,
-      expectedExit: this.expectedExit, exitCode, phase: launch.phase });
-    const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
+    const exitCode = await launch.proc.exited;
+    await this.handleExit(launch, exitCode);
+  }
+
+  private async handleExit(launch: ActiveLaunch, exitCode: number): Promise<void> {
+    const current = this.active === launch;
+    const launchPending = [...this.pending.values()].filter((item) =>
+      item.launchPaths?.launchId === launch.context.paths.launchId).length;
+    const phase = classifyWorkerExitPhase(Boolean(launch.resolveHandshake), launchPending);
+    const classification = classifyWorkerCrash({ protocolFault: launch.context.protocolFault,
+      expectedExit: launch.expectedExit, exitCode, phase: launch.context.phase });
+    const diagnostic = launch.lastDiagnostic ? `. Last worker diagnostic: ${launch.lastDiagnostic}` : "";
     const exitMessage = `${this.backend} resident worker exited ${phase} with code ${exitCode}${diagnostic}`;
-    const exitError = this.workerError(exitMessage, "resident_worker_error", launch.paths.stderrPath);
-    if (this.resolveHandshake) {
-      this.rejectHandshake?.(exitError);
-      this.rejectHandshake = undefined;
-      this.resolveHandshake = undefined;
+    if (launch.resolveHandshake) {
+      launch.rejectHandshake?.(this.workerError(exitMessage, "resident_worker_error", launch.context.paths.stderrPath));
+      this.clearHandshake(launch);
     }
     if (classification !== "expected_exit") {
       this.crashes += 1;
       this.consecutiveCrashes += 1;
       this.lastCrashAt = Date.now();
       this.onCrash?.({ key: this.key, backend: this.backend, exitCode,
-        consecutiveCrashes: this.consecutiveCrashes, launchId: launch.paths.launchId,
-        logPath: launch.paths.stderrPath, metadataPath: launch.paths.metadataPath, classification });
-      this.rejectAllWithLaunch(exitMessage, launch.paths);
+        consecutiveCrashes: this.consecutiveCrashes, launchId: launch.context.paths.launchId,
+        logPath: launch.context.paths.stderrPath, metadataPath: launch.context.paths.metadataPath, classification });
+      this.rejectLaunchPending(launch, exitMessage);
     }
-    await this.launchLogs.finalize(launch, exitCode, classification);
+    if (current) {
+      this.active = undefined;
+      this.loaded = false;
+      this.memory = undefined;
+      this.retention = undefined;
+      this.tokenCapabilities = undefined;
+    }
+    await this.launchLogs.finalize(launch.context, exitCode, classification);
+    launch.resolveExited();
   }
 
-  // Exponential backoff between restarts after crashes (1s, 2s, 4s... capped
-  // at 30s) so a model that dies on load cannot hot-loop expensive reloads.
-  // Requests wait out the window instead of failing; a persistent crash loop
-  // fails fast with an actionable error.
-  private async awaitRestartBackoff(): Promise<void> {
-    if (this.consecutiveCrashes === 0 || !this.lastCrashAt) return;
-    if (this.proc && this.proc.exitCode === null) return;
-    if (this.consecutiveCrashes >= 5) {
-      throw this.workerError(
-        `${this.backend} resident worker crashed ${this.consecutiveCrashes} times in a row; not restarting automatically. Check the worker log, then retry or restart the server.`,
-        "worker_crash_loop",
-      );
-    }
-    const delay = Math.min(1000 * 2 ** (this.consecutiveCrashes - 1), 30000);
-    const remaining = this.lastCrashAt + delay - Date.now();
-    if (remaining > 0) await Bun.sleep(remaining);
-  }
-
-  private handleProtocolLine(line: string): void {
+  private handleProtocolLine(launch: ActiveLaunch, line: string): void {
     try {
-      const fact = this.v1Tracker!.consumeLine(line);
+      const fact = launch.tracker.consumeLine(line);
       if (fact.kind === "ready") {
-        if (this.launch) {
-          this.launch.phase = "idle";
-          void this.launchLogs.markReady(this.launch);
-        }
-        this.resolveHandshake?.();
-        this.resolveHandshake = undefined;
-        this.rejectHandshake = undefined;
-        if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-        this.handshakeTimer = undefined;
-      } else this.handleV1Fact(fact);
+        launch.context.phase = "idle";
+        void this.launchLogs.markReady(launch.context);
+        launch.resolveHandshake?.();
+        this.clearHandshake(launch, false);
+      } else this.handleV1Fact(launch, fact);
     } catch (error) {
-      this.protocolUnhealthy(error instanceof Error ? error : new Error(String(error)));
+      this.protocolUnhealthy(launch, error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  private applyWorkerPayload(message: Record<string, unknown>): void {
-    applyWorkerPayload(message, {
-      pending: this.pending,
-      retention: this.retention,
-      workerLaunchId: this.workerLaunchId,
-      setMemory: (memory) => { this.memory = memory; },
-      setRetention: (retention) => { this.retention = retention; },
-      setTokenCapabilities: (capabilities) => { this.tokenCapabilities = capabilities; },
-      onRetention: (previous, current) => this.onTelemetry?.(this, previous, current),
-      workerError: (detail, code) => this.workerError(detail, code),
-    });
+  private clearHandshake(launch: ActiveLaunch, reject = true): void {
+    if (launch.handshakeTimer) clearTimeout(launch.handshakeTimer);
+    launch.handshakeTimer = undefined;
+    if (reject) launch.rejectHandshake = undefined;
+    launch.resolveHandshake = undefined;
   }
 
-  private handleV1Fact(fact: ResidentProtocolFact): void {
+  private handleV1Fact(launch: ActiveLaunch, fact: ResidentProtocolFact): void {
     if (fact.kind === "telemetry") {
-      const telemetry = fact.telemetry;
-      this.applyWorkerPayload(mapWorkerTelemetryPayload(telemetry));
+      if (this.active === launch) this.applyWorkerPayload(launch, mapWorkerTelemetryPayload(fact.telemetry));
       return;
     }
-    if (fact.kind === "diagnostic") { this.lastDiagnostic = fact.message; return; }
+    if (fact.kind === "diagnostic") { launch.lastDiagnostic = fact.message; return; }
     if (fact.kind === "ready" || fact.kind === "accepted") return;
+    if (fact.requestId === launch.shutdownId && fact.kind === "completed") {
+      launch.resolveShutdown?.();
+      launch.resolveShutdown = undefined;
+      return;
+    }
     const pending = this.pending.get(fact.requestId);
-    if (!pending) return;
+    if (!pending || pending.launchPaths?.launchId !== launch.context.paths.launchId) return;
     if (fact.kind === "started") {
       pending.phase = pending.phase === "load" ? "load" : "prefill";
-      if (this.launch) this.launch.phase = pending.phase;
-      const onDispatch = pending.onDispatch;
-      pending.onDispatch = undefined;
-      onDispatch?.();
-      return;
+      launch.context.phase = pending.phase;
+      const callback = pending.onDispatch; pending.onDispatch = undefined; callback?.(); return;
     }
     if (fact.kind === "token") {
-      pending.phase = "decode";
-      if (this.launch) this.launch.phase = "decode";
+      pending.phase = "decode"; launch.context.phase = "decode";
       pending.content.push(fact.text); pending.onToken?.(fact.text); return;
     }
     if (fact.kind === "content") {
@@ -325,91 +296,134 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       return;
     }
     if (fact.kind === "prefill_progress") {
-      pending.phase = "prefill";
-      if (this.launch) this.launch.phase = "prefill";
+      pending.phase = "prefill"; launch.context.phase = "prefill";
       pending.onProgress?.(fact.done, fact.total); return;
     }
     if (fact.kind === "failed") {
-      this.pending.delete(fact.requestId);
-      pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath));
-      return;
+      this.pending.delete(fact.requestId); pending.cleanup?.();
+      pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath)); return;
     }
-    this.applyWorkerPayload(mapWorkerResultPayload(
-      fact.result as Record<string, unknown>,
-      fact.requestId,
-      pending.content.length > 0,
-    ));
-    if (this.pending.size === 0 && this.launch) this.launch.phase = "idle";
+    this.applyWorkerPayload(launch, mapWorkerResultPayload(fact.result as Record<string, unknown>,
+      fact.requestId, pending.content.length > 0));
+    if (![...this.pending.values()].some((item) => item.launchPaths?.launchId === launch.context.paths.launchId)) {
+      launch.context.phase = "idle";
+    }
   }
 
-  private protocolUnhealthy(cause: Error): void {
-    if (this.launch) this.launch.protocolFault = true;
-    const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
+  private applyWorkerPayload(launch: ActiveLaunch, message: Record<string, unknown>): void {
+    applyWorkerPayload(message, {
+      pending: this.pending, retention: this.retention, workerLaunchId: launch.context.paths.launchId,
+      setMemory: (memory) => { if (this.active === launch) this.memory = memory; },
+      setRetention: (retention) => { if (this.active === launch) this.retention = retention; },
+      setTokenCapabilities: (capabilities) => { if (this.active === launch) this.tokenCapabilities = capabilities; },
+      onRetention: (previous, current) => { if (this.active === launch) this.onTelemetry?.(this, previous, current); },
+      workerError: (detail, code) => this.workerError(detail, code, launch.context.paths.stderrPath),
+    });
+  }
+
+  private protocolUnhealthy(launch: ActiveLaunch, cause: Error): void {
+    launch.context.protocolFault = true;
+    const diagnostic = launch.lastDiagnostic ? `. Last worker diagnostic: ${launch.lastDiagnostic}` : "";
     const detail = cause instanceof WorkerProtocolFault
       ? `worker protocol ${cause.code}: ${cause.message}${diagnostic}`
       : `worker protocol failure: ${cause.message}${diagnostic}`;
-    const error = this.workerError(detail, "worker_protocol_error", this.launch?.paths.stderrPath);
-    this.rejectHandshake?.(error);
-    this.rejectHandshake = undefined;
-    this.resolveHandshake = undefined;
-    this.rejectAllWithLaunch(detail, this.launch?.paths, "worker_protocol_error");
-    this.loaded = false;
-    this.expectedExit = false;
-    try { this.proc?.kill(); } catch { /* process already exited */ }
-    this.proc = undefined;
+    launch.rejectHandshake?.(this.workerError(detail, "worker_protocol_error", launch.context.paths.stderrPath));
+    this.clearHandshake(launch);
+    this.rejectLaunchPending(launch, detail, "worker_protocol_error");
+    if (this.active === launch) {
+      this.active = undefined;
+      this.loaded = false;
+      this.memory = undefined;
+      this.retention = undefined;
+      this.tokenCapabilities = undefined;
+    }
+    try { launch.proc.kill(); } catch { /* process already exited */ }
   }
 
-  private async sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
-    await this.ensureStarted();
-    await this.handshake;
+  private async sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void,
+    signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void,
+    expectedLaunch?: ActiveLaunch): Promise<ResidentChatResult> {
+    const launch = expectedLaunch ?? await this.ensureStarted();
+    if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker is shutting down");
+    await launch.handshake;
+    if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
     const id = `req_${crypto.randomUUID()}`;
+    let cleanup: (() => void) | undefined;
     const promise = new Promise<ResidentChatResult>((resolve, reject) => {
       const phase = type === "load" ? "load" : type === "chat" ? "prefill" : "idle";
       this.pending.set(id, { content: [], resolve, reject, onToken, onProgress, onDispatch,
-        launchPaths: this.launch?.paths, phase });
-      if (this.launch) this.launch.phase = phase;
+        launchPaths: launch.context.paths, phase, cleanup: () => cleanup?.() });
+      launch.context.phase = phase;
     });
     if (signal) {
       const cancel = () => {
-        if (!this.pending.has(id)) return;
+        if (!this.pending.has(id) || this.active !== launch) return;
         try {
           const cancelId = `cmd_${crypto.randomUUID()}`;
-          this.v1Tracker!.register(cancelId);
-          this.write({ protocol: 1, type: "cancel", request_id: cancelId, target_request_id: id });
-        } catch {
-          // worker already gone; pending will be rejected by shutdown paths
-        }
+          launch.tracker.register(cancelId);
+          this.write(launch, { protocol: 1, type: "cancel", request_id: cancelId, target_request_id: id });
+        } catch { /* exit path rejects pending work */ }
       };
+      cleanup = () => signal.removeEventListener("abort", cancel);
       if (signal.aborted) queueMicrotask(cancel);
       else signal.addEventListener("abort", cancel, { once: true });
     }
-    this.v1Tracker!.register(id);
+    launch.tracker.register(id);
     const requestType = type === "chat" ? "generate" : type;
-    const envelope = requestType === "generate"
+    this.write(launch, requestType === "generate"
       ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body }
-      : { protocol: 1, type: requestType, request_id: id, ...body };
-    this.write(envelope);
+      : { protocol: 1, type: requestType, request_id: id, ...body });
     return promise;
   }
 
-  private write(message: Record<string, unknown>): void {
-    if (!this.proc) throw new Error("resident worker is not started");
-    this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+  private close(launch: ActiveLaunch, _reason: CloseReason): Promise<void> {
+    if (launch.closePromise) return launch.closePromise;
+    const closing = this.closeOnce(launch);
+    launch.closePromise = closing;
+    return closing;
   }
 
-  private rejectAll(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-  }
-
-  private rejectAllWithLaunch(message: string, fallback?: WorkerLaunchPaths, code = "resident_worker_error"): void {
-    for (const pending of this.pending.values()) {
-      pending.reject(this.workerError(message, code, pending.launchPaths?.stderrPath ?? fallback?.stderrPath));
+  private async closeOnce(launch: ActiveLaunch): Promise<void> {
+    launch.expectedExit = true;
+    this.rejectLaunchPending(launch, "resident worker shut down");
+    if (launch.proc.exitCode === null) {
+      const id = `cmd_${crypto.randomUUID()}`;
+      launch.shutdownId = id;
+      launch.tracker.register(id);
+      const terminal = new Promise<void>((resolve) => { launch.resolveShutdown = resolve; });
+      try { this.write(launch, { protocol: 1, type: "shutdown", request_id: id }); } catch { /* exited */ }
+      const timeout = Number(process.env.CLAP_WORKER_SHUTDOWN_TIMEOUT_MS ?? 500);
+      await Promise.race([terminal, launch.proc.exited.then(() => {}), Bun.sleep(timeout)]);
+      if (launch.proc.exitCode === null) {
+        try { launch.proc.kill(); } catch { /* exited */ }
+      }
     }
-    this.pending.clear();
+    await launch.exited;
   }
 
-  private workerError(message: string, code = "resident_worker_error", logPath = this.launch?.paths.stderrPath): Error {
+  private write(launch: ActiveLaunch, message: Record<string, unknown>): void {
+    if (launch.proc.exitCode !== null) throw new Error("resident worker is not started");
+    launch.proc.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  private rejectLaunchPending(launch: ActiveLaunch, message: string, code = "resident_worker_error"): void {
+    for (const [id, pending] of this.pending) {
+      if (pending.launchPaths?.launchId !== launch.context.paths.launchId) continue;
+      this.pending.delete(id); pending.cleanup?.();
+      pending.reject(this.workerError(message, code, pending.launchPaths.stderrPath));
+    }
+  }
+
+  private async awaitRestartBackoff(): Promise<void> {
+    if (this.consecutiveCrashes === 0 || !this.lastCrashAt || this.active) return;
+    if (this.consecutiveCrashes >= 5) throw this.workerError(
+      `${this.backend} resident worker crashed ${this.consecutiveCrashes} times in a row; not restarting automatically. Check the worker log, then retry or restart the server.`,
+      "worker_crash_loop");
+    const remaining = this.lastCrashAt + Math.min(1000 * 2 ** (this.consecutiveCrashes - 1), 30000) - Date.now();
+    if (remaining > 0) await Bun.sleep(remaining);
+  }
+
+  private workerError(message: string, code = "resident_worker_error", logPath = this.active?.context.paths.stderrPath): Error {
     const detail = code === "worker_protocol_error" || code === "context_length_exceeded"
       ? `${message}${logPath ? ` See ${logPath}.` : ""}` : enrichWorkerError(message, this.backend, logPath);
     if (this.backend === "mlx") return new MlxWorkerError(detail, code);

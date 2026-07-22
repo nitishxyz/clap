@@ -114,6 +114,7 @@ export type ResidentWorkerHandle = {
   setMaxActive?(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void>;
   unload(): Promise<void>;
   shutdown(): void;
+  shutdownAsync?(): Promise<void>;
 };
 
 export type ActiveLimitTelemetry = {
@@ -365,19 +366,29 @@ export class ResidentWorkerRegistry {
   }
 
   shutdown(key: string): void {
+    void this.shutdownAsync(key);
+  }
+
+  async shutdownAsync(key?: string): Promise<void> {
+    if (key === undefined) {
+      const keys = [...this.workers.keys()];
+      await Promise.all(keys.map((entry) => this.shutdownAsync(entry)));
+      if (this.pressureTimer) clearInterval(this.pressureTimer);
+      this.pressureTimer = undefined;
+      return;
+    }
     const worker = this.workers.get(key);
     this.workers.delete(key);
     this.workerEnvironments.delete(key);
     this.recentRetainedGrowth.delete(key);
     this.lastAdjustments.delete(key);
-    worker?.shutdown();
+    if (worker?.shutdownAsync) await worker.shutdownAsync();
+    else worker?.shutdown();
     this.scheduleRebalance("model_shutdown");
   }
 
   shutdownAll(): void {
-    for (const key of [...this.workers.keys()]) this.shutdown(key);
-    if (this.pressureTimer) clearInterval(this.pressureTimer);
-    this.pressureTimer = undefined;
+    void this.shutdownAsync();
   }
 
   async rebalance(reason = "manual"): Promise<void> {

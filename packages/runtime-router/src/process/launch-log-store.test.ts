@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LaunchLogStore, pruneLaunchLogs, writeLaunchMetadataAtomic } from "./launch-log-store";
-import { WORKER_LAUNCH_METADATA_VERSION, type WorkerLaunchMetadata, type WorkerLaunchPaths } from "./types";
+import { WORKER_LAUNCH_METADATA_VERSION, type WorkerLaunchContext, type WorkerLaunchMetadata,
+  type WorkerLaunchPaths } from "./types";
 
 function metadata(id: string, endedAt?: string): WorkerLaunchMetadata {
   return {
@@ -36,6 +37,19 @@ describe("launch log store", () => {
     const path = join(root, "nested", "launch.json");
     await writeLaunchMetadataAtomic(path, metadata("launch"));
     expect(JSON.parse(await readFile(path, "utf8")).version).toBe(1);
+  });
+
+  test("finalizes a launch exactly once when protocol and exit paths race", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clap-finalize-"));
+    const paths = { directory: join(root, "llama", "model"), metadataPath: join(root, "llama", "model", "id.json"),
+      stderrPath: join(root, "llama", "model", "id.stderr.log") } as WorkerLaunchPaths;
+    const store = new LaunchLogStore();
+    const context = { paths, metadata: metadata("id"), phase: "idle", protocolFault: true,
+      releaseActive: store.registerActive(paths) } as WorkerLaunchContext;
+    await Promise.all([store.finalize(context, 9, "protocol_fault"), store.finalize(context, 9, "idle")]);
+    const result = JSON.parse(await readFile(paths.metadataPath, "utf8")) as WorkerLaunchMetadata;
+    expect(result.crashClassification).toBe("protocol_fault");
+    expect(result.endedAt).toBeString();
   });
 
   test("prunes finalized pairs by per-model count before backend bytes", async () => {

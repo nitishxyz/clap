@@ -177,6 +177,7 @@ export async function pruneLaunchLogs(
 
 export class WorkerLaunchLogStore {
   private readonly writes = new Map<string, Promise<void>>();
+  private readonly finalizations = new WeakMap<WorkerLaunchContext, Promise<void>>();
 
   registerActive(paths: WorkerLaunchPaths): () => void {
     activeMetadataPaths.add(paths.metadataPath);
@@ -242,18 +243,24 @@ export class WorkerLaunchLogStore {
   }
 
   async finalize(context: WorkerLaunchContext, exitStatus: number | null, classification: string): Promise<void> {
-    context.metadata = {
-      ...context.metadata,
-      endedAt: new Date().toISOString(),
-      exitStatus,
-      crashClassification: classification,
-    };
-    try {
-      await this.writeMetadata(context.paths, context.metadata);
-    } finally {
-      context.releaseActive();
-    }
-    await this.prune(context.paths);
+    const existing = this.finalizations.get(context);
+    if (existing) return existing;
+    const finalization = (async () => {
+      context.metadata = {
+        ...context.metadata,
+        endedAt: new Date().toISOString(),
+        exitStatus,
+        crashClassification: classification,
+      };
+      try {
+        await this.writeMetadata(context.paths, context.metadata);
+      } finally {
+        context.releaseActive();
+      }
+      await this.prune(context.paths);
+    })();
+    this.finalizations.set(context, finalization);
+    return finalization;
   }
 }
 

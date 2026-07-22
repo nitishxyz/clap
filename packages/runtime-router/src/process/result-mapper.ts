@@ -18,6 +18,7 @@ export type PendingWorkerResult = {
   tokenCapabilities?: ModelTokenCapabilities;
   launchPaths?: WorkerLaunchPaths;
   phase: WorkerRequestPhase;
+  cleanup?: () => void;
 };
 
 export type WorkerPayloadContext = {
@@ -83,6 +84,7 @@ export function applyWorkerPayload(
     }
     if (message.error) {
       context.pending.delete(id ?? "");
+      pending.cleanup?.();
       const code = typeof message.code === "string" ? message.code : undefined;
       pending.reject(context.workerError(String(message.error), code));
       return;
@@ -228,6 +230,7 @@ export function applyWorkerPayload(
     if (parsedCapabilities) pending.tokenCapabilities = parsedCapabilities;
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) context.pending.delete(id);
+      pending.cleanup?.();
       if (pending.cache && !pending.cache.workerLaunchId) pending.cache.workerLaunchId = context.workerLaunchId;
       pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities });
     }
