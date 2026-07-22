@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import ClapCacheBridge
 import ClapCachePolicy
+import ClapMLXModel
 import HuggingFace
 import MLX
 import MLXHuggingFace
@@ -581,26 +582,13 @@ func main() async {
         // Admission control (parity with the llama worker): reject oversized
         // prompts before any prefill with a structured code the server maps
         // to an OpenAI-style 400.
-        if tokenCapabilities.effectiveContextLength > 0 && promptTokens.count >= tokenCapabilities.effectiveContextLength {
-          emit(id: id, error: "prompt is too long for the loaded model; prompt_tokens=\(promptTokens.count), max_input_tokens=\(tokenCapabilities.effectiveContextLength - 1), effective_context_window=\(tokenCapabilities.effectiveContextLength).", code: "context_length_exceeded")
-          return nil
-        }
-        if let requestedMaxTokens, tokenCapabilities.maxOutputTokens > 0, requestedMaxTokens > tokenCapabilities.maxOutputTokens {
-          emit(id: id, error: "requested max_tokens=\(requestedMaxTokens) exceeds the loaded model maximum output tokens=\(tokenCapabilities.maxOutputTokens).", code: "max_output_tokens_exceeded")
-          return nil
-        }
-        if requestedMaxTokens == nil && tokenCapabilities.effectiveContextLength == 0 && tokenCapabilities.maxOutputTokens == 0 {
-          emit(id: id, error: "max_tokens is required because this model does not declare token limits.", code: "token_capability_unknown")
-          return nil
-        }
-        let availableOutput = tokenCapabilities.effectiveContextLength > 0
-          ? tokenCapabilities.effectiveContextLength - promptTokens.count
-          : tokenCapabilities.maxOutputTokens
-        let maxTokens = requestedMaxTokens
-          ?? (tokenCapabilities.maxOutputTokens > 0
-            ? min(tokenCapabilities.maxOutputTokens, availableOutput) : availableOutput)
-        if tokenCapabilities.effectiveContextLength > 0 && promptTokens.count + maxTokens > tokenCapabilities.effectiveContextLength {
-          emit(id: id, error: "prompt plus requested output exceeds the loaded model context; prompt_tokens=\(promptTokens.count), requested_output_tokens=\(maxTokens), effective_context_window=\(tokenCapabilities.effectiveContextLength).", code: "context_length_exceeded")
+        let maxTokens: Int
+        switch tokenCapabilities.resolveOutputTokens(
+          promptTokens: promptTokens.count, requestedMaxTokens: requestedMaxTokens) {
+        case .success(let resolved):
+          maxTokens = resolved
+        case .failure(let error):
+          emit(id: id, error: error.message, code: error.code)
           return nil
         }
         let generateParameters = GenerateParameters(
