@@ -232,6 +232,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private rejectHandshake?: (error: Error) => void;
   private handshakeTimer?: ReturnType<typeof setTimeout>;
   private startupBytes = false;
+  private lastDiagnostic?: string;
 
   constructor(
     public readonly key: string,
@@ -325,6 +326,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.memory = undefined;
     this.retention = undefined;
     this.tokenCapabilities = undefined;
+    this.lastDiagnostic = undefined;
     this.clearHandshake();
   }
 
@@ -334,6 +336,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.memory = undefined;
     this.retention = undefined;
     this.tokenCapabilities = undefined;
+    this.lastDiagnostic = undefined;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
@@ -392,16 +395,19 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     });
     // During migration, only explicitly configured workers may fall back, and
     // only when they emit no startup bytes. Bundled workers never downgrade.
-    if (allowsLegacyStartupFallback(this.protocolMode, source)) {
-      this.handshakeTimer = setTimeout(() => {
-        if (this.startupBytes || this.activeProtocol !== "v1") return;
+    this.handshakeTimer = setTimeout(() => {
+      if (this.activeProtocol !== "v1" || !this.resolveHandshake) return;
+      if (allowsLegacyStartupFallback(this.protocolMode, source) && !this.startupBytes) {
         this.activeProtocol = "legacy";
         this.v1Tracker = undefined;
         this.resolveHandshake?.();
         this.resolveHandshake = undefined;
         this.rejectHandshake = undefined;
-      }, 1_000);
-    }
+        return;
+      }
+      this.protocolUnhealthy(new WorkerProtocolFault("handshake_timeout",
+        "Worker did not send ready within 1000ms", "worker"));
+    }, 1_000);
   }
 
   private clearHandshake(): void {
@@ -436,7 +442,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     if (this.proc === proc) this.proc = undefined;
     this.loaded = false;
     const phase = this.resolveHandshake ? "during protocol handshake" : this.pending.size ? "during request" : "while idle";
-    const exitError = this.workerError(`${this.backend} resident worker exited ${phase} with code ${exitCode}`);
+    const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
+    const exitError = this.workerError(`${this.backend} resident worker exited ${phase} with code ${exitCode}${diagnostic}`);
     if (this.resolveHandshake) {
       this.rejectHandshake?.(exitError);
       this.rejectHandshake = undefined;
@@ -686,7 +693,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         ? telemetry : { retention: telemetry });
       return;
     }
-    if (fact.kind === "ready" || fact.kind === "diagnostic" || fact.kind === "accepted") return;
+    if (fact.kind === "diagnostic") { this.lastDiagnostic = fact.message; return; }
+    if (fact.kind === "ready" || fact.kind === "accepted") return;
     const pending = this.pending.get(fact.requestId);
     if (!pending) return;
     if (fact.kind === "started") {
@@ -714,7 +722,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private protocolUnhealthy(cause: Error): void {
-    const detail = cause instanceof WorkerProtocolFault ? `worker protocol ${cause.code}: ${cause.message}` : `worker protocol failure: ${cause.message}`;
+    const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
+    const detail = cause instanceof WorkerProtocolFault
+      ? `worker protocol ${cause.code}: ${cause.message}${diagnostic}`
+      : `worker protocol failure: ${cause.message}${diagnostic}`;
     const error = this.workerError(detail, "worker_protocol_error");
     this.rejectHandshake?.(error);
     this.rejectHandshake = undefined;

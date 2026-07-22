@@ -2,6 +2,7 @@ export type ProtocolFaultCode =
   | "line_too_large"
   | "malformed_stdout"
   | "version_mismatch"
+  | "handshake_timeout"
   | "ready_required"
   | "duplicate_ready"
   | "unknown_event_type"
