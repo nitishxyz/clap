@@ -51,6 +51,7 @@ set(CLAP_LLAMA_SOURCES
   clap-llama.cpp
   src/environment.cpp
   src/model-runtime.cpp
+  src/prompt.cpp
   src/protocol.cpp
   src/sampling.cpp
   src/stop-buffer.cpp
@@ -60,6 +61,7 @@ set(CLAP_LLAMA_SOURCES
 set(CLAP_LLAMA_HEADERS
   include/clap/llama/environment.h
   include/clap/llama/model-runtime.h
+  include/clap/llama/prompt.h
   include/clap/llama/protocol.h
   include/clap/llama/sampling.h
   include/clap/llama/stop-buffer.h
@@ -101,6 +103,19 @@ if(BUILD_TESTING)
   )
   target_link_libraries(clap-llama-model-runtime PRIVATE llama)
   add_test(NAME clap-llama-model-runtime COMMAND clap-llama-model-runtime)
+
+  add_executable(clap-llama-prompt
+    tests/prompt.test.cpp
+    src/environment.cpp
+    src/model-runtime.cpp
+    src/prompt.cpp
+  )
+  target_include_directories(clap-llama-prompt PRIVATE
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-prompt PRIVATE llama)
+  add_test(NAME clap-llama-prompt COMMAND clap-llama-prompt)
 
   add_executable(clap-llama-protocol
     tests/protocol.test.cpp
@@ -150,6 +165,7 @@ if(BUILD_TESTING)
     clap-llama-characterization
     clap-llama-environment
     clap-llama-model-runtime
+    clap-llama-prompt
     clap-llama-protocol
     clap-llama-sampling
     clap-llama-stop-buffer

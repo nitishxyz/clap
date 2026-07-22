@@ -3,6 +3,7 @@
 #include "cache-adapter.h"
 #include "clap/llama/environment.h"
 #include "clap/llama/model-runtime.h"
+#include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
 #include "clap/llama/sampling.h"
 #include "clap/llama/stop-buffer.h"
@@ -64,78 +65,9 @@ struct LoadedLlama {
   std::unique_ptr<clap::llama_cache::Coordinator> coordinator;
 };
 
-struct ChatEntry {
-  std::string role;
-  std::string content;
-};
-
 struct CacheBackpressure : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
-
-std::vector<ChatEntry> messages_from_request(const json& request) {
-  std::vector<ChatEntry> messages;
-  if (!request.contains("messages") || !request["messages"].is_array()) return messages;
-  for (const auto& message : request["messages"]) {
-    if (!message.is_object()) continue;
-    const std::string role = message.value("role", "");
-    std::string content;
-    if (message.contains("content") && message["content"].is_string()) {
-      content = message["content"].get<std::string>();
-    }
-    if (role.empty()) continue;
-    messages.push_back({role, content});
-  }
-  return messages;
-}
-
-std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& entries,
-                             bool add_generation_prompt = true) {
-  if (entries.empty()) return "";
-
-  const char* tmpl = llama_model_chat_template(model, nullptr);
-  if (tmpl && std::string(tmpl).find("<|turn>") != std::string::npos) {
-    std::string prompt = "<bos>";
-    for (const auto& entry : entries) {
-      std::string role = entry.role == "assistant" ? "model" : entry.role;
-      if (role == "tool") role = "user";
-      prompt += "<|turn>" + role + "\n" + entry.content + "<turn|>\n";
-    }
-    if (add_generation_prompt) prompt += "<|turn>model\n";
-    return prompt;
-  }
-
-  std::vector<ChatEntry> normalized;
-  normalized.reserve(entries.size());
-  for (const auto& entry : entries) {
-    // llama.cpp chat templates generally support system/user/assistant only.
-    normalized.push_back({entry.role == "tool" ? "user" : entry.role, entry.content});
-  }
-
-  std::vector<llama_chat_message> chat;
-  chat.reserve(normalized.size());
-  for (const auto& entry : normalized) {
-    chat.push_back({entry.role.c_str(), entry.content.c_str()});
-  }
-
-  int32_t length = llama_chat_apply_template(tmpl, chat.data(), chat.size(),
-      add_generation_prompt, nullptr, 0);
-  if (length <= 0) return "";
-  std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
-  int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(),
-      add_generation_prompt, buffer.data(), buffer.size());
-  if (written <= 0) return "";
-  return std::string(buffer.data(), static_cast<std::size_t>(written));
-}
-
-std::string fallback_prompt(const std::vector<ChatEntry>& entries) {
-  std::string prompt;
-  for (const auto& entry : entries) {
-    prompt += entry.content;
-    prompt += "\n";
-  }
-  return prompt;
-}
 
 void unload(LoadedLlama& loaded) {
   if (loaded.coordinator) loaded.coordinator->reset();
@@ -288,18 +220,10 @@ struct ActiveRequest {
   std::string cache_fallback;
   std::string prompt_token_hash;
   clap::llama_boundary::StableBoundary stable_boundary;
-  struct BoundaryInfo {
-    std::size_t token_count;
-    std::string kind;
-    std::string label;
-    bool requested;
-    std::string status;
-    std::string skip_reason;
-  };
   std::vector<std::size_t> anchor_boundaries;
   std::vector<std::size_t> structural_boundaries;
   std::vector<std::size_t> materialized_boundaries;
-  std::vector<BoundaryInfo> resolved_boundaries;
+  std::vector<clap::llama::ResolvedPromptBoundary> resolved_boundaries;
   json cache_candidates = json::array();
   bool cache_side_request = false;
 
@@ -1033,13 +957,10 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
 
 std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::string& id, const json& request) {
   const llama_vocab* vocab = loaded.runtime.vocab();
-  const std::vector<ChatEntry> entries = messages_from_request(request);
-  std::string prompt = templated_prompt(loaded.runtime.model(), entries);
-  if (prompt.empty()) prompt = fallback_prompt(entries);
-  if (prompt.empty() && request.contains("prompt") && request["prompt"].is_string()) {
-    prompt = request["prompt"].get<std::string>();
-  }
-  if (prompt.empty()) throw std::runtime_error("chat request contains no messages or prompt");
+  clap::llama::PromptRenderer renderer(loaded.runtime);
+  auto prepared_prompt = renderer.prepare(clap::llama::prompt_input_from_request(request));
+  std::vector<llama_token> prompt_tokens = std::move(prepared_prompt.tokens);
+  const std::vector<uint64_t> stable_boundaries = std::move(prepared_prompt.stable_boundaries);
 
   auto req = std::make_unique<ActiveRequest>();
   req->id = id;
@@ -1051,103 +972,8 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   if (request.contains("cache") && request["cache"].is_object()) {
     req->cache_namespace = cache_string(request["cache"], "namespace");
   }
-
-  const bool add_special = prompt.find("<bos>") == std::string::npos && prompt.find("<|turn>") == std::string::npos;
-  const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, add_special, true);
-  if (n_prompt <= 0) throw std::runtime_error("failed to tokenize prompt");
-  std::vector<llama_token> prompt_tokens(n_prompt);
-  if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), add_special, true) < 0) {
-    throw std::runtime_error("failed to tokenize prompt");
-  }
-  std::vector<uint64_t> stable_boundaries;
-  const auto resolve_boundary = [&](std::size_t message_count, const std::string& kind,
-                                    const std::string& label, bool requested) {
-    if (message_count == 0 || message_count > entries.size()) {
-      if (requested) req->resolved_boundaries.push_back(
-          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
-      return;
-    }
-    const std::vector<ChatEntry> prefix_entries(entries.begin(), entries.begin() + message_count);
-    const std::string prefix_prompt = templated_prompt(loaded.runtime.model(), prefix_entries, false);
-    if (prefix_prompt.empty()) {
-      if (requested) req->resolved_boundaries.push_back(
-          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
-      return;
-    }
-    const bool prefix_add_special = prefix_prompt.find("<bos>") == std::string::npos &&
-        prefix_prompt.find("<|turn>") == std::string::npos;
-    const int prefix_count = -llama_tokenize(vocab, prefix_prompt.c_str(),
-        prefix_prompt.size(), nullptr, 0, prefix_add_special, true);
-    if (prefix_count <= 0) {
-      if (requested) req->resolved_boundaries.push_back(
-          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
-      return;
-    }
-    std::vector<llama_token> prefix_tokens(static_cast<std::size_t>(prefix_count));
-    if (llama_tokenize(vocab, prefix_prompt.c_str(), prefix_prompt.size(),
-        prefix_tokens.data(), prefix_tokens.size(), prefix_add_special, true) < 0) {
-      if (requested) req->resolved_boundaries.push_back(
-          {0, kind, label, true, "skipped", "unsupported_template_boundary"});
-      return;
-    }
-    const auto exact = clap::llama_boundary::exact_template_boundary(
-        prefix_tokens, prompt_tokens,
-        [vocab](llama_token token) { return llama_vocab_is_eog(vocab, token); });
-    if (!exact) {
-      if (requested) req->resolved_boundaries.push_back(
-          {0, kind, label, true, "skipped", "non_prefix_template_boundary"});
-      return;
-    }
-    const std::size_t boundary = *exact;
-    stable_boundaries.push_back(boundary);
-    if (kind != "prompt") req->structural_boundaries.push_back(boundary);
-    const auto existing = std::find_if(req->resolved_boundaries.begin(),
-        req->resolved_boundaries.end(), [boundary](const auto& value) {
-          return value.token_count == boundary;
-        });
-    if (existing == req->resolved_boundaries.end()) {
-      req->resolved_boundaries.push_back(
-          {boundary, kind, label, requested, "resolved", ""});
-    } else if (requested) {
-      existing->kind = kind;
-      existing->label = label;
-      existing->requested = true;
-      existing->status = "resolved";
-      existing->skip_reason.clear();
-    }
-  };
-  std::size_t leading_systems = 0;
-  while (leading_systems < entries.size() && entries[leading_systems].role == "system") {
-    ++leading_systems;
-  }
-  for (std::size_t count = 1; count <= leading_systems; ++count) {
-    resolve_boundary(count, "messages", "", false);
-  }
-  if (request.contains("cache") && request["cache"].is_object() &&
-      request["cache"].contains("boundaries") && request["cache"]["boundaries"].is_array()) {
-    for (const auto& descriptor : request["cache"]["boundaries"]) {
-      const std::string kind = descriptor.value("kind", "");
-      const std::string label = descriptor.value("label", "");
-      if (kind == "messages") {
-        resolve_boundary(descriptor.value("through_message", entries.size()) + 1,
-            kind, label, true);
-      } else if (kind == "tools") {
-        // The llama worker receives no native tool-template structure. Any
-        // compatibility instructions are ordinary messages, so there is no
-        // independently provable tools-only prefix.
-        req->resolved_boundaries.push_back(
-            {0, kind, label, true, "skipped", "unsupported_template_boundary"});
-      }
-    }
-  }
-  if (prompt_tokens.size() > 16) {
-    stable_boundaries.push_back(prompt_tokens.size() - 1);
-    req->resolved_boundaries.push_back(
-        {prompt_tokens.size() - 1, "prompt", "", false, "resolved", ""});
-  }
-  std::sort(stable_boundaries.begin(), stable_boundaries.end());
-  stable_boundaries.erase(
-      std::unique(stable_boundaries.begin(), stable_boundaries.end()), stable_boundaries.end());
+  req->structural_boundaries = std::move(prepared_prompt.structural_boundaries);
+  req->resolved_boundaries = std::move(prepared_prompt.resolved_boundaries);
 
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.runtime.context()));
   const int32_t prompt_count = static_cast<int32_t>(prompt_tokens.size());

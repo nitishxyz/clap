@@ -231,17 +231,6 @@ int main() {
   assert(unavailable_boundary.token_count == 0);
   assert(unavailable_boundary.kind.empty());
   assert(!empty_hashed);
-  const std::vector<int32_t> final_prompt{1, 2, 3, 4};
-  const std::vector<int32_t> exact_prefix{1, 2};
-  const std::vector<int32_t> eos_suffix{1, 2, 99};
-  const std::vector<int32_t> unsafe_suffix{1, 2, 77};
-  const auto is_terminal = [](int32_t token) { return token == 99; };
-  assert(clap::llama_boundary::exact_template_boundary(
-      exact_prefix, final_prompt, is_terminal) == 2);
-  assert(clap::llama_boundary::exact_template_boundary(
-      eos_suffix, final_prompt, is_terminal) == 2);
-  assert(!clap::llama_boundary::exact_template_boundary(
-      unsafe_suffix, final_prompt, is_terminal));
 
   Coordinator unified(10, 16, 32768, 10);
   Identity unified_identity;
