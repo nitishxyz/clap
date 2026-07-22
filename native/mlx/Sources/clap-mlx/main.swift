@@ -286,7 +286,7 @@ func main() async {
       return offset > 0 ? offset : fallback
     }
 
-    func ensureAdmissionSlot() throws {
+    func ensureAnchorSlot() throws {
       guard !kvSlots.contains(where: { !$0.busy && $0.caches.isEmpty }) else { return }
       guard retainedRegistry.count < retentionConfig.hardCeiling,
             let coordinator = cacheCoordinator else { return }
@@ -552,241 +552,48 @@ func main() async {
             label: boundary.label, requested: boundary.requested, status: boundary.status,
             skipReason: boundary.skipReason)
         }
-        var coordinatorPlan: CachePlan? = nil
-        var coordinatorPlanMs = 0.0
-        var coordinatorApplyStartedNs = DispatchTime.now().uptimeNanoseconds
-        var cacheMaterializeMs = 0.0
-        var cacheFallback: String? = cacheCoordinator == nil ? "coordinator_unavailable_no_cache" : nil
-        if let coordinator = cacheCoordinator {
-          try ensureAdmissionSlot()
-          let slotMaterializations = kvSlots.enumerated().map { index, slot in
-            let logical = try? coordinator.slot(index)
-            let physical = PhysicalSlotRecord(identity: slot.cacheIdentity, tokens: slot.tokens,
-              generation: slot.coordinatorGeneration, hasCaches: !slot.caches.isEmpty,
-              isAnchor: slot.isAnchor)
-            let generationMatches = logical.map { $0.generation == slot.coordinatorGeneration } ?? false
-            let residentMatches = logical.map { Int($0.resident_len) == slot.tokens.count } ?? false
-            let stateMatches = logical.map {
-              (slot.isAnchor && $0.state == UInt32(CC_SLOT_ANCHOR)) ||
-                (!slot.isAnchor && $0.state != UInt32(CC_SLOT_ANCHOR))
-            } ?? false
-            let identityMatches = slot.cacheIdentity?.isCompatible(with: physicalIdentity) ?? false
-            let materialized = logical.map {
-              physical.isMaterialized(for: physicalIdentity, logicalGeneration: $0.generation,
-                logicalResidentLength: Int($0.resident_len), logicalState: $0.state,
-                anchorState: UInt32(CC_SLOT_ANCHOR))
-            } ?? false
-            if !slot.caches.isEmpty && !materialized {
-              var rejected: [String] = []
-              if !generationMatches { rejected.append("generation") }
-              if !residentMatches { rejected.append("resident_length") }
-              if !stateMatches { rejected.append("state") }
-              if !identityMatches { rejected.append("namespace_identity") }
-              debugLog("cache donor rejected: slot=\(index) reasons=\(rejected.joined(separator: ",")) physical_generation=\(slot.coordinatorGeneration) logical_generation=\(logical?.generation ?? 0) physical_tokens=\(slot.tokens.count) logical_resident=\(logical?.resident_len ?? 0) logical_state=\(logical?.state ?? 0) anchor=\(slot.isAnchor)")
-            }
-            return CacheSlotMaterialization(
-              materialized: materialized,
-              writable: !slot.busy,
-              partialSuffixTrim: materialized && slot.caches.allSatisfy(\.isTrimmable),
-              copyable: materialized
-            )
-          }
-          var capabilities = UInt64(CC_CAP_WHOLE_STATE_COPY) |
-            UInt64(CC_CAP_PARTIAL_SUFFIX_TRIM) | UInt64(CC_CAP_PARTIAL_PREFIX_BRANCH) |
-            UInt64(CC_CAP_SAFE_BUSY_DONOR) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT) |
-            UInt64(CC_CAP_RELIABLE_RESIDENT_LENGTH) |
-            UInt64(CC_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS)
-          if slotMaterializations.contains(where: { $0.materialized && !$0.partialSuffixTrim }) {
-            capabilities |= UInt64(CC_CAP_SLIDING_WINDOW) | UInt64(CC_CAP_RECURRENT_OR_HYBRID)
-          }
-          if kvBits != nil { capabilities |= UInt64(CC_CAP_KV_QUANTIZED) }
-          let estimatedBytesPerToken = kvSlots.compactMap { slot -> UInt64? in
-            guard !slot.tokens.isEmpty, !slot.caches.isEmpty else { return nil }
-            return physicalCacheBytes(slot.caches) / UInt64(slot.tokens.count)
-          }.max() ?? 0
-          do {
-            let planStartedNs = DispatchTime.now().uptimeNanoseconds
-            coordinatorPlan = try coordinator.plan(tokens: promptTokens, identity: cacheIdentity,
-              capabilities: capabilities, slots: slotMaterializations,
-              stableBoundaries: stableBoundaries, outputReserve: outputReserve,
-              estimatedBytesPerToken: estimatedBytesPerToken)
-            coordinatorPlanMs += Double(DispatchTime.now().uptimeNanoseconds - planStartedNs) / 1_000_000
-            coordinatorApplyStartedNs = DispatchTime.now().uptimeNanoseconds
-            if let view = coordinatorPlan?.view {
-              debugLog("cache coordinator plan: operation=\(view.operation) reuse=\(view.reuseTokens) donor=\(view.donor.map(String.init) ?? "none") target=\(view.target)")
-            }
-          } catch CacheCoordinatorError.status(_, let status)
-              where status == CC_NO_CAPACITY || status == CC_SLOT_BUSY {
-            pendingChats.insert((id: id, control: control, data: data, receivedNs: receivedNs), at: 0)
-            debugLog("cache admission deferred: coordinator status=\(status)")
-            return nil
-          } catch {
-            cacheFallback = "coordinator_plan_failed_closed"
-            debugLog("cache coordinator plan failed closed: \(error)")
-            throw error
-          }
-          guard coordinatorPlan != nil else { throw CacheCoordinatorError.unavailable }
-        }
-        guard coordinatorPlan != nil else { throw CacheCoordinatorError.unavailable }
+        guard let coordinator = cacheCoordinator else { throw CacheCoordinatorError.unavailable }
         if sessionCap > 0 && promptTokens.count + outputReserve > sessionCap {
           emit(id: id, error: "prompt exceeds the per-session context cap; prompt tokens=\(promptTokens.count), max_session_ctx=\(sessionCap), reserved output tokens=\(outputReserve). Reduce the prompt/tool history or raise max_session_ctx / CLAP_MLX_MAX_SESSION_CTX.", code: "context_length_exceeded")
           return nil
         }
-
-        // Rust is the sole cache policy authority. These variables describe
-        // only the coordinator-selected physical operation.
-        var bestPrefix = 0
-        var branchDonor: KVSlot? = nil
-        var branchPrefix = bestPrefix
-        if let planned = coordinatorPlan {
-          let view = planned.view
-          guard view.target < kvSlots.count,
-                view.donor == nil || view.donor! < kvSlots.count else {
-            try planned.abort()
-            throw CacheCoordinatorError.unavailable
-          }
-          let targetSlot = kvSlots[view.target]
-          if view.operation == UInt32(CC_OPERATION_CONTINUE) {
-            let trimNeeded = targetSlot.tokens.count - view.reuseTokens
-            guard view.donor == view.target, !targetSlot.caches.isEmpty, trimNeeded >= 0,
-                  trimNeeded == 0 || targetSlot.caches.allSatisfy(\.isTrimmable) else {
-              try planned.abort()
-              throw CacheCoordinatorError.unavailable
-            }
-          } else if view.operation == UInt32(CC_OPERATION_BRANCH) ||
-                    view.operation == UInt32(CC_OPERATION_RESTORE) {
-            guard let donorIndex = view.donor, donorIndex != view.target else {
-              try planned.abort()
-              throw CacheCoordinatorError.unavailable
-            }
-            let donorSlot = kvSlots[donorIndex]
-            let donorOffset = cacheSequenceLength(donorSlot.caches, fallback: donorSlot.tokens.count)
-            let trimNeeded = donorOffset - view.reuseTokens
-            guard !donorSlot.caches.isEmpty, trimNeeded >= 0,
-                  trimNeeded == 0 || donorSlot.caches.allSatisfy(\.isTrimmable) else {
-              try planned.abort()
-              throw CacheCoordinatorError.unavailable
-            }
-          }
-          if view.operation == UInt32(CC_OPERATION_CONTINUE) {
-            bestPrefix = view.reuseTokens
-            branchDonor = nil
-          } else if view.operation == UInt32(CC_OPERATION_BRANCH) ||
-                    view.operation == UInt32(CC_OPERATION_RESTORE) {
-            bestPrefix = 0
-            branchDonor = view.donor.map { kvSlots[$0] }
-            branchPrefix = view.reuseTokens
-          } else {
-            bestPrefix = 0
-            branchDonor = nil
-            branchPrefix = 0
-          }
+        let admission: CacheAdmission<KVCache>
+        do {
+          admission = try CacheExecutor.admit(coordinator: coordinator,
+            registry: &retainedRegistry, hardCeiling: retentionConfig.hardCeiling,
+            promptTokens: promptTokens, identity: cacheIdentity,
+            physicalIdentity: physicalIdentity, stableBoundaries: stableBoundaries,
+            outputReserve: outputReserve, kvQuantized: kvBits != nil,
+            useCounter: &kvUseCounter,
+            operations: CacheOperations(isTrimmable: { $0.isTrimmable },
+              copy: { $0.copy() }, trim: { $0.trim($1) },
+              sequenceLength: { cacheSequenceLength($0, fallback: $1) },
+              create: { lm.newCache(parameters: generateParameters) },
+              physicalBytes: physicalCacheBytes, log: debugLog))
+        } catch CacheCoordinatorError.status(_, let status)
+            where status == CC_NO_CAPACITY || status == CC_SLOT_BUSY {
+          pendingChats.insert((id: id, control: control, data: data, receivedNs: receivedNs), at: 0)
+          debugLog("cache admission deferred: coordinator status=\(status)")
+          return nil
+        } catch {
+          debugLog("cache coordinator plan failed closed: \(error)")
+          throw error
         }
-        guard let planned = coordinatorPlan else { throw CacheCoordinatorError.unavailable }
-        let slot = kvSlots[planned.view.target]
-        if planned.view.operation != UInt32(CC_OPERATION_CONTINUE) {
-          clearPhysicalSlot(slot)
+        if admission.evictedVictims {
+          lastEvictionReason = retentionConfig.physicalByteBudget > 0
+            ? "byte_pressure" : "retained_capacity"
         }
-        kvUseCounter += 1
-        slot.lastUsed = kvUseCounter
-        slot.busy = true
-        var prefix = bestPrefix
-        if prefix == promptTokens.count { prefix -= 1 }  // always feed at least one token for logits
-
-        var caches: [KVCache]
-        var fedTokens: [Int]
-        var suffix: [Int]
-        var reusedTokens = 0
-        let reuseKind = normalizedCacheReuseKind(operation: planned.view.operation)
-        var reuseScope: String? = nil
-        var branched = false
-        if let donor = branchDonor {
-          let materializeStartedNs = DispatchTime.now().uptimeNanoseconds
-          var sharedPrefix = branchPrefix
-          if sharedPrefix == promptTokens.count { sharedPrefix -= 1 }
-          let cloned = donor.caches.map { $0.copy() }
-          let cloneOffset = cacheSequenceLength(cloned, fallback: donor.tokens.count)
-          let trimNeeded = cloneOffset - sharedPrefix
-          if trimNeeded > 0 {
-            for cache in cloned { cache.trim(trimNeeded) }
-          }
-          caches = cloned
-          fedTokens = Array(promptTokens.prefix(sharedPrefix))
-          suffix = Array(promptTokens.dropFirst(sharedPrefix))
-          reusedTokens = sharedPrefix
-          reuseScope = donor.anchorScope
-          prefix = sharedPrefix
-          branched = true
-          cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - materializeStartedNs) / 1_000_000
-          debugLog("kv prefix branch: cloned \(sharedPrefix)/\(promptTokens.count) shared tokens from \(donor.isAnchor ? "an anchor" : "another slot"), prefilling \(suffix.count)")
-        } else {
-          caches = []
-          fedTokens = []
-          suffix = promptTokens
-        }
-        let trimmable = !slot.caches.isEmpty && slot.caches.allSatisfy { $0.isTrimmable }
-        let trimNeeded = slot.tokens.count - prefix
-        if branched {
-          // cache assignment handled above
-        } else if prefix > 0 {
-          let materializeStartedNs = DispatchTime.now().uptimeNanoseconds
-          if trimNeeded > 0 {
-            for cache in slot.caches { cache.trim(trimNeeded) }
-          }
-          cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - materializeStartedNs) / 1_000_000
-          caches = slot.caches
-          fedTokens = Array(promptTokens.prefix(prefix))
-          suffix = Array(promptTokens.dropFirst(prefix))
-          reusedTokens = prefix
-          reuseScope = slot.anchorScope
-          debugLog("kv prefix reuse (slot \(kvSlots.firstIndex(where: { $0 === slot }) ?? -1)): \(prefix)/\(promptTokens.count) tokens cached, prefilling \(suffix.count)")
-        } else {
-          caches = lm.newCache(parameters: generateParameters)
-          fedTokens = []
-          suffix = promptTokens
-          if !slot.tokens.isEmpty {
-            let reason = trimmable || slot.caches.isEmpty
-              ? "no usable prefix"
-              : "recurrent cache cannot rewind (matched \(prefix), needs trim of \(trimNeeded))"
-            debugLog("kv cache miss: \(reason) (cached \(slot.tokens.count), prompt \(promptTokens.count))")
-          }
-        }
-        slot.caches = caches
-        slot.tokens = fedTokens
-        slot.isPromptBoundary = false
-        slot.anchorScope = nil
-        slot.cacheIdentity = physicalIdentity
-
-        var cacheDecision: CacheDecision? = nil
-        let slotIndex = planned.view.target
-        try retainedRegistry.activate(slotID: UInt32(slotIndex))
-        if let planned = coordinatorPlan {
-          do {
-            let victims = planned.view.evictions.filter { $0 != slotIndex }.map(UInt32.init)
-            try retainedRegistry.validateEvictions(victims)
-            cacheDecision = try planned.commit(residentTokens: reusedTokens,
-                                               state: UInt32(CC_SLOT_SESSION),
-                                               physicalBytes: physicalCacheBytes(caches))
-            slot.coordinatorGeneration = try cacheCoordinator?.slot(
-              slotIndex).generation ?? 0
-            retainedRegistry.reconcileEvictions(victims) { _, victim in
-              clearPhysicalSlot(victim)
-            }
-            if !victims.isEmpty {
-              lastEvictionReason = retentionConfig.physicalByteBudget > 0
-                ? "byte_pressure" : "retained_capacity"
-            }
-            reusedTokens = cacheDecision?.realizedReuseTokens ?? reusedTokens
-            reuseScope = cacheScopeName(cacheDecision?.scope ?? cacheIdentity.scope)
-          } catch {
-            retainedRegistry.release(slotID: UInt32(slotIndex))
-            clearPhysicalSlot(slot)
-            throw error
-          }
-        }
-
-        for checkpoint in coordinatorPlan?.view.anchorBoundaries ?? []
-          where resolvedBoundaries[checkpoint] == nil {
+        let caches = admission.caches
+        let fedTokens = admission.fedTokens
+        let suffix = admission.suffix
+        let reusedTokens = admission.reusedTokens
+        let reuseKind = admission.reuseKind
+        let reuseScope = admission.reuseScope
+        let cacheDecision: CacheDecision? = admission.decision
+        let slotIndex = admission.slotIndex
+        let slot = admission.slot
+        let cacheFallback: String? = nil
+        for checkpoint in admission.anchorBoundaries where resolvedBoundaries[checkpoint] == nil {
           resolvedBoundaries[checkpoint] = .init(tokenCount: checkpoint, kind: "automatic_token",
             label: nil, requested: false, status: "authorized", skipReason: nil)
         }
@@ -796,9 +603,9 @@ func main() async {
           admittedNs: admittedNs,
           receivedToAdmittedMs: receivedToAdmittedMs,
           templateTokenizeMs: templateTokenizeMs,
-          coordinatorPlanMs: coordinatorPlanMs,
-          coordinatorApplyMs: Double(DispatchTime.now().uptimeNanoseconds - coordinatorApplyStartedNs) / 1_000_000,
-          cacheMaterializeMs: cacheMaterializeMs,
+          coordinatorPlanMs: admission.coordinatorPlanMs,
+          coordinatorApplyMs: admission.coordinatorApplyMs,
+          cacheMaterializeMs: admission.cacheMaterializeMs,
           streaming: control.stream ?? true,
           maxTokens: maxTokens,
           promptTokens: promptTokens,
@@ -807,8 +614,8 @@ func main() async {
           reuseScope: reuseScope,
           cacheIdentity: cacheIdentity,
           cacheDecision: cacheDecision,
-          cacheCandidates: coordinatorPlan?.candidates ?? [],
-          cacheEvictions: coordinatorPlan?.view.evictions ?? [],
+          cacheCandidates: admission.candidates,
+          cacheEvictions: admission.evictions,
           cacheFallback: cacheFallback,
           slotIndex: slotIndex,
           slot: slot,
@@ -819,7 +626,7 @@ func main() async {
           parameters: generateParameters,
           stops: control.stop?.values ?? []
         )
-        request.anchorPlantAt = coordinatorPlan?.view.anchorBoundaries ?? []
+        request.anchorPlantAt = admission.anchorBoundaries
         request.anchorPlantScopes = stableBoundaryScopes
         request.resolvedBoundaries = resolvedBoundaries
         request.automaticCheckpointProposed = automaticProposals.count
@@ -846,7 +653,7 @@ func main() async {
       let anchor: KVSlot
       let anchorPlan: CachePlan
       do {
-        try ensureAdmissionSlot()
+        try ensureAnchorSlot()
         let slotMaterializations = kvSlots.map {
           CacheSlotMaterialization(
             materialized: false,
