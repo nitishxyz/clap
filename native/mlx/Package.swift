@@ -27,7 +27,11 @@ let package = Package(
     .target(name: "ClapCachePolicy"),
     .target(
       name: "ClapMLXCache",
-      dependencies: ["ClapCacheBridge", "ClapCachePolicy"]
+      dependencies: [
+        "ClapCacheBridge",
+        "ClapCachePolicy",
+        .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+      ]
     ),
     .target(
       name: "ClapMLXModel",

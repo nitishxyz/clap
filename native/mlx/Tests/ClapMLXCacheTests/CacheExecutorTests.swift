@@ -157,6 +157,48 @@ struct CacheExecutorTests {
     #expect(registry.entry(for: 0)?.busy == false)
   }
 
+  @Test("pressure victims are cleared once only after commit")
+  func pressureVictim() throws {
+    let retention = RetentionConfiguration(initialEntries: 2, hardCeiling: 2,
+      physicalByteBudget: 64, highWatermarkBytes: 50, lowWatermarkBytes: 20)
+    let initialized: (CacheCoordinator, RetainedRegistry<CacheSlot<FakeCache>>) =
+      try CacheExecutor.initialize(retention: retention, maxActive: 1, capacity: 1024,
+        checkpoints: CoordinatorCheckpointConfiguration(enabled: false,
+          minimumTokens: 2_048, intervalTokens: 2_048, maximum: 8,
+          budgetBasisPoints: 2_500, budgetBytes: 0))
+    let coordinator = initialized.0
+    var registry = initialized.1
+    var counter: UInt64 = 0
+    let firstIdentity = makeIdentity(session: "first")
+    let first = try CacheExecutor.admit(coordinator: coordinator, registry: &registry,
+      hardCeiling: 2, promptTokens: [1, 2], identity: firstIdentity,
+      physicalIdentity: PhysicalCacheIdentity(fingerprint: firstIdentity.fingerprint),
+      stableBoundaries: [], outputReserve: 1, kvQuantized: false,
+      useCounter: &counter, operations: operations())
+    var firstCaches = first.caches
+    firstCaches[0].offset = 2
+    var firstFed = first.fedTokens
+    CacheExecutor.appendAndAdvance(coordinator: coordinator, slotIndex: first.slotIndex,
+      slot: first.slot, caches: firstCaches, fedTokens: &firstFed, tokens: [1, 2],
+      operations: operations())
+    CacheExecutor.finalize(coordinator: coordinator, registry: registry,
+      slotIndex: first.slotIndex, slot: first.slot, caches: &firstCaches,
+      snapshots: CacheSnapshots(), promptTokens: [1, 2], fedTokens: firstFed,
+      sampledTokens: [], generatedCount: 0, failed: false, operations: operations())
+    let secondIdentity = CacheIdentity(domain: "model", input: CacheIdentityInput(
+      namespace: "other", tenant: nil, project: nil, harness: nil, agent: nil,
+      session: "second", priority: nil, sideRequest: false), telemetryKey: "test")
+    let second = try CacheExecutor.admit(coordinator: coordinator, registry: &registry,
+      hardCeiling: 2, promptTokens: [9, 10], identity: secondIdentity,
+      physicalIdentity: PhysicalCacheIdentity(fingerprint: secondIdentity.fingerprint),
+      stableBoundaries: [], outputReserve: 1, kvQuantized: false,
+      useCounter: &counter, operations: operations())
+    #expect(second.evictedVictims)
+    #expect(first.slot.caches.isEmpty)
+    #expect(first.slot.tokens.isEmpty)
+    #expect(second.slot.caches.count == 1)
+  }
+
   private func makeCoordinator() throws -> CacheCoordinator {
     try CacheCoordinator(retention: RetentionConfiguration(initialEntries: 1,
       hardCeiling: 2, physicalByteBudget: 1_000_000,

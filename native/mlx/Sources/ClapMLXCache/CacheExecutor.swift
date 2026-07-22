@@ -46,6 +46,32 @@ public struct CacheOperations<Cache> {
 }
 
 public enum CacheExecutor {
+  public static func initialize<Cache>(retention: RetentionConfiguration, maxActive: Int,
+                                       capacity: Int,
+                                       checkpoints: CoordinatorCheckpointConfiguration)
+    throws -> (CacheCoordinator, RetainedRegistry<CacheSlot<Cache>>) {
+    let coordinator = try CacheCoordinator(retention: retention, capacity: capacity,
+      checkpoints: checkpoints)
+    let registry = RetainedRegistry<CacheSlot<Cache>>(maxActive: maxActive,
+      hardCeiling: retention.hardCeiling)
+    for slotID in 0..<retention.initialEntries {
+      let slot = CacheSlot<Cache>(coordinatorGeneration: try coordinator.slot(slotID).generation)
+      try registry.register(slotID: UInt32(slotID), entry: slot)
+    }
+    return (coordinator, registry)
+  }
+
+  public static func reset<Cache>(coordinator: inout CacheCoordinator?,
+                                  registry: inout RetainedRegistry<CacheSlot<Cache>>,
+                                  maxActive: Int, hardCeiling: Int,
+                                  useCounter: inout UInt64) {
+    try? coordinator?.reset()
+    coordinator = nil
+    registry = RetainedRegistry<CacheSlot<Cache>>(maxActive: maxActive,
+      hardCeiling: hardCeiling)
+    useCounter = 0
+  }
+
   public static func admit<Cache>(coordinator: CacheCoordinator,
                                   registry: inout RetainedRegistry<CacheSlot<Cache>>,
                                   hardCeiling: Int, promptTokens: [Int],
@@ -199,5 +225,80 @@ public enum CacheExecutor {
       anchorBoundaries: view.anchorBoundaries, coordinatorPlanMs: planMs,
       coordinatorApplyMs: Double(DispatchTime.now().uptimeNanoseconds - applyStarted) / 1_000_000,
       cacheMaterializeMs: materializeMs, evictedVictims: !victims.isEmpty)
+  }
+
+  public static func appendAndAdvance<Cache>(coordinator: CacheCoordinator?,
+                                             slotIndex: Int, slot: CacheSlot<Cache>,
+                                             caches: [Cache], fedTokens: inout [Int],
+                                             tokens: [Int], operations: CacheOperations<Cache>) {
+    guard !tokens.isEmpty else { return }
+    fedTokens.append(contentsOf: tokens)
+    slot.tokens = fedTokens
+    guard let coordinator, slot.coordinatorGeneration != 0 else { return }
+    do {
+      slot.coordinatorGeneration = try coordinator.advance(slot: slotIndex,
+        generation: slot.coordinatorGeneration, tokens: tokens, state: UInt32(CC_SLOT_SESSION),
+        busy: true, physicalBytes: operations.physicalBytes(caches))
+    } catch {
+      let generation = slot.coordinatorGeneration
+      if generation != 0 { _ = try? coordinator.invalidate(slot: slotIndex, generation: generation) }
+      slot.coordinatorGeneration = 0
+      operations.log("cache metadata advance reconciled after error: \(error)")
+    }
+  }
+
+  public static func finalize<Cache>(coordinator: CacheCoordinator?,
+                                     registry: RetainedRegistry<CacheSlot<Cache>>,
+                                     slotIndex: Int, slot: CacheSlot<Cache>,
+                                     caches: inout [Cache], snapshots: CacheSnapshots<Cache>,
+                                     promptTokens: [Int], fedTokens: [Int], sampledTokens: [Int],
+                                     generatedCount: Int, failed: Bool,
+                                     operations: CacheOperations<Cache>) {
+    slot.busy = false
+    registry.release(slotID: UInt32(slotIndex))
+    if failed {
+      let generation = slot.coordinatorGeneration
+      slot.clear()
+      if let coordinator, generation != 0 {
+        slot.coordinatorGeneration = (try? coordinator.invalidate(slot: slotIndex,
+          generation: generation)) ?? 0
+      }
+      return
+    }
+    if let boundary = snapshots.continuationBoundary, let boundaryCaches = snapshots.continuation {
+      caches = boundaryCaches
+      slot.caches = boundaryCaches
+      slot.tokens = Array(promptTokens.prefix(boundary))
+      slot.isPromptBoundary = true
+      slot.anchorScope = "conversation"
+      operations.log("restored rolling conversation anchor in slot \(slotIndex): \(boundary) tokens; discarded \(promptTokens.count - boundary) prompt suffix tokens and \(generatedCount) decoded tokens")
+    } else if let promptCaches = snapshots.promptBoundary {
+      caches = promptCaches
+      slot.caches = promptCaches
+      slot.tokens = promptTokens
+      slot.isPromptBoundary = true
+      slot.anchorScope = "conversation"
+      operations.log("restored prompt-boundary anchor in slot \(slotIndex): \(promptTokens.count) tokens; discarded \(generatedCount) decoded tokens")
+    } else {
+      let full = fedTokens + sampledTokens
+      let length = operations.sequenceLength(caches, full.count)
+      slot.caches = caches
+      slot.tokens = Array(full.prefix(min(length, full.count)))
+      slot.isPromptBoundary = false
+      slot.anchorScope = nil
+    }
+    guard let coordinator, slot.coordinatorGeneration != 0 else { return }
+    do {
+      slot.coordinatorGeneration = try coordinator.confirm(slot: slotIndex,
+        generation: slot.coordinatorGeneration, tokens: slot.tokens,
+        state: slot.isPromptBoundary ? UInt32(CC_SLOT_PROMPT_BOUNDARY) : UInt32(CC_SLOT_SESSION),
+        busy: true, physicalBytes: operations.physicalBytes(slot.caches))
+      try coordinator.setBusy(slot: slotIndex, generation: slot.coordinatorGeneration, busy: false)
+    } catch {
+      let generation = slot.coordinatorGeneration
+      if generation != 0 { _ = try? coordinator.invalidate(slot: slotIndex, generation: generation) }
+      slot.coordinatorGeneration = 0
+      operations.log("cache finalize metadata failed: \(error)")
+    }
   }
 }

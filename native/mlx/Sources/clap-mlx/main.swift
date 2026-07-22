@@ -69,26 +69,15 @@ func main() async {
     var pressureState: String?
     var activePolicyModelBytes: UInt64?
     func invalidateKVCache() {
-      try? cacheCoordinator?.reset()
-      cacheCoordinator = nil
-      retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
-        hardCeiling: retentionConfig.hardCeiling)
-      kvUseCounter = 0
+      CacheExecutor.reset(coordinator: &cacheCoordinator, registry: &retainedRegistry,
+        maxActive: maxActive, hardCeiling: retentionConfig.hardCeiling,
+        useCounter: &kvUseCounter)
       lastEvictionReason = nil
     }
 
-    func clearPhysicalSlot(_ slot: KVSlot) {
-      slot.clear()
-    }
-
-    func physicalCacheBytes(_ caches: [KVCache]) -> UInt64 {
-      let arrays = caches.flatMap(\.state).map {
-        CacheArrayDescriptor(storageIdentity: UInt64(bitPattern:
-          Int64(ObjectIdentifier($0).hashValue)),
-          elementCount: $0.size, itemSize: $0.itemSize,
-          allocatedBytes: $0.nbytes)
-      }
-      return max(1, PhysicalCacheByteEstimator.estimate(arrays: arrays))
+    func cacheOperations(create: @escaping () throws -> [KVCache] = { [] })
+      -> CacheOperations<KVCache> {
+      mlxCacheOperations(create: create, log: debugLog)
     }
 
     func retentionSnapshot(queued: Int = 0) -> WorkerRetention? {
@@ -128,17 +117,13 @@ func main() async {
         processorCount: configuration.processorCount,
         isHybridOrRecurrent: modelRuntime.tokenCapabilities.hybridOrRecurrent))
       maxActive = activePolicy.selectedMax
-      retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
-        hardCeiling: retentionConfig.hardCeiling)
       do {
-        cacheCoordinator = try CacheCoordinator(retention: retentionConfig,
+        let initialized: (CacheCoordinator, RetainedRegistry<KVSlot>) = try CacheExecutor.initialize(
+          retention: retentionConfig, maxActive: maxActive,
           capacity: Int.max / 4,
           checkpoints: configuration.checkpoints.coordinatorConfiguration)
-        for slotID in 0..<retentionConfig.initialEntries {
-          let slot = KVSlot()
-          slot.coordinatorGeneration = try cacheCoordinator?.slot(slotID).generation ?? 0
-          try retainedRegistry.register(slotID: UInt32(slotID), entry: slot)
-        }
+        cacheCoordinator = initialized.0
+        retainedRegistry = initialized.1
       } catch {
         cacheCoordinator = nil
         debugLog("cache coordinator unavailable; cache admission fails closed: \(error)")
@@ -196,9 +181,8 @@ func main() async {
       let slotIndex: Int
       let slot: KVSlot
       var caches: [KVCache]
-      var promptBoundaryCaches: [KVCache]? = nil
       var continuationBoundary: Int? = nil
-      var continuationBoundaryCaches: [KVCache]? = nil
+      let cacheSnapshots = CacheSnapshots<KVCache>()
       var fedTokens: [Int]
       var suffix: [Int]
       var pos = 0
@@ -277,76 +261,15 @@ func main() async {
     var allocatorNeedsIdleClear = false
     var nextAdmissionOrder: UInt64 = 0
 
-    // Recurrent caches such as Mamba keep state but intentionally report an
-    // offset of zero. Hybrid models still have attention caches whose maximum
-    // offset tracks the sequence length; pure recurrent models use the token
-    // bookkeeping fallback supplied by the caller.
-    func cacheSequenceLength(_ caches: [KVCache], fallback: Int) -> Int {
-      let offset = caches.map(\.offset).max() ?? 0
-      return offset > 0 ? offset : fallback
-    }
-
-    func ensureAnchorSlot() throws {
-      guard !kvSlots.contains(where: { !$0.busy && $0.caches.isEmpty }) else { return }
-      guard retainedRegistry.count < retentionConfig.hardCeiling,
-            let coordinator = cacheCoordinator else { return }
-      let registered = try coordinator.registerSlot()
-      let slot = KVSlot()
-      slot.coordinatorGeneration = registered.generation
-      try retainedRegistry.register(slotID: UInt32(registered.slot), entry: slot)
-    }
-
     func finalize(_ req: ActiveRequest) {
-      req.slot.busy = false
-      retainedRegistry.release(slotID: UInt32(req.slotIndex))
+      CacheExecutor.finalize(coordinator: cacheCoordinator, registry: retainedRegistry,
+        slotIndex: req.slotIndex, slot: req.slot, caches: &req.caches,
+        snapshots: req.cacheSnapshots, promptTokens: req.promptTokens,
+        fedTokens: req.fedTokens, sampledTokens: req.sampledTokens,
+        generatedCount: req.generatedCount, failed: req.failed,
+        operations: cacheOperations())
       if req.failed {
-        let generation = req.slot.coordinatorGeneration
-        clearPhysicalSlot(req.slot)
-        if let coordinator = cacheCoordinator, generation != 0 {
-          req.slot.coordinatorGeneration = (try? coordinator.invalidate(
-            slot: req.slotIndex, generation: generation)) ?? 0
-        }
         return
-      }
-      if let continuationBoundary = req.continuationBoundary,
-         let continuationCaches = req.continuationBoundaryCaches {
-        req.slot.caches = continuationCaches
-        req.slot.tokens = Array(req.promptTokens.prefix(continuationBoundary))
-        req.slot.isPromptBoundary = true
-        req.slot.anchorScope = "conversation"
-        debugLog("restored rolling conversation anchor in slot \(kvSlots.firstIndex(where: { $0 === req.slot }) ?? -1): \(continuationBoundary) tokens; discarded \(req.promptTokens.count - continuationBoundary) prompt suffix tokens and \(req.generatedCount) decoded tokens")
-      } else if let promptBoundary = req.promptBoundaryCaches {
-        req.slot.caches = promptBoundary
-        req.slot.tokens = req.promptTokens
-        req.slot.isPromptBoundary = true
-        req.slot.anchorScope = "conversation"
-        debugLog("restored prompt-boundary anchor in slot \(kvSlots.firstIndex(where: { $0 === req.slot }) ?? -1): \(req.promptTokens.count) tokens; discarded \(req.generatedCount) decoded tokens")
-      } else {
-        // The cache offset is authoritative for what is resident; any mismatch
-        // here corrupts the next request's prefix trim.
-        let full = req.fedTokens + req.sampledTokens
-        let cacheLength = cacheSequenceLength(req.caches, fallback: full.count)
-        req.slot.tokens = Array(full.prefix(min(cacheLength, full.count)))
-        req.slot.isPromptBoundary = false
-        req.slot.anchorScope = nil
-      }
-      if let coordinator = cacheCoordinator, req.slot.coordinatorGeneration != 0 {
-        do {
-          req.slot.coordinatorGeneration = try coordinator.confirm(
-            slot: req.slotIndex, generation: req.slot.coordinatorGeneration,
-            tokens: req.slot.tokens,
-            state: req.slot.isPromptBoundary ? UInt32(CC_SLOT_PROMPT_BOUNDARY) : UInt32(CC_SLOT_SESSION),
-            busy: true, physicalBytes: physicalCacheBytes(req.slot.caches))
-          try coordinator.setBusy(slot: req.slotIndex,
-                                  generation: req.slot.coordinatorGeneration, busy: false)
-        } catch {
-          let generation = req.slot.coordinatorGeneration
-          if generation != 0 {
-            _ = try? coordinator.invalidate(slot: req.slotIndex, generation: generation)
-          }
-          req.slot.coordinatorGeneration = 0
-          debugLog("cache finalize metadata failed: \(error)")
-        }
       }
       // Flush any text held back for stop-sequence matching.
       if req.streaming && !req.cancelled && req.emitted < req.collected.count {
@@ -565,11 +488,9 @@ func main() async {
             physicalIdentity: physicalIdentity, stableBoundaries: stableBoundaries,
             outputReserve: outputReserve, kvQuantized: kvBits != nil,
             useCounter: &kvUseCounter,
-            operations: CacheOperations(isTrimmable: { $0.isTrimmable },
-              copy: { $0.copy() }, trim: { $0.trim($1) },
-              sequenceLength: { cacheSequenceLength($0, fallback: $1) },
-              create: { lm.newCache(parameters: generateParameters) },
-              physicalBytes: physicalCacheBytes, log: debugLog))
+            operations: cacheOperations(create: {
+              lm.newCache(parameters: generateParameters)
+            }))
         } catch CacheCoordinatorError.status(_, let status)
             where status == CC_NO_CAPACITY || status == CC_SLOT_BUSY {
           pendingChats.insert((id: id, control: control, data: data, receivedNs: receivedNs), at: 0)
@@ -642,97 +563,25 @@ func main() async {
 
     @discardableResult
     func snapshotAnchor(_ req: ActiveRequest, at plant: Int, reason: String) -> Bool {
-      let boundary = Array(req.promptTokens.prefix(plant))
-      let offset = cacheSequenceLength(req.caches, fallback: req.fedTokens.count)
-      guard req.fedTokens == boundary, offset == plant else {
-        debugLog("\(reason) anchor skipped: fed=\(req.fedTokens.count) offset=\(offset) plant=\(plant)")
-        return false
-      }
-      // Rust owns anchor deduplication, target choice, and eviction policy.
       guard let coordinator = cacheCoordinator else { return false }
-      let anchor: KVSlot
-      let anchorPlan: CachePlan
-      do {
-        try ensureAnchorSlot()
-        let slotMaterializations = kvSlots.map {
-          CacheSlotMaterialization(
-            materialized: false,
-            writable: !$0.busy,
-            partialSuffixTrim: false,
-            copyable: false
-          )
-        }
-        anchorPlan = try coordinator.plan(tokens: boundary, identity: req.cacheIdentity,
-          capabilities: UInt64(CC_CAP_WHOLE_STATE_COPY) | UInt64(CC_CAP_PROMPT_BOUNDARY_SNAPSHOT),
-          slots: slotMaterializations,
-          outputReserve: 0, state: UInt32(CC_SLOT_ANCHOR),
-          scope: req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope,
-          estimatedBytesPerToken: physicalCacheBytes(req.caches) / UInt64(max(plant, 1)))
-        guard anchorPlan.view.target < kvSlots.count,
-              !kvSlots[anchorPlan.view.target].busy else {
-          try? anchorPlan.abort()
-          debugLog("\(reason) coordinated anchor skipped: target unavailable")
-          return false
-        }
-        anchor = kvSlots[anchorPlan.view.target]
-      } catch {
-        debugLog("\(reason) coordinated anchor skipped: \(error)")
-        return false
-      }
-      if anchorPlan.view.operation == UInt32(CC_OPERATION_NOOP) {
-        do {
-          _ = try anchorPlan.commit(residentTokens: plant, state: UInt32(CC_SLOT_ANCHOR),
-            physicalBytes: physicalCacheBytes(anchor.caches))
-          debugLog("coordinated \(reason) anchor already exists: slot=\(anchorPlan.view.target)")
-          return true
-        } catch {
-          debugLog("\(reason) coordinated anchor no-op failed: \(error)")
-          return false
-        }
-      }
-      anchor.isAnchor = true
       let structural = req.resolvedBoundaries[plant].map {
         $0.kind != "prompt" && $0.kind != "automatic_token"
       } ?? false
-      anchor.anchorScope = cacheScopeName(req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope)
-      let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
-      anchor.caches = req.caches.map { $0.copy() }
-      req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
-      anchor.tokens = boundary
-      anchor.cacheIdentity = PhysicalCacheIdentity(fingerprint: req.cacheIdentity.fingerprint)
-      do {
-        let index = anchorPlan.view.target
-        let victims = anchorPlan.view.evictions.filter { $0 != index }.map(UInt32.init)
-        try retainedRegistry.validateEvictions(victims)
-        _ = try anchorPlan.commit(residentTokens: plant, state: UInt32(CC_SLOT_ANCHOR),
-          physicalBytes: physicalCacheBytes(anchor.caches))
-        let logical = try coordinator.slot(index)
-        anchor.coordinatorGeneration = logical.generation
-        if structural {
-          try coordinator.setAnchorProtected(slot: index,
-            generation: logical.generation, protected: true)
-        }
-        retainedRegistry.reconcileEvictions(victims) { _, victim in
-          clearPhysicalSlot(victim)
-        }
-        if !victims.isEmpty {
-          lastEvictionReason = retentionConfig.physicalByteBudget > 0
-            ? "byte_pressure" : "retained_capacity"
-        }
-        let fingerprint = req.cacheIdentity.fingerprint.map { String(format: "%02x", $0) }.joined()
-        let flags = CacheSlotMaterialization(materialized: !anchor.caches.isEmpty,
-          writable: !anchor.busy, partialSuffixTrim: anchor.caches.allSatisfy(\.isTrimmable),
-          copyable: !anchor.caches.isEmpty).flags
-        debugLog("coordinated \(reason) anchor committed: slot=\(index) logical_state=\(logical.state) logical_generation=\(logical.generation) logical_resident=\(logical.resident_len) namespace=\(fingerprint) physical_generation=\(anchor.coordinatorGeneration) physical_tokens=\(anchor.tokens.count) physical_identity=\(anchor.cacheIdentity != nil) flags=\(flags)")
-      } catch {
-        clearPhysicalSlot(anchor)
-        debugLog("\(reason) coordinated anchor commit failed: \(error)")
-        return false
+      let result = AnchorManager.materialize(coordinator: coordinator,
+        registry: &retainedRegistry, hardCeiling: retentionConfig.hardCeiling,
+        boundary: Array(req.promptTokens.prefix(plant)), sourceCaches: req.caches,
+        sourceFedTokens: req.fedTokens, identity: req.cacheIdentity,
+        scope: req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope,
+        structural: structural, useCounter: &kvUseCounter, operations: cacheOperations())
+      req.cacheMaterializeMs += result.materializeMs
+      if result.evictedVictims {
+        lastEvictionReason = retentionConfig.physicalByteBudget > 0
+          ? "byte_pressure" : "retained_capacity"
       }
-      kvUseCounter += 1
-      anchor.lastUsed = kvUseCounter
-      debugLog("planted \(reason) anchor: \(plant) tokens (exact-state snapshot for non-rewindable caches)")
-      return true
+      if result.materialized {
+        debugLog("planted \(reason) anchor: \(plant) tokens (exact-state snapshot for non-rewindable caches)")
+      }
+      return result.materialized
     }
 
     func plantAnchor(_ req: ActiveRequest) {
@@ -745,37 +594,16 @@ func main() async {
     }
 
     func captureContinuationBoundary(_ req: ActiveRequest) {
-      guard req.continuationBoundaryCaches == nil,
-            let boundary = req.continuationBoundary,
-            boundary == req.fedTokens.count,
-            req.caches.contains(where: { !$0.isTrimmable }) else { return }
-      let offset = cacheSequenceLength(req.caches, fallback: req.fedTokens.count)
-      guard offset == boundary else {
-        debugLog("rolling conversation anchor skipped: fed=\(req.fedTokens.count) offset=\(offset) boundary=\(boundary)")
-        return
-      }
-      let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
-      req.continuationBoundaryCaches = req.caches.map { $0.copy() }
-      req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
-      debugLog("captured rolling conversation anchor: \(boundary) tokens")
+      guard let boundary = req.continuationBoundary else { return }
+      req.cacheMaterializeMs += AnchorManager.captureContinuation(
+        snapshots: req.cacheSnapshots, boundary: boundary, caches: req.caches,
+        fedTokens: req.fedTokens, operations: cacheOperations())
     }
 
     func advanceCoordinator(_ req: ActiveRequest, tokens: [Int]) {
-      guard !tokens.isEmpty, let coordinator = cacheCoordinator,
-            req.slot.coordinatorGeneration != 0 else { return }
-      do {
-        req.slot.coordinatorGeneration = try coordinator.advance(
-          slot: req.slotIndex, generation: req.slot.coordinatorGeneration,
-          tokens: tokens, state: UInt32(CC_SLOT_SESSION), busy: true,
-          physicalBytes: physicalCacheBytes(req.caches))
-      } catch {
-        let generation = req.slot.coordinatorGeneration
-        if generation != 0 {
-          _ = try? coordinator.invalidate(slot: req.slotIndex, generation: generation)
-        }
-        req.slot.coordinatorGeneration = 0
-        debugLog("cache metadata advance reconciled after error: \(error)")
-      }
+      CacheExecutor.appendAndAdvance(coordinator: cacheCoordinator,
+        slotIndex: req.slotIndex, slot: req.slot, caches: req.caches,
+        fedTokens: &req.fedTokens, tokens: tokens, operations: cacheOperations())
     }
 
     func step(_ req: ActiveRequest, prefillQuantum: Int) {
@@ -793,7 +621,7 @@ func main() async {
             let rel = plant - req.reusedTokens
             if req.pos < rel && rel < chunkEnd { chunkEnd = rel }
           }
-          if let boundary = req.continuationBoundary, req.continuationBoundaryCaches == nil {
+          if let boundary = req.continuationBoundary, req.cacheSnapshots.continuation == nil {
             let rel = boundary - req.reusedTokens
             if req.pos < rel && rel < chunkEnd { chunkEnd = rel }
           }
@@ -807,8 +635,6 @@ func main() async {
             req.prefillTokens += chunk.count
             req.prefillChunks += 1
             req.pos = chunkEnd
-            req.fedTokens.append(contentsOf: chunk)
-            req.slot.tokens = req.fedTokens
             advanceCoordinator(req, tokens: chunk)
             emit(id: req.id, prefill: WorkerPrefill(done: req.reusedTokens + req.pos, total: req.promptTokens.count))
             plantAnchor(req)
@@ -827,22 +653,18 @@ func main() async {
             req.prefillTokens += tail.count
             req.prefillChunks += 1
             req.pos = req.suffix.count
-            req.fedTokens.append(contentsOf: tail)
-            req.slot.tokens = req.fedTokens
             advanceCoordinator(req, tokens: tail)
             // Decode mutates recurrent cache state irreversibly. Preserve the
             // exact end-of-prompt state in this request and restore it into
             // the same slot at finalize, so even a one-slot worker can reuse
             // it for the next tool-result continuation.
-            if req.continuationBoundaryCaches == nil && req.caches.contains(where: { !$0.isTrimmable }) {
-              let offset = cacheSequenceLength(req.caches, fallback: req.fedTokens.count)
-              if offset == req.promptTokens.count {
-                let snapshotStartedNs = DispatchTime.now().uptimeNanoseconds
-                req.promptBoundaryCaches = req.caches.map { $0.copy() }
-                req.cacheMaterializeMs += Double(DispatchTime.now().uptimeNanoseconds - snapshotStartedNs) / 1_000_000
+            if req.cacheSnapshots.continuation == nil {
+              let snapshotMs = AnchorManager.capturePromptBoundary(
+                snapshots: req.cacheSnapshots, promptTokens: req.promptTokens,
+                caches: req.caches, fedTokens: req.fedTokens, operations: cacheOperations())
+              req.cacheMaterializeMs += snapshotMs
+              if snapshotMs > 0 {
                 debugLog("captured prompt-boundary anchor in slot \(kvSlots.firstIndex(where: { $0 === req.slot }) ?? -1): \(req.promptTokens.count) tokens")
-              } else {
-                debugLog("prompt-boundary anchor skipped: cache offset \(offset), prompt \(req.promptTokens.count)")
               }
             }
           }
