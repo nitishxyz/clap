@@ -324,6 +324,7 @@ describe("clap server", () => {
     const previousHome = process.env.CLAP_HOME;
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousLog = process.env.CLAP_FAKE_WORKER_REQUEST_LOG;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
     const root = await mkdtemp(join(tmpdir(), "clap-identity-envelope-"));
     const home = join(root, "home");
     const modelPath = join(root, "identity.gguf");
@@ -353,11 +354,44 @@ describe("clap server", () => {
       expect((await chat()).status).toBe(200);
       expect((await chat()).status).toBe(200);
 
+      const remote = { requestIP: () => ({ address: "203.0.113.7" }) };
+      const deniedRotation = await app.request("/clap/v1/cache/identity/rotate", { method: "POST" }, remote);
+      expect(deniedRotation.status).toBe(401);
+      const authenticatedRotation = await app.request("/clap/v1/cache/identity/rotate", {
+        method: "POST", headers: { authorization: `Bearer ${firstKey}` },
+      }, remote);
+      expect(authenticatedRotation.status).toBe(200);
+      const firstRotation = await authenticatedRotation.json() as Record<string, unknown>;
+      expect(Object.keys(firstRotation).sort()).toEqual([
+        "clearedResidents", "newGeneration", "previousGeneration", "rotatedAt",
+      ]);
+      expect(firstRotation).toMatchObject({ clearedResidents: 1 });
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(Array.from({ length: 30 }, () => "x"));
+      let inFlightCompleted = false;
+      const inFlight = Promise.resolve(chat()).then((response) => {
+        inFlightCompleted = true;
+        return response;
+      });
+      await Bun.sleep(15);
+
+      const localRotationPromise = app.request("/clap/v1/cache/identity/rotate", { method: "POST" });
+      expect((await inFlight).status).toBe(200);
+      const localRotation = await localRotationPromise;
+      expect(inFlightCompleted).toBe(true);
+      expect(localRotation.status).toBe(200);
+      expect(await localRotation.json()).toMatchObject({
+        previousGeneration: firstRotation.newGeneration,
+        clearedResidents: 1,
+      });
+      expect((await chat()).status).toBe(200);
+
       const envelopes = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
         .filter((request) => request.type === "generate");
-      expect(envelopes).toHaveLength(4);
+      expect(envelopes).toHaveLength(6);
       expect(envelopes[0].cache_identity.tenant_root).not.toBe(envelopes[1].cache_identity.tenant_root);
       expect(envelopes[2].cache_identity).toEqual(envelopes[3].cache_identity);
+      expect(envelopes[4].cache_identity.generation).not.toBe(envelopes[3].cache_identity.generation);
+      expect(envelopes[5].cache_identity.generation).not.toBe(envelopes[4].cache_identity.generation);
       expect(envelopes.every((request) => request.cache_identity.scope === "tenant")).toBe(true);
       expect(JSON.stringify(envelopes)).not.toContain(firstKey);
       expect(JSON.stringify(envelopes)).not.toContain(secondKey);
@@ -365,6 +399,7 @@ describe("clap server", () => {
       restoreEnv("CLAP_HOME", previousHome);
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_REQUEST_LOG", previousLog);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
       await rm(root, { recursive: true, force: true });
     }
   });

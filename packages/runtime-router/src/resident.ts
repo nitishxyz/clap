@@ -116,6 +116,7 @@ export type ResidentWorkerHandle = {
   unload(): Promise<void>;
   shutdown(): void;
   shutdownAsync?(): Promise<void>;
+  drainAndShutdownAsync?(): Promise<void>;
 };
 
 export type ActiveLimitTelemetry = {
@@ -390,6 +391,24 @@ export class ResidentWorkerRegistry {
 
   shutdownAll(): void {
     void this.shutdownAsync();
+  }
+
+  async shutdownAllAsync(): Promise<void> {
+    await this.shutdownAsync();
+  }
+
+  /** Drains every old-generation worker after the new secret is durable. */
+  async rotateCacheIdentityGeneration(): Promise<number> {
+    const workers = [...this.workers.values()];
+    const cleared = workers.length;
+    this.workers.clear();
+    this.workerEnvironments.clear();
+    this.recentRetainedGrowth.clear();
+    this.lastAdjustments.clear();
+    await Promise.all(workers.map((worker) => worker.drainAndShutdownAsync?.() ?? worker.shutdownAsync?.()));
+    if (this.pressureTimer) clearInterval(this.pressureTimer);
+    this.pressureTimer = undefined;
+    return cleared;
   }
 
   async rebalance(reason = "manual"): Promise<void> {

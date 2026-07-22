@@ -143,6 +143,14 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     void this.shutdownAsync();
   }
 
+  async drainAndShutdownAsync(): Promise<void> {
+    // The server's identity barrier prevents new chats while rotation owns the
+    // writer lock. Let already-dispatched old-generation work reach a terminal
+    // event before asking the worker to exit.
+    while (this.pending.size > 0) await Bun.sleep(5);
+    await this.shutdownAsync();
+  }
+
   shutdownAsync(): Promise<void> {
     const starting = this.starting;
     if (starting) return starting.then((launch) => this.close(launch, "shutdown"), () => {});

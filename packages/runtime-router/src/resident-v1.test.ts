@@ -70,6 +70,25 @@ if (command.type === "generate") console.log(JSON.stringify({ id: command.reques
 }
 
 describe.serial("resident worker v1 migration", () => {
+  test("cache identity rotation drains and removes every resident", async () => {
+    const previous = process.env.CLAP_LLAMA_WORKER;
+    const dir = await mkdtemp(join(tmpdir(), "clap-resident-rotation-"));
+    try {
+      const fake = await v1Worker(dir);
+      process.env.CLAP_LLAMA_WORKER = fake.path;
+      const model = join(dir, "model.gguf");
+      await writeFile(model, "gguf");
+      const registry = new ResidentWorkerRegistry();
+      await registry.getOrCreate("rotation", "llama", model).load();
+      expect(await registry.rotateCacheIdentityGeneration()).toBe(1);
+      expect(registry.get("rotation")).toBeUndefined();
+      expect(await registry.rotateCacheIdentityGeneration()).toBe(0);
+    } finally {
+      restore("CLAP_LLAMA_WORKER", previous);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("terminates a worker that violates the v1 handshake", async () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-v1-bad-"));
     try {

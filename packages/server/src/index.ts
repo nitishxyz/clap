@@ -38,7 +38,7 @@ import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { CacheEventStore, type PersistedCacheDecision } from "./cache-event-store";
-import { deriveCacheIdentity, derivePhysicalModelDomain, loadOrCreateInstallationSecret, type DerivedCacheIdentity, type PhysicalModelDomain } from "./cache-identity";
+import { deriveCacheIdentity, derivePhysicalModelDomain, InstallationSecretProvider, type DerivedCacheIdentity, type PhysicalModelDomain } from "./cache-identity";
 import {
   classifyPersistedCacheOutcome,
   firstDecisionIdsForWorkerModelDomain,
@@ -320,8 +320,7 @@ export function createServer(
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
-  let installationSecretPromise: ReturnType<typeof loadOrCreateInstallationSecret> | undefined;
-  const installationSecret = () => installationSecretPromise ??= loadOrCreateInstallationSecret();
+  const installationSecrets = new InstallationSecretProvider();
   app.use("*", async (c, next) => {
     let address: string | undefined;
     let embedded = true;
@@ -362,6 +361,16 @@ export function createServer(
       error: { message: "missing or invalid API key; pass Authorization: Bearer <key>", type: "invalid_request_error", code: "invalid_api_key" },
     }), 401);
   }
+
+  app.post("/clap/v1/cache/identity/rotate", async (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.cachePrincipal) return invalidApiKey(c);
+    const result = await installationSecrets.rotate(async (rotation) => ({
+      ...rotation,
+      clearedResidents: await residents.rotateCacheIdentityGeneration(),
+    }));
+    return c.json(result);
+  });
 
   app.post("/clap/v1/keys", async (c) => {
     const body = z.object({ name: z.string().min(1) }).parse(await c.req.json());
@@ -840,21 +849,6 @@ export function createServer(
     const physicalModelDomain = await preparePhysicalModelDomain(resolved.model);
     const principal = c.get("requestIdentity").cachePrincipal;
     if (!principal) throw new Error("Authenticated cache principal is unavailable");
-    const derivedIdentity = deriveCacheIdentity(
-      await installationSecret(),
-      principal,
-      request.cache ?? {},
-      {
-        backend: physicalModelDomain.backend,
-        modelRevision: physicalModelDomain.modelRevision,
-        tokenizer: physicalModelDomain.tokenizerFingerprint,
-        contextAllocation: physicalModelDomain.contextAllocation,
-        kvFormat: physicalModelDomain.kvFormat,
-        unifiedKv: physicalModelDomain.unifiedKv,
-        layoutVersion: physicalModelDomain.layoutVersion,
-      },
-    );
-    const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
 
     const templateInfo = await resolveParserTemplateInfo(resolved.model);
     let routedRequest: ChatCompletionRequest;
@@ -873,14 +867,32 @@ export function createServer(
         error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
       }), 400);
     }
+    const secretLease = await installationSecrets.acquireSecret();
+    let derivedIdentity: DerivedCacheIdentity;
+    try {
+      derivedIdentity = deriveCacheIdentity(secretLease.secret, principal, request.cache ?? {}, {
+        backend: physicalModelDomain.backend,
+        modelRevision: physicalModelDomain.modelRevision,
+        tokenizer: physicalModelDomain.tokenizerFingerprint,
+        contextAllocation: physicalModelDomain.contextAllocation,
+        kvFormat: physicalModelDomain.kvFormat,
+        unifiedKv: physicalModelDomain.unifiedKv,
+        layoutVersion: physicalModelDomain.layoutVersion,
+      });
+    } catch (error) {
+      secretLease.release();
+      throw error;
+    }
+    const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity, secretLease.release);
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity, secretLease.release);
     }
 
+    secretLease.release();
     handle.finish({ status: "error", errorCode: "not_cached" });
     return c.json(ErrorResponseSchema.parse({
       error: { message: `Model ${request.model} is not cached as a GGUF file or MLX directory. Run: clap pull ${request.model}, or pass a local .gguf file / MLX directory.`, type: "model_error", code: "not_cached" },
@@ -923,18 +935,21 @@ export function createServer(
     templateInfo: ParserTemplateInfo | undefined,
     handle: RequestHandle,
     cacheIdentity: CacheIdentity,
+    releaseIdentityLease: () => void,
   ) {
     let release: () => void;
     try {
       release = await limiter.acquire(c.get("requestIdentity").clientId, c.req.raw.signal);
     } catch (error) {
       if (error instanceof QueueFullError) {
+        releaseIdentityLease();
         handle.finish({ status: "error", error: error.message, errorCode: "server_overloaded" });
         c.header("Retry-After", String(error.retryAfterSeconds));
         return c.json(ErrorResponseSchema.parse({
           error: { message: error.message, type: "rate_limit_error", code: "server_overloaded" },
         }), 429);
       }
+      releaseIdentityLease();
       throw error;
     }
     try {
@@ -943,13 +958,16 @@ export function createServer(
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
           lifecycle.finishUsage(loaded);
           release();
+          releaseIdentityLease();
         }, handle, cacheIdentity);
       }
       const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle, cacheIdentity));
       release();
+      releaseIdentityLease();
       return response;
     } catch (error) {
       release();
+      releaseIdentityLease();
       throw error;
     }
   }
