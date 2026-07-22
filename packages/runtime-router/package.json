@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@clap/worker-protocol": "workspace:*",
     "@clap/runtime-llama": "workspace:*",
     "@clap/runtime-mlx": "workspace:*"
   }

@@ -81,6 +81,7 @@
       "dependencies": {
         "@clap/runtime-llama": "workspace:*",
         "@clap/runtime-mlx": "workspace:*",
+        "@clap/worker-protocol": "workspace:*",
       },
     },
     "packages/server": {
