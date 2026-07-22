@@ -220,6 +220,19 @@ if(BUILD_TESTING)
   target_link_libraries(clap-llama-cache-executor PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-executor COMMAND clap-llama-cache-executor)
 
+  add_executable(clap-llama-cache-checkpoint
+    tests/cache-checkpoint.test.cpp
+    src/cache-executor.cpp
+  )
+  add_dependencies(clap-llama-cache-checkpoint clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-checkpoint PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-checkpoint PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-checkpoint COMMAND clap-llama-cache-checkpoint)
+
   add_executable(clap-llama-cache-transaction
     tests/cache-transaction.test.cpp
     src/cache-executor.cpp
@@ -371,6 +384,7 @@ if(BUILD_TESTING)
 
   add_custom_target(clap-llama-tests DEPENDS
     clap-llama-cache-adapter
+    clap-llama-cache-checkpoint
     clap-llama-cache-identity
     clap-llama-cache-executor
     clap-llama-cache-request-lifecycle
