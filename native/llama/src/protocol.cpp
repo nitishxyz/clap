@@ -67,34 +67,8 @@ void emit(const std::string& id, nlohmann::json fields, std::ostream& output) {
   output.flush();
 }
 
-void emit_error(const std::string& id, const std::string& message) {
-  emit_error(id, message, std::cout);
-}
-
-void emit_error(const std::string& id, const std::string& message, std::ostream& output) {
-  emit(id, nlohmann::json{{"error", message}}, output);
-}
-
-void emit_error(const std::string& id, const std::string& message, const std::string& code) {
-  emit_error(id, message, code, std::cout);
-}
-
-void emit_error(const std::string& id, const std::string& message, const std::string& code,
-                std::ostream& output) {
-  if (code.empty()) {
-    emit_error(id, message, output);
-  } else {
-    emit(id, nlohmann::json{{"error", message}, {"code", code}}, output);
-  }
-}
-
 RequestError::RequestError(std::string error_code, const std::string& message)
     : std::runtime_error(message), code(std::move(error_code)) {}
-
-ProtocolMode protocol_mode_from_environment() {
-  const char* value = std::getenv("CLAP_WORKER_PROTOCOL");
-  return value && std::string(value) == "legacy" ? ProtocolMode::Legacy : ProtocolMode::V1;
-}
 
 V1DecodeError::V1DecodeError(std::string error_code, std::string recoverable_request_id,
                              const std::string& message)

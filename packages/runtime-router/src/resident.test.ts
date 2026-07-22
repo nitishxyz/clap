@@ -133,7 +133,7 @@ describe("resident worker registry", () => {
     try {
       process.env.CLAP_LLAMA_WORKER = await fakeResidentWorker(dir);
       process.env.CLAP_HOME = join(dir, "fresh-home");
-      const registry = new ResidentWorkerRegistry();
+      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
       const worker = registry.getOrCreate("key", "llama", join(dir, "model.gguf"));
       await writeFile(join(dir, "model.gguf"), "gguf");
 
@@ -211,7 +211,7 @@ describe("resident worker registry", () => {
     try {
       const { command, log } = await fakeRebalanceWorker(dir);
       process.env.CLAP_LLAMA_WORKER = command;
-      const registry = new ResidentWorkerRegistry();
+      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
       registry.memorySnapshot = async (pids) => ({
         physicalMemoryBytes: 32 * 1024 ** 3,
         availableMemoryBytes: 12 * 1024 ** 3,
@@ -253,7 +253,7 @@ describe("resident worker registry", () => {
     const dir = await mkdtemp(join(tmpdir(), "clap-resident-cancel-test-"));
     try {
       process.env.CLAP_LLAMA_WORKER = await fakeCancellableWorker(dir);
-      const registry = new ResidentWorkerRegistry();
+      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
       const worker = registry.getOrCreate("key", "llama", join(dir, "model.gguf"));
       await writeFile(join(dir, "model.gguf"), "gguf");
 
@@ -277,13 +277,13 @@ describe("resident worker registry", () => {
     }
   });
 
-  test("characterizes legacy event correlation and first-pending fallback", async () => {
+  test("keeps configured legacy correlation strictly request-ID scoped", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const dir = await mkdtemp(join(tmpdir(), "clap-resident-protocol-test-"));
     try {
       const { command, log } = await fakeProtocolWorker(dir);
       process.env.CLAP_LLAMA_WORKER = command;
-      const registry = new ResidentWorkerRegistry();
+      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
       const worker = registry.getOrCreate("key", "llama", join(dir, "model.gguf"));
       await writeFile(join(dir, "model.gguf"), "gguf");
       await worker.load();
@@ -308,12 +308,12 @@ describe("resident worker registry", () => {
 
       await expect(third).rejects.toMatchObject({ code: "characterized_failure" });
       await expect(first).resolves.toMatchObject({
-        content: "first-known|numeric-fallback|text-fallback|",
+        content: "first-known|",
         finishReason: "stop",
         usage: { promptTokens: 5, completionTokens: 3 },
       });
       await expect(second).resolves.toMatchObject({ content: "second-known|", finishReason: "cancel" });
-      expect(firstTokens).toEqual(["first-known|", "numeric-fallback|", "text-fallback|"]);
+      expect(firstTokens).toEqual(["first-known|"]);
       expect(secondTokens).toEqual(["second-known|"]);
       expect(thirdTokens).toEqual(["third-known|"]);
       expect(progress).toEqual([[4, 5]]);
@@ -344,6 +344,7 @@ describe("resident worker registry", () => {
       await writeFile(join(dir, "model.gguf"), "gguf");
 
       const firstRegistry = new ResidentWorkerRegistry();
+      firstRegistry.workerProtocolMode = "legacy";
       const first = firstRegistry.getOrCreate("first-key", "llama", join(dir, "model.gguf"));
       await first.load();
       await Bun.sleep(20);
@@ -351,6 +352,7 @@ describe("resident worker registry", () => {
       await Bun.sleep(20);
 
       const secondRegistry = new ResidentWorkerRegistry();
+      secondRegistry.workerProtocolMode = "legacy";
       const second = secondRegistry.getOrCreate("second-key", "llama", join(dir, "model.gguf"));
       await second.load();
       await Bun.sleep(20);
@@ -557,8 +559,6 @@ for await (const chunk of Bun.stdin.stream()) {
     console.log(JSON.stringify({ id: second.id, token: "second-known|" }));
     console.log(JSON.stringify({ id: third.id, content: "third-known|" }));
     console.log(JSON.stringify({ id: "unknown-request", token: "ignored|" }));
-    console.log(JSON.stringify({ id: 17, token: "numeric-fallback|" }));
-    console.log("text-fallback|");
     console.log(JSON.stringify({ id: first.id, prefill: { done: 4, total: 5 } }));
     console.log(JSON.stringify({ id: first.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 5, completion_tokens: 3 } }));
     console.log(JSON.stringify({ id: third.id, error: "characterized rejection", code: "characterized_failure" }));

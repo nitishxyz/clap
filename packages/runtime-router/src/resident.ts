@@ -6,7 +6,7 @@ import { freemem, totalmem } from "node:os";
 import { dirname } from "node:path";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
-import { LegacyWorkerProtocol, allowsLegacyStartupFallback } from "./protocol/legacy-worker-protocol";
+import { LegacyWorkerProtocol } from "./protocol/legacy-worker-protocol";
 import { V1RequestTracker, type ResidentProtocolFact } from "./protocol/request-tracker";
 import { WorkerProtocolFault } from "./protocol/errors";
 
@@ -231,7 +231,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private resolveHandshake?: () => void;
   private rejectHandshake?: (error: Error) => void;
   private handshakeTimer?: ReturnType<typeof setTimeout>;
-  private startupBytes = false;
   private lastDiagnostic?: string;
 
   constructor(
@@ -381,7 +380,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private startProtocol(source: "configured" | "bundled" | "missing"): void {
     this.clearHandshake();
-    this.startupBytes = false;
     if (this.protocolMode === "legacy" && source === "configured") {
       this.activeProtocol = "legacy";
       this.handshake = Promise.resolve();
@@ -393,18 +391,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.resolveHandshake = resolve;
       this.rejectHandshake = reject;
     });
-    // During migration, only explicitly configured workers may fall back, and
-    // only when they emit no startup bytes. Bundled workers never downgrade.
     this.handshakeTimer = setTimeout(() => {
       if (this.activeProtocol !== "v1" || !this.resolveHandshake) return;
-      if (allowsLegacyStartupFallback(this.protocolMode, source) && !this.startupBytes) {
-        this.activeProtocol = "legacy";
-        this.v1Tracker = undefined;
-        this.resolveHandshake?.();
-        this.resolveHandshake = undefined;
-        this.rejectHandshake = undefined;
-        return;
-      }
       this.protocolUnhealthy(new WorkerProtocolFault("handshake_timeout",
         "Worker did not send ready within 1000ms", "worker"));
     }, 1_000);
@@ -424,7 +412,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     let buffer = "";
     try {
       for await (const chunk of proc.stdout) {
-        this.startupBytes = true;
         buffer += decoder.decode(chunk, { stream: true });
         let newlineIndex: number;
         while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
@@ -495,12 +482,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       return;
     }
     const decoded = this.legacyProtocol.decode(line);
-    if (decoded.kind === "text") {
-      const pending = this.firstPending();
-      if (pending) {
-        pending.content.push(line);
-        pending.onToken?.(line);
-      }
+    if (decoded.kind === "malformed") {
+      this.protocolUnhealthy(new WorkerProtocolFault("malformed_stdout",
+        "Legacy worker stdout line is not valid JSON", "worker"));
       return;
     }
     this.handleLegacyMessage(decoded.message);
@@ -526,7 +510,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     const parsedCapabilities = parseWorkerTokenCapabilities(message.token_capabilities);
     if (parsedCapabilities) this.tokenCapabilities = parsedCapabilities;
-    const pending = id ? this.pending.get(id) : this.firstPending();
+    const pending = id ? this.pending.get(id) : undefined;
     if (!pending) return;
     if (message.started === true) {
       const onDispatch = pending.onDispatch;
@@ -680,7 +664,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     if (parsedCapabilities) pending.tokenCapabilities = parsedCapabilities;
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) this.pending.delete(id);
-      else this.deleteFirstPending();
       if (pending.cache && !pending.cache.workerLaunchId) pending.cache.workerLaunchId = this.workerLaunchId;
       pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities });
     }
@@ -774,15 +757,6 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private write(message: Record<string, unknown>): void {
     if (!this.proc) throw new Error("resident worker is not started");
     this.proc.stdin.write(`${JSON.stringify(message)}\n`);
-  }
-
-  private firstPending(): Pending | undefined {
-    return this.pending.values().next().value;
-  }
-
-  private deleteFirstPending(): void {
-    const key = this.pending.keys().next().value;
-    if (key) this.pending.delete(key);
   }
 
   private rejectAll(error: Error): void {

@@ -3,7 +3,6 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerRegistry } from "./resident";
-import { allowsLegacyStartupFallback } from "./protocol/legacy-worker-protocol";
 
 function restore(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
@@ -64,18 +63,12 @@ for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, 
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue;
 const command = JSON.parse(raw); appendFileSync(log, raw + "\\n"); if (command.type === "shutdown") process.exit(0);
 if (command.type === "load") console.log(JSON.stringify({ id: command.id, loaded: true, done: true }));
-if (command.type === "chat") console.log(JSON.stringify({ id: command.id, content: "legacy", done: true }));
+if (command.type === "chat") console.log(command.messages[0].content === "malformed" ? "poison" : JSON.stringify({ id: command.id, content: "legacy", done: true }));
 }}`);
   return { path, log };
 }
 
 describe("resident worker v1 migration", () => {
-  test("never downgrades bundled workers", () => {
-    expect(allowsLegacyStartupFallback("auto", "bundled")).toBe(false);
-    expect(allowsLegacyStartupFallback("v1", "configured")).toBe(false);
-    expect(allowsLegacyStartupFallback("auto", "configured")).toBe(true);
-  });
-
   test("terminates a worker that violates the v1 handshake", async () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-v1-bad-"));
     try {
@@ -143,15 +136,29 @@ describe("resident worker v1 migration", () => {
     } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
   });
 
-  test("temporarily falls back only for configured auto workers with no startup bytes", async () => {
+  test("explicit legacy mode rejects malformed stdout instead of exposing content", async () => {
+    const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-legacy-malformed-"));
+    try {
+      const fake = await legacyWorker(dir); process.env.CLAP_LLAMA_WORKER = fake.path;
+      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "legacy";
+      const worker = registry.getOrCreate("legacy-malformed", "llama", join(dir, "model.gguf"));
+      const tokens: string[] = [];
+      await expect(worker.chat({ model: "model", messages: [{ role: "user", content: "malformed" }], stream: true },
+        (token) => tokens.push(token))).rejects.toMatchObject({ code: "worker_protocol_error" });
+      expect(tokens).toEqual([]);
+      expect(worker.info().state).toBe("not_started");
+      registry.shutdownAll();
+    } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("does not infer legacy from configured workers with no startup bytes", async () => {
     const previous = process.env.CLAP_LLAMA_WORKER; const dir = await mkdtemp(join(tmpdir(), "clap-resident-auto-"));
     try {
       const fake = await legacyWorker(dir); process.env.CLAP_LLAMA_WORKER = fake.path; await writeFile(join(dir, "model.gguf"), "gguf");
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "auto";
+      const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("legacy", "llama", join(dir, "model.gguf"));
-      await expect(worker.chat({ model: "model", messages: [{ role: "user", content: "hello" }], stream: false })).resolves.toMatchObject({ content: "legacy" });
-      const commands = (await readFile(fake.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-      expect(commands[0]).toMatchObject({ type: "load" }); expect(commands[0].protocol).toBeUndefined();
+      await expect(worker.load()).rejects.toMatchObject({ code: "worker_protocol_error" });
+      await expect(Bun.file(fake.log).exists()).resolves.toBe(false);
       registry.shutdownAll();
     } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
   });

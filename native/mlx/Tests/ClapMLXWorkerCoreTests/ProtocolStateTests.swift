@@ -4,13 +4,6 @@ import Testing
 
 @Suite("Worker protocol sequence and terminal state")
 struct ProtocolStateTests {
-  @Test("v1 is the default and legacy requires explicit configuration")
-  func protocolModeDefault() {
-    #expect(WorkerProtocolMode.fromEnvironment([:]) == .v1)
-    #expect(WorkerProtocolMode.fromEnvironment(["CLAP_WORKER_PROTOCOL": "v1"]) == .v1)
-    #expect(WorkerProtocolMode.fromEnvironment(["CLAP_WORKER_PROTOCOL": "legacy"]) == .legacy)
-  }
-
   @Test("shared v1 request fixtures decode into strict envelopes")
   func sharedRequestFixtures() throws {
     let testFile = URL(fileURLWithPath: #filePath)

@@ -26,78 +26,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    assert(!worker.dispatch(R"({"type":"shutdown","id":"bye"})"));
-    const auto events = lines(output.str());
-    assert(events.size() == 1);
-    assert(events[0] == nlohmann::json({{"done", true}, {"id", "bye"}}));
-  }
-
-  {
-    std::istringstream input;
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    assert(worker.dispatch("{"));
-    const auto events = lines(output.str());
-    assert(events.size() == 1);
-    assert(events[0]["error"].is_string());
-    assert(!events[0].contains("id"));
-  }
-
-  {
-    std::istringstream input;
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    worker.dispatch(R"({"type":"load","id":"load"})");
-    worker.dispatch(R"({"type":"unload","id":"unload"})");
-    const auto events = lines(output.str());
-    assert(events[0] == nlohmann::json({{"error", "load.model is required"}, {"id", "load"}}));
-    assert(events[1] == nlohmann::json({{"done", true}, {"unloaded", true}, {"id", "unload"}}));
-  }
-
-  {
-    std::istringstream input;
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    worker.dispatch(R"({"type":"set_max_active","id":"limit","max_active":0})");
-    const auto events = lines(output.str());
-    assert(events.size() == 1);
-    assert(events[0] == nlohmann::json({
-        {"error", "set_max_active.max_active must be positive"}, {"id", "limit"}}));
-  }
-
-  {
-    std::istringstream input;
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    worker.dispatch(R"({"id":"queued","model":"missing.gguf"})");
-    worker.dispatch(R"({"type":"cancel","id":"queued"})");
-    const auto events = lines(output.str());
-    assert(events.size() == 2);
-    assert(events[0].contains("retention"));
-    assert(!events[0].contains("id"));
-    assert(events[1] == nlohmann::json({
-        {"done", true}, {"finish_reason", "cancel"},
-        {"cancelled", true}, {"id", "queued"}}));
-  }
-
-  {
-    std::istringstream input(
-        R"({"type":"unload","id":"u"})" "\n"
-        R"({"type":"shutdown","id":"s"})" "\n");
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
-    assert(worker.run() == 0);
-    const auto events = lines(output.str());
-    assert(events.size() == 2);
-    assert(events[0]["unloaded"] == true);
-    assert(events[1] == nlohmann::json({{"done", true}, {"id", "s"}}));
-  }
-
-  {
-    std::istringstream input;
-    std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::V1);
+    clap::llama::Worker worker(input, output);
     assert(!worker.dispatch(
         R"({"protocol":1,"type":"shutdown","request_id":"req_shutdown"})"));
     const auto events = lines(output.str());
@@ -114,7 +43,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::V1);
+    clap::llama::Worker worker(input, output);
     worker.dispatch(R"({"protocol":2,"type":"load","request_id":"bad","model":"m"})");
     const auto events = lines(output.str());
     assert(events.size() == 3);
@@ -128,7 +57,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::V1);
+    clap::llama::Worker worker(input, output);
     worker.dispatch(
         R"({"protocol":1,"type":"generate","request_id":"target","prompt":"Hello","model":"missing.gguf"})");
     worker.dispatch(
@@ -152,7 +81,7 @@ int main() {
         R"({"protocol":1,"type":"generate","request_id":"waiting","prompt":"x","model":"missing.gguf"})" "\n"
         R"({"protocol":1,"type":"shutdown","request_id":"shutdown"})" "\n");
     std::ostringstream output;
-    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::V1);
+    clap::llama::Worker worker(input, output);
     assert(worker.run() == 0);
     const auto events = lines(output.str());
     assert(events.size() == 6);

@@ -1,8 +1,8 @@
 export type LegacyWorkerLine =
   | { kind: "message"; message: Record<string, unknown> }
-  | { kind: "text"; text: string };
+  | { kind: "malformed" };
 
-/** Temporary decoder for pre-v1 workers. It intentionally preserves raw-text fallback. */
+/** Temporary, explicitly configured adapter for structured pre-v1 workers. */
 export class LegacyWorkerProtocol {
   decode(line: string): LegacyWorkerLine {
     try {
@@ -10,13 +10,7 @@ export class LegacyWorkerProtocol {
       if (value && typeof value === "object" && !Array.isArray(value)) {
         return { kind: "message", message: value as Record<string, unknown> };
       }
-    } catch {
-      // Legacy stdout historically treated non-JSON as generated text.
-    }
-    return { kind: "text", text: line };
+    } catch {}
+    return { kind: "malformed" };
   }
-}
-
-export function allowsLegacyStartupFallback(mode: "legacy" | "v1" | "auto", source: "configured" | "bundled" | "missing"): boolean {
-  return mode === "auto" && source === "configured";
 }

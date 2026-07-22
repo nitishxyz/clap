@@ -191,24 +191,3 @@ struct WorkerTokenCapabilities: Encodable {
     try container.encode(user_configured_override, forKey: .user_configured_override)
   }
 }
-
-struct WorkerMessage: Encodable {
-  let id: String?
-  let started: Bool?
-  let token: String?
-  let content: String?
-  let loaded: Bool?
-  let unloaded: Bool?
-  let done: Bool?
-  let error: String?
-  let code: String?
-  let cancelled: Bool?
-  let finish_reason: String?
-  let usage: WorkerUsage?
-  let cache: WorkerCache?
-  let timing: WorkerTiming?
-  let prefill: WorkerPrefill?
-  let memory: WorkerMemory?
-  let retention: WorkerRetention?
-  let token_capabilities: WorkerTokenCapabilities?
-}

@@ -1,21 +1,18 @@
 import Foundation
 import ClapMLXWorkerCore
 
-let workerProtocolMode = WorkerProtocolMode.fromEnvironment()
 nonisolated(unsafe) private let v1ProtocolWriter = V1ProtocolWriter()
 
 func emitV1Ready() {
-  guard workerProtocolMode == .v1 else { return }
   v1ProtocolWriter.ready()
 }
 
 @discardableResult
 func acceptV1(_ requestID: String) -> Bool {
-  workerProtocolMode != .v1 || v1ProtocolWriter.accepted(requestID)
+  v1ProtocolWriter.accepted(requestID)
 }
 
 func failV1Decode(_ error: V1DecodeError) {
-  guard workerProtocolMode == .v1 else { return }
   if let id = error.requestID {
     _ = v1ProtocolWriter.accepted(id)
     v1ProtocolWriter.failed(id, code: error.code, message: error.description)
@@ -25,7 +22,6 @@ func failV1Decode(_ error: V1DecodeError) {
 }
 
 func failV1Command(_ requestID: String, code: String = "worker_error", message: String) {
-  guard workerProtocolMode == .v1 else { return }
   v1ProtocolWriter.failed(requestID, code: code, message: message)
 }
 
@@ -35,23 +31,15 @@ func v1JSONObject<T: Encodable>(_ value: T) -> Any {
 }
 
 func completeV1Command(_ requestID: String, result: [String: Any]) {
-  guard workerProtocolMode == .v1 else { return }
   v1ProtocolWriter.completed(requestID, result: result)
 }
 
 func emit(id: String? = nil, started: Bool? = nil, token: String? = nil, content: String? = nil, loaded: Bool? = nil, unloaded: Bool? = nil, done: Bool? = nil, error: String? = nil, code: String? = nil, cancelled: Bool? = nil, finishReason: String? = nil, usage: WorkerUsage? = nil, cache: WorkerCache? = nil, timing: WorkerTiming? = nil, prefill: WorkerPrefill? = nil, memory: WorkerMemory? = nil, retention: WorkerRetention? = nil, tokenCapabilities: WorkerTokenCapabilities? = nil) {
-  if workerProtocolMode == .v1 {
-    v1ProtocolWriter.map(id: id, started: started, token: token, content: content,
-      loaded: loaded, unloaded: unloaded, done: done, error: error, code: code,
-      cancelled: cancelled, finishReason: finishReason, usage: usage, cache: cache,
-      timing: timing, prefill: prefill, memory: memory, retention: retention,
-      tokenCapabilities: tokenCapabilities)
-    return
-  }
-  let message = WorkerMessage(id: id, started: started, token: token, content: content, loaded: loaded, unloaded: unloaded, done: done, error: error, code: code, cancelled: cancelled, finish_reason: finishReason, usage: usage, cache: cache, timing: timing, prefill: prefill, memory: memory, retention: retention, token_capabilities: tokenCapabilities)
-  let data = try! JSONEncoder().encode(message)
-  FileHandle.standardOutput.write(data)
-  FileHandle.standardOutput.write(Data([0x0a]))
+  v1ProtocolWriter.map(id: id, started: started, token: token, content: content,
+    loaded: loaded, unloaded: unloaded, done: done, error: error, code: code,
+    cancelled: cancelled, finishReason: finishReason, usage: usage, cache: cache,
+    timing: timing, prefill: prefill, memory: memory, retention: retention,
+    tokenCapabilities: tokenCapabilities)
 }
 
 private final class V1ProtocolWriter {

@@ -54,10 +54,6 @@ struct RequestError : std::runtime_error {
   RequestError(std::string error_code, const std::string& message);
 };
 
-enum class ProtocolMode { Legacy, V1 };
-
-ProtocolMode protocol_mode_from_environment();
-
 struct V1Request {
   std::string type;
   std::string request_id;
