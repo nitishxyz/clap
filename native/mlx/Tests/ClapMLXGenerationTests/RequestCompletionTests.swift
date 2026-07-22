@@ -111,9 +111,7 @@ private final class Fixture {
   var snapshotPromptCounts: [Int] = []
 
   init(streaming: Bool) {
-    let identity = CacheIdentity(domain: "model", input: CacheIdentityInput(
-      namespace: "tenant", tenant: nil, project: nil, harness: nil, agent: nil,
-      session: "session", priority: nil, sideRequest: false), telemetryKey: "test")
+    let identity = testCacheIdentity()
     let boundary = BoundaryInfo(tokenCount: 2, kind: "automatic_token", label: nil,
       requested: false, status: "authorized", skipReason: nil)
     let prepared = PreparedRequest(id: "id", admissionOrder: 1, admittedNs: 10,

@@ -79,10 +79,21 @@ extension WorkerState {
         repetitionPenalty: control.repetition_penalty.map(Float.init),
         presencePenalty: control.presence_penalty.map(Float.init),
         frequencyPenalty: control.frequency_penalty.map(Float.init), seed: control.seed)
-      let identity = CacheIdentity(domain: cacheDomain,
-        input: control.cache?.identityInput ?? CacheIdentityInput(namespace: nil,
-          tenant: nil, project: nil, harness: nil, agent: nil, session: nil,
-          priority: nil, sideRequest: false))
+      guard let opaqueIdentity = control.cache_identity else {
+        emit(id: id, error: "cache_identity is required", code: "cache_identity_required")
+        return .rejected
+      }
+      let identity: CacheIdentity
+      do {
+        identity = try CacheIdentity(input: opaqueIdentity,
+          expected: PhysicalCacheDescriptor(backend: "mlx",
+            contextAllocation: contextOverride,
+            kvFormat: kvBits == 8 ? "q8_0" : (kvBits == 4 ? "q4_0" : "f16"),
+            unifiedKV: false, layoutVersion: 1))
+      } catch {
+        emit(id: id, error: String(describing: error), code: "invalid_cache_identity")
+        return .rejected
+      }
       let physicalIdentity = PhysicalCacheIdentity(fingerprint: identity.fingerprint)
       let proposals = configuration.checkpoints.offsets(promptTokens: promptTokens.count)
       let deduped = proposals.filter { checkpoint in

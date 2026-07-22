@@ -2,9 +2,9 @@ import ClapCacheBridge
 import ClapMLXCache
 import Foundation
 
-func tokenFingerprint(_ tokens: [Int], count: Int) -> String {
+func tokenFingerprint(_ tokens: [Int], count: Int, namespace: [UInt8]) -> String {
   let limit = min(max(count, 0), tokens.count)
-  var bytes = Array((cacheTelemetryKey + "|tokens-v1|\(limit)|").utf8)
+  var bytes = namespace + Array("|tokens-v1|\(limit)|".utf8)
   for token in tokens.prefix(limit) {
     var value = UInt32(truncatingIfNeeded: token).littleEndian
     withUnsafeBytes(of: &value) { bytes.append(contentsOf: $0) }

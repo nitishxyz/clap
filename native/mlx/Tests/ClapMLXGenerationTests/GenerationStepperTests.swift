@@ -110,9 +110,7 @@ private final class Fixture {
   init(tokens: [Int], prompt: [Int], reused: Int = 0, anchors: [Int] = [],
        maxTokens: Int = 100, stops: [String] = [], eos: Set<Int> = []) {
     self.eos = eos
-    let identity = CacheIdentity(domain: "model", input: CacheIdentityInput(
-      namespace: "tenant", tenant: nil, project: nil, harness: nil, agent: nil,
-      session: "session", priority: nil, sideRequest: false), telemetryKey: "test")
+    let identity = testCacheIdentity()
     let parameters = TestParameters(tokens: tokens)
     let prepared = PreparedRequest(id: "id", admissionOrder: 1, admittedNs: 0,
       receivedToAdmittedMs: 0, templateTokenizeMs: 0, coordinatorPlanMs: 0,

@@ -55,4 +55,10 @@ if (versionFailure?.type !== "failed" ||
     versionFailure.error.code !== "unsupported_protocol_version") {
   throw new Error("unsupported versions must produce a structured failure");
 }
+const identityFailure = scoped.find((event) =>
+  event.request_id === "target" && event.type === "failed");
+if (identityFailure?.type !== "failed" ||
+    identityFailure.error.code !== "cache_identity_required") {
+  throw new Error("generate without opaque cache identity must fail closed");
+}
 console.log(`ok: clap-mlx v1 conformance (${events.length} events)`);

@@ -4,23 +4,6 @@ import Testing
 
 @Suite("MLX cache transaction seams")
 struct CacheTransactionTests {
-  @Test("identity preserves namespace, scope, priority, and keyed hashing")
-  func identity() {
-    let input = CacheIdentityInput(namespace: "exported", tenant: "tenant",
-      project: "project", harness: "harness", agent: "agent", session: "session",
-      priority: "background", sideRequest: true)
-    let first = CacheIdentity(domain: "model|mlx", input: input, telemetryKey: "key")
-    let second = CacheIdentity(domain: "model|mlx", input: input, telemetryKey: "key")
-    #expect(first.fingerprint == second.fingerprint)
-    #expect(first.tenant == second.tenant)
-    #expect(first.scope == UInt32(CC_SCOPE_SESSION))
-    #expect(first.priority == UInt32(CC_PRIORITY_BACKGROUND))
-    #expect(first.sideRequest)
-    #expect(first.exportedNamespace == "exported")
-    #expect(first.fingerprint != CacheIdentity(domain: "other", input: input,
-      telemetryKey: "key").fingerprint)
-  }
-
   @Test("transaction installs, confirms, and releases busy state")
   func commits() throws {
     let coordinator = FakeCoordinator()

@@ -58,10 +58,11 @@ extension WorkerState {
           selected: candidate.selected,
           rejection: cacheCandidateRejection(candidate.rejection))
       },
-      prompt_token_hash: tokenFingerprint(cache.promptTokens, count: cache.promptTokens.count),
+      prompt_token_hash: tokenFingerprint(cache.promptTokens, count: cache.promptTokens.count,
+        namespace: cache.identity.fingerprint),
       prompt_token_count: cache.promptTokens.count,
       stable_boundary_token_hash: cache.materializedAnchors.max().map {
-        tokenFingerprint(cache.promptTokens, count: $0)
+        tokenFingerprint(cache.promptTokens, count: $0, namespace: cache.identity.fingerprint)
       },
       stable_boundary_token_count: cache.materializedAnchors.max() ?? 0,
       stable_boundary_kind: cache.materializedAnchors.isEmpty ? nil : "prompt",
@@ -80,7 +81,8 @@ extension WorkerState {
       stable_boundaries: cache.boundaryTelemetry.map { boundary in
         WorkerCacheBoundary(
           token_hash: boundary.tokenCount.map {
-            tokenFingerprint(cache.promptTokens, count: $0)
+            tokenFingerprint(cache.promptTokens, count: $0,
+              namespace: cache.identity.fingerprint)
           }, token_count: boundary.tokenCount, kind: boundary.kind, label: boundary.label,
           requested: boundary.requested, status: boundary.status,
           skip_reason: boundary.skipReason,

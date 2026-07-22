@@ -49,6 +49,10 @@ public func decodeV1Envelope(_ line: String) throws -> V1RequestEnvelope {
     guard object["prompt"] is String else {
       throw invalid(id, "prompt must be a string")
     }
+    guard object["cache_identity"] is [String: Any] else {
+      throw V1EnvelopeDecodeError(code: "cache_identity_required", requestID: id,
+        description: "cache_identity is required for generate requests")
+    }
   case "cancel": target = try requiredString(object, "target_request_id", id)
   case "set_max_active":
     guard let value = object["max_active"] as? NSNumber,

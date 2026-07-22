@@ -185,9 +185,7 @@ struct CacheExecutorTests {
       slotIndex: first.slotIndex, slot: first.slot, caches: &firstCaches,
       snapshots: CacheSnapshots(), promptTokens: [1, 2], fedTokens: firstFed,
       sampledTokens: [], generatedCount: 0, failed: false, operations: operations())
-    let secondIdentity = CacheIdentity(domain: "model", input: CacheIdentityInput(
-      namespace: "other", tenant: nil, project: nil, harness: nil, agent: nil,
-      session: "second", priority: nil, sideRequest: false), telemetryKey: "test")
+    let secondIdentity = testCacheIdentity(namespaceByte: "41")
     let second = try CacheExecutor.admit(coordinator: coordinator, registry: &registry,
       hardCeiling: 2, promptTokens: [9, 10], identity: secondIdentity,
       physicalIdentity: PhysicalCacheIdentity(fingerprint: secondIdentity.fingerprint),
@@ -218,9 +216,7 @@ struct CacheExecutorTests {
   }
 
   private func makeIdentity(session: String) -> CacheIdentity {
-    CacheIdentity(domain: "model", input: CacheIdentityInput(namespace: "tenant",
-      tenant: nil, project: nil, harness: nil, agent: nil, session: session,
-      priority: nil, sideRequest: false), telemetryKey: "test")
+    testCacheIdentity(sessionByte: session == "branch" ? "f3" : "f2")
   }
 
   private func seedResident(coordinator: CacheCoordinator,

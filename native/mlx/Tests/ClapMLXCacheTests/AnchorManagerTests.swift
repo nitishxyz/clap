@@ -138,9 +138,7 @@ struct AnchorManagerTests {
   }
 
   private func makeIdentity() -> CacheIdentity {
-    CacheIdentity(domain: "model", input: CacheIdentityInput(namespace: "tenant",
-      tenant: nil, project: "project", harness: nil, agent: nil, session: "session",
-      priority: nil, sideRequest: false), telemetryKey: "test")
+    testCacheIdentity()
   }
 
   private func makeOperations(

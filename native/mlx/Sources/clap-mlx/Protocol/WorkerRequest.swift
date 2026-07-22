@@ -1,4 +1,5 @@
 import ClapMLXWorkerCore
+import ClapMLXCache
 import Foundation
 
 struct V1Request {
@@ -17,7 +18,16 @@ func decodeV1Request(_ line: String) throws -> V1Request {
   do {
     control = try JSONDecoder().decode(ControlRequest.self, from: envelope.legacyPayload)
   } catch {
-    throw V1DecodeError(code: "invalid_request", requestID: envelope.requestID,
+    let path: [any CodingKey] = switch error {
+    case DecodingError.typeMismatch(_, let context): context.codingPath
+    case DecodingError.valueNotFound(_, let context): context.codingPath
+    case DecodingError.keyNotFound(_, let context): context.codingPath
+    case DecodingError.dataCorrupted(let context): context.codingPath
+    default: []
+    }
+    let identityError = path.contains { $0.stringValue == "cache_identity" }
+    throw V1DecodeError(code: identityError ? "invalid_cache_identity" : "invalid_request",
+      requestID: envelope.requestID,
       description: "Invalid \(envelope.type) request payload: \(error)")
   }
   return V1Request(type: envelope.type, requestID: envelope.requestID,
@@ -46,14 +56,6 @@ struct CacheBoundaryDescriptor: Decodable {
 }
 
 struct CacheIntent: Decodable {
-  let namespace: String?
-  let tenant: String?
-  let project: String?
-  let harness: String?
-  let agent: String?
-  let session: String?
-  let priority: String?
-  let side_request: Bool?
   let boundaries: [CacheBoundaryDescriptor]?
 }
 
@@ -104,4 +106,5 @@ struct ControlRequest: Decodable {
   let presence_penalty: Double?
   let frequency_penalty: Double?
   let cache: CacheIntent?
+  let cache_identity: OpaqueCacheIdentityInput?
 }

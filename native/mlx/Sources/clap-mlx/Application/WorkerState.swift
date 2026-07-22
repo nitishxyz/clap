@@ -24,7 +24,6 @@ final class WorkerState {
   var retainedRegistry: RetainedRegistry<KVSlot>
   var kvUseCounter: UInt64 = 0
   var cacheCoordinator: CacheCoordinator?
-  var cacheDomain = ""
   var lastEvictionReason: String?
   var previousMaxActive: Int?
   var coordinatedLimitingReason: String?
@@ -97,7 +96,6 @@ final class WorkerState {
       contextOverride: contextOverride, sessionCap: sessionCap,
       outputOverride: configuration.outputOverride)
     let metadata = modelRuntime.metadata!
-    cacheDomain = "\(model)|mlx|ctx=\(modelRuntime.tokenCapabilities.effectiveContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
     Memory.clearCache()
     let memory = memorySnapshot()
     activePolicyModelBytes = memory.active_bytes > 0 ? UInt64(memory.active_bytes) : nil
