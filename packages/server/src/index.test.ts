@@ -1452,6 +1452,77 @@ describe("clap server", () => {
     }
   });
 
+  test("pulls GGUF model layers from the Ollama registry", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRegistry = process.env.CLAP_OLLAMA_REGISTRY;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-registry-test-"));
+    const requestPaths: string[] = [];
+    const registry = mockOllamaRegistry("registry-test", "q4", { requestPaths });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_OLLAMA_REGISTRY = `http://${registry.hostname}:${registry.port}`;
+
+      const resolved = await createServer().request("/clap/v1/models/resolve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "registry-test:q4" }),
+      });
+      expect(resolved.status).toBe(200);
+      expect((await resolved.json()).selected).toMatchObject({
+        backend: "gguf",
+        format: "gguf",
+        repo: "ollama://registry-test:q4",
+        quantization: "Q4_K_M",
+      });
+
+      const response = await createServer().request("/api/pull", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "registry-test:q4", stream: false }),
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).status).toBe("success");
+      const modelPath = join(dir, "models", "ollama", "registry-test%3Aq4", "model-Q4_K_M.gguf");
+      expect(existsSync(modelPath)).toBe(true);
+      expect(resolveModel("registry-test:q4")).toMatchObject({ status: "available", backend: "llama", modelPath });
+
+      const models = await createServer().request("/clap/v1/models");
+      const cached = (await models.json()).models.find((model: { id: string }) => model.id === "registry-test:q4");
+      expect(cached).toMatchObject({ source: { type: "ollama", repo: "registry-test:q4" }, format: "gguf" });
+      expect(requestPaths).toContain("/v2/library/registry-test/manifests/q4");
+
+      expect(await removeModel("registry-test:q4")).toEqual([modelPath]);
+      expect(existsSync(modelPath)).toBe(false);
+    } finally {
+      registry.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_OLLAMA_REGISTRY", previousRegistry);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects corrupt Ollama model layers", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRegistry = process.env.CLAP_OLLAMA_REGISTRY;
+    const dir = await mkdtemp(join(tmpdir(), "clap-ollama-checksum-test-"));
+    const registry = mockOllamaRegistry("registry-corrupt", "latest", { servedModelBytes: "GGUFcorrupt" });
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_OLLAMA_REGISTRY = `http://${registry.hostname}:${registry.port}`;
+      const target = join(dir, "models", "ollama", "registry-corrupt%3Alatest", "model-Q4_K_M.gguf");
+
+      expect(pullModel({ model: "registry-corrupt" })).rejects.toThrow(/checksum mismatch/);
+      await Bun.sleep(10);
+      expect(existsSync(target)).toBe(false);
+      expect(existsSync(`${target}.part`)).toBe(false);
+    } finally {
+      registry.stop(true);
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_OLLAMA_REGISTRY", previousRegistry);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("resumes interrupted downloads with HTTP Range and removes models", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousEndpoint = process.env.CLAP_HF_ENDPOINT;
@@ -2978,6 +3049,43 @@ function mockHuggingFaceServer(repos: Record<string, Record<string, string>>, op
         return new Response(content);
       }
 
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
+function mockOllamaRegistry(model: string, tag: string, options: { requestPaths?: string[]; servedModelBytes?: string } = {}) {
+  const modelBytes = "GGUFregistry model bytes";
+  const servedModelBytes = options.servedModelBytes ?? modelBytes;
+  const config = JSON.stringify({ model_format: "gguf", model_family: "test", file_type: "Q4_K_M" });
+  const configDigest = `sha256:${new Bun.CryptoHasher("sha256").update(config).digest("hex")}`;
+  const modelDigest = `sha256:${new Bun.CryptoHasher("sha256").update(modelBytes).digest("hex")}`;
+  return Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      options.requestPaths?.push(url.pathname);
+      if (url.pathname === `/v2/library/${model}/manifests/${tag}`) {
+        return Response.json({
+          schemaVersion: 2,
+          mediaType: "application/vnd.docker.distribution.manifest.v2+json",
+          config: { mediaType: "application/vnd.docker.container.image.v1+json", digest: configDigest, size: config.length },
+          layers: [{ mediaType: "application/vnd.ollama.image.model", digest: modelDigest, size: modelBytes.length }],
+        });
+      }
+      if (url.pathname === `/v2/library/${model}/blobs/${configDigest}`) return new Response(config);
+      if (url.pathname === `/v2/library/${model}/blobs/${modelDigest}`) {
+        const range = request.headers.get("range");
+        if (range) {
+          const offset = Number(range.match(/^bytes=(\d+)-$/)?.[1] ?? 0);
+          if (offset >= servedModelBytes.length) return new Response(null, { status: 416 });
+          return new Response(servedModelBytes.slice(offset), {
+            status: 206,
+            headers: { "content-range": `bytes ${offset}-${servedModelBytes.length - 1}/${servedModelBytes.length}` },
+          });
+        }
+        return new Response(servedModelBytes);
+      }
       return new Response("not found", { status: 404 });
     },
   });

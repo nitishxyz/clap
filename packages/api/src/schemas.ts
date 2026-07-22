@@ -70,7 +70,7 @@ export const ClapModelSchema = z.object({
   displayName: z.string(),
   provider: z.string(),
   source: z.object({
-    type: z.enum(["huggingface", "local", "alias"]),
+    type: z.enum(["huggingface", "ollama", "local", "alias"]),
     repo: z.string().optional(),
     baseRepo: z.string().optional(),
   }),

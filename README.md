@@ -147,13 +147,20 @@ console.log(response.output_text);
 
 ## Ollama Compatibility
 
-Clap exposes Ollama-compatible routes for common local clients: `GET /api/tags`, `POST /api/show`, `POST /api/pull`, `POST /api/chat`, and `POST /api/generate`. Model names are the same public Clap ids shown by `clap models`, including aliases such as `llama3.2:3b` and cached Hugging Face ids such as `mlx-community/gemma-4-e4b-it-4bit`. `/api/chat` maps tools through Clap's OpenAI tool-call compatibility layer. `/api/chat` and `/api/generate` stream incremental ndjson lines per token by default (reasoning text is exposed as `thinking`); pass `"stream": false` for a single JSON response. `/api/delete`, `/api/copy`, `/api/embeddings`, and `/api/embed` return honest `501` responses until implemented. Ollama image inputs are rejected with a text-runtime unsupported error unless a future served multimodal runtime path is active.
+Clap exposes Ollama-compatible routes for common local clients: `GET /api/tags`, `POST /api/show`, `POST /api/pull`, `POST /api/chat`, and `POST /api/generate`. Public Ollama Registry names such as `gemma4:31b` resolve through `registry.ollama.ai`; Clap downloads the manifest's GGUF model layer into `$CLAP_HOME/models/ollama`, verifies its declared size and SHA-256 digest, and serves it with llama.cpp. Model names are the same public Clap ids shown by `clap models`, including curated aliases and cached Hugging Face ids. `/api/chat` maps tools through Clap's OpenAI tool-call compatibility layer. `/api/chat` and `/api/generate` stream incremental ndjson lines per token by default (reasoning text is exposed as `thinking`); pass `"stream": false` for a single JSON response. `/api/delete`, `/api/copy`, `/api/embeddings`, and `/api/embed` return honest `501` responses until implemented. Ollama image inputs are rejected with a text-runtime unsupported error unless a future served multimodal runtime path is active.
 
 ```bash
+clap resolve gemma4:31b
+clap pull gemma4:31b --yes
+clap run gemma4:31b "hello"
+
+curl -s http://localhost:11435/api/pull -d '{"name":"gemma4:31b","stream":false}' | jq
 curl -s http://localhost:11435/api/tags | jq
-curl -s http://localhost:11435/api/show -d '{"model":"llama3.2:3b"}' | jq
-curl -s http://localhost:11435/api/chat -d '{"model":"llama3.2:3b","stream":false,"messages":[{"role":"user","content":"hello"}]}' | jq
+curl -s http://localhost:11435/api/show -d '{"model":"gemma4:31b"}' | jq
+curl -s http://localhost:11435/api/chat -d '{"model":"gemma4:31b","stream":false,"messages":[{"role":"user","content":"hello"}]}' | jq
 ```
+
+Bare names default to the `library` namespace and the `latest` tag. Use `owner/model:tag` for a namespaced model, or `ollama://owner/model:tag` to make the source explicit. Set `CLAP_OLLAMA_REGISTRY` to use a compatible registry endpoint. Registry imports currently support anonymous/public GGUF model layers; private-registry authentication, registry-host names in model references, Ollama MLX layers, and projector/image layers are not yet supported. Pass `--force` to refresh a mutable tag that is already cached.
 
 ## Hugging Face Cache
 

@@ -601,7 +601,7 @@ function createStdinLineReader(): { readLine(): Promise<string | null> } {
 async function resolveCommand(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const model = rest[0];
-  if (!model) throw new Error("usage: clap resolve <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]");
+  if (!model) throw new Error("usage: clap resolve <owner/model|ollama-model[:tag]|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]");
   await startBackgroundServer({ quiet: true });
   const response = await createClapClient().resolveModel({ model, file: flags.file, backend: parseBackend(flags.backend), force: false });
   console.log(formatResolveOptions(response));
@@ -611,7 +611,7 @@ async function pull(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const model = rest[0];
   if (!model) {
-    throw new Error("usage: clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes]");
+    throw new Error("usage: clap pull <owner/model|ollama-model[:tag]|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes]");
   }
 
   await startBackgroundServer({ quiet: true });
@@ -861,9 +861,9 @@ function help() {
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
   clap unload <model|alias|path> [--backend mlx|gguf]
-  clap resolve <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]
-  clap pull <owner/model|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes] [--force]
-  clap rm <owner/model|alias|owner/model:file.gguf>
+  clap resolve <owner/model|ollama-model[:tag]|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M]
+  clap pull <owner/model|ollama-model[:tag]|alias> [--backend mlx|gguf] [--file model.gguf] [--quant Q4_K_M] [--yes] [--force]
+  clap rm <owner/model|ollama-model[:tag]|alias|owner/model:file.gguf>
   clap chat --model <model|alias|path> [--backend mlx|gguf] [--no-stream] [prompt]
   clap run <model|alias> [--backend mlx|gguf] [--no-stream] [prompt]
 

@@ -89,6 +89,7 @@ export type PullModelOptions = {
 export type PullTarget = {
   model: string;
   repo: string;
+  source: "huggingface" | "ollama";
   file?: string;
   backend?: BackendOverride;
   alias?: ModelAlias;
@@ -107,6 +108,43 @@ type HfSibling = {
 
 type HfModelInfo = {
   siblings?: HfSibling[];
+};
+
+type OllamaDescriptor = {
+  mediaType?: string;
+  digest?: string;
+  size?: number;
+};
+
+type OllamaManifest = {
+  config?: OllamaDescriptor;
+  layers?: OllamaDescriptor[];
+};
+
+type OllamaModelConfig = {
+  model_format?: string;
+  model_family?: string;
+  file_type?: string;
+};
+
+type OllamaReference = {
+  id: string;
+  namespace: string;
+  name: string;
+  tag: string;
+  repo: string;
+};
+
+type ValidatedOllamaDescriptor = OllamaDescriptor & {
+  digest: string;
+  size: number;
+};
+
+type InspectedOllamaModel = {
+  reference: OllamaReference;
+  manifest: OllamaManifest;
+  config: OllamaModelConfig;
+  modelLayer: ValidatedOllamaDescriptor;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -171,8 +209,8 @@ function listModelsTtlMs(): number {
   return Number.isFinite(raw) ? raw : 2000;
 }
 
-function listModelsCacheKey(root: string): string {
-  return [root, process.env.CLAP_GGUF_MODEL_PATHS ?? "", process.env.CLAP_MLX_MODEL_PATHS ?? ""].join("\0");
+function listModelsCacheKey(): string {
+  return [hfCacheRoot(), ollamaCacheRoot(), process.env.CLAP_GGUF_MODEL_PATHS ?? "", process.env.CLAP_MLX_MODEL_PATHS ?? ""].join("\0");
 }
 
 export function invalidateModelListCache(): void {
@@ -183,23 +221,30 @@ export function invalidateModelListCache(): void {
 
 export async function listModelsAsync(): Promise<ClapModel[]> {
   const ttl = listModelsTtlMs();
-  const root = hfCacheRoot();
-  const key = listModelsCacheKey(root);
+  const key = listModelsCacheKey();
   if (listModelsMemo?.key === key && Date.now() - listModelsMemo.at < ttl) return listModelsMemo.value;
   if (listModelsRefresh?.key !== key) {
     const promise = (async () => {
-        const repoEntries = existsSync(root)
-          ? (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory())
+      const cached: ClapModel[] = [];
+      const roots = [
+        { path: hfCacheRoot(), source: "huggingface" as const },
+        { path: ollamaCacheRoot(), source: "ollama" as const },
+      ];
+      for (const root of roots) {
+        const repoEntries = existsSync(root.path)
+          ? (await readdir(root.path, { withFileTypes: true })).filter((entry) => entry.isDirectory())
           : [];
-        const cached: ClapModel[] = [];
         for (const entry of repoEntries) {
-          const repoPath = join(root, entry.name);
+          const repoPath = join(root.path, entry.name);
+          const repo = root.source === "ollama" ? ollamaRepoFromCacheDirName(entry.name) : repoFromCacheDirName(entry.name);
+          const id = root.source === "ollama" ? ollamaModelId(repo) : repo;
           const files = await readdir(repoPath, { withFileTypes: true });
-          cached.push(...cachedModelsForRepo(repoPath, repoFromCacheDirName(entry.name), files));
+          cached.push(...cachedModelsForRepo(repoPath, repo, files, { id, source: root.source }));
         }
-        const value = [...envConfiguredModels(), ...cached];
-        listModelsMemo = { key, at: Date.now(), value };
-        return value;
+      }
+      const value = [...envConfiguredModels(), ...cached];
+      listModelsMemo = { key, at: Date.now(), value };
+      return value;
     })();
     listModelsRefresh = { key, promise };
     void promise.then(
@@ -218,11 +263,23 @@ export function listAliases(): ClapModel[] {
 }
 
 export function listCachedModels(): ClapModel[] {
-  const root = hfCacheRoot();
-  if (!existsSync(root)) return [];
-  return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => cachedModelsForRepo(join(root, entry.name), repoFromCacheDirName(entry.name)));
+  const huggingFace = existsSync(hfCacheRoot())
+    ? readdirSync(hfCacheRoot(), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) => cachedModelsForRepo(join(hfCacheRoot(), entry.name), repoFromCacheDirName(entry.name)))
+    : [];
+  const ollama = existsSync(ollamaCacheRoot())
+    ? readdirSync(ollamaCacheRoot(), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) => {
+        const repo = ollamaRepoFromCacheDirName(entry.name);
+        return cachedModelsForRepo(join(ollamaCacheRoot(), entry.name), repo, undefined, {
+          id: ollamaModelId(repo),
+          source: "ollama",
+        });
+      })
+    : [];
+  return [...huggingFace, ...ollama];
 }
 
 export async function pullModel(request: PullModelRequest, options: PullModelOptions = {}): Promise<PullResult> {
@@ -234,6 +291,13 @@ export async function pullModel(request: PullModelRequest, options: PullModelOpt
   if (!request.force) {
     const cached = cachedPullResultForTarget(target);
     if (cached) return { ...cached, selected };
+  }
+  if (target.source === "ollama") {
+    try {
+      return { ...await pullOllamaModel(target, options), selected };
+    } finally {
+      invalidateModelListCache();
+    }
   }
   const repo = target.repo;
   const info = await fetchModelInfo(repo, options);
@@ -264,6 +328,13 @@ export async function pullModel(request: PullModelRequest, options: PullModelOpt
 export async function removeModel(model: string): Promise<string[]> {
   const alias = findAlias(model);
   const targetRepos = new Set<string>();
+  if (isOllamaInput(model)) {
+    try {
+      targetRepos.add(parseOllamaReference(model).repo);
+    } catch {
+      // Preserve the normal not-cached result for malformed removal inputs.
+    }
+  }
   if (alias) {
     targetRepos.add(alias.mlx.repo);
     targetRepos.add(alias.gguf.repo);
@@ -278,9 +349,9 @@ export async function removeModel(model: string): Promise<string[]> {
     await rm(path, { recursive: true, force: true });
     removed.push(path);
   }
-  const root = hfCacheRoot();
   for (const path of removed) {
     const dir = dirname(path);
+    const root = path.startsWith(ollamaCacheRoot()) ? ollamaCacheRoot() : hfCacheRoot();
     if (dir !== root && dir.startsWith(root) && existsSync(dir) && readdirSync(dir).every((name) => name.endsWith(".part"))) {
       await rm(dir, { recursive: true, force: true });
     }
@@ -295,6 +366,10 @@ export async function resolveModelOptions(request: PullModelRequest, options: Pu
   const targets = alias && !request.backend && !request.file ? [alias.mlx, alias.gguf] : [{ backend: explicit.backend, repo: explicit.repo, file: explicit.file }];
   const resolvedOptions: ModelResolveOption[] = [];
   for (const target of targets) {
+    if (isOllamaRepo(target.repo)) {
+      resolvedOptions.push(ollamaOption(request.model, await inspectOllamaModel(target.repo, options)));
+      continue;
+    }
     const info = await fetchModelInfo(target.repo, options);
     resolvedOptions.push(...optionsForRepo(request.model, target.repo, info.siblings ?? [], target.backend, target.file));
   }
@@ -310,6 +385,10 @@ export function clapHome(): string {
 
 export function hfCacheRoot(): string {
   return join(clapHome(), "models", "huggingface");
+}
+
+export function ollamaCacheRoot(): string {
+  return join(clapHome(), "models", "ollama");
 }
 
 export function resolveModel(model: string, backend?: BackendOverride): ResolvedModel {
@@ -474,11 +553,12 @@ export function cachedPullResultForTarget(target: PullTarget): PullResult | unde
     };
   }
   if (!existsSync(repoDir)) return undefined;
-  const cached = cachedModelsForRepo(repoDir, target.repo);
+  const id = target.source === "ollama" ? ollamaModelId(target.repo) : target.repo;
+  const cached = cachedModelsForRepo(repoDir, target.repo, undefined, { id, source: target.source });
   const mlx = cached.find((model) => model.backend === "mlx");
   if (target.backend !== "gguf" && mlx) {
     return {
-      id: target.repo,
+      id,
       repo: target.repo,
       backend: "mlx",
       format: "mlx",
@@ -490,7 +570,7 @@ export function cachedPullResultForTarget(target: PullTarget): PullResult | unde
   if (gguf.length === 1) {
     const modelPath = gguf[0]!.localPath ?? gguf[0]!.id;
     return {
-      id: target.repo,
+      id,
       repo: target.repo,
       file: basename(modelPath),
       backend: "llama",
@@ -503,12 +583,15 @@ export function cachedPullResultForTarget(target: PullTarget): PullResult | unde
 }
 
 function buildPullTarget(model: string, file?: string, backend?: BackendOverride, alias?: ModelAlias): PullTarget {
-  const repo = normalizeRepo(model);
+  const source = !alias && isOllamaInput(model) ? "ollama" : "huggingface";
+  if (source === "ollama" && file) throw new Error("Ollama registry pulls do not support --file; select a model tag instead");
+  const repo = source === "ollama" ? parseOllamaReference(model).repo : normalizeRepo(model);
   const cachePath = file ? join(repoCacheDir(repo), basename(file)) : backend === "mlx" ? repoCacheDir(repo) : undefined;
   const backendKey = file ? "gguf" : backend ?? "";
   return {
     model,
     repo,
+    source,
     file,
     backend,
     alias,
@@ -611,14 +694,20 @@ function optionScore(option: ModelResolveOption): number {
   return 40;
 }
 
-function cachedModelsForRepo(repoPath: string, repo = repoPath, listed?: Array<{ name: string; isFile(): boolean }>): ClapModel[] {
+function cachedModelsForRepo(
+  repoPath: string,
+  repo = repoPath,
+  listed?: Array<{ name: string; isFile(): boolean }>,
+  options: { id?: string; source?: "huggingface" | "ollama" } = {},
+): ClapModel[] {
   const files = listed ?? readdirSync(repoPath, { withFileTypes: true });
   const ggufFiles = files.filter((entry) => entry.isFile() && isGgufModel(entry.name));
+  const id = options.id ?? repo;
   const ggufModels = files
     .filter((entry) => entry.isFile() && isGgufModel(entry.name))
     .map((entry) => ({ file: entry.name, path: join(repoPath, entry.name) }))
     .map((model) => ({
-      id: ggufFiles.length === 1 ? repo : `${repo}:${model.file}`,
+      id: ggufFiles.length === 1 ? id : `${id}:${model.file}`,
       object: "model" as const,
       displayName: ggufModelDisplayName(model.path),
       backend: "llama" as const,
@@ -628,13 +717,13 @@ function cachedModelsForRepo(repoPath: string, repo = repoPath, listed?: Array<{
       file: model.file,
       localPath: model.path,
     } satisfies Partial<ClapModel> & Pick<ClapModel, "id" | "object" | "displayName" | "backend" | "format" | "status">))
-    .map((model) => withModelMetadata(model, { repo, path: model.localPath, file: model.file }));
+    .map((model) => withModelMetadata(model, { repo, path: model.localPath, file: model.file, source: options.source }));
   const hasMlxLayout = files.some((entry) => entry.name === "config.json") && (
     files.some((entry) => entry.name === "tokenizer.json" || entry.name === "tokenizer_config.json") ||
     files.some((entry) => entry.name.endsWith(".safetensors"))
   );
   const mlxModels = hasMlxLayout ? [withModelMetadata({
-    id: repo,
+    id,
     object: "model" as const,
     displayName: mlxModelDisplayName(repoPath),
     backend: "mlx" as const,
@@ -642,13 +731,13 @@ function cachedModelsForRepo(repoPath: string, repo = repoPath, listed?: Array<{
     status: "available" as const,
     repo,
     localPath: repoPath,
-  }, { repo, path: repoPath })] : [];
+  }, { repo, path: repoPath, source: options.source })] : [];
   return [...ggufModels, ...mlxModels];
 }
 
 function withModelMetadata(
   model: Partial<ClapModel> & Pick<ClapModel, "id" | "object" | "displayName" | "backend" | "format" | "status">,
-  options: { repo?: string; path?: string; file?: string; alias?: boolean } = {},
+  options: { repo?: string; path?: string; file?: string; alias?: boolean; source?: "huggingface" | "ollama" } = {},
 ): ClapModel {
   const config = options.path && model.format === "mlx" ? readJson(join(options.path, "config.json")) : undefined;
   const tokenizerConfig = options.path && model.format === "mlx" ? readJson(join(options.path, "tokenizer_config.json")) : undefined;
@@ -662,10 +751,10 @@ function withModelMetadata(
   return {
     ...model,
     name,
-    provider: providerFromRepo(options.repo) ?? (options.alias ? "clap" : "local"),
+    provider: options.source === "ollama" ? "ollama" : providerFromRepo(options.repo) ?? (options.alias ? "clap" : "local"),
     source: {
-      type: options.alias ? "alias" : options.repo ? "huggingface" : "local",
-      repo: options.repo,
+      type: options.alias ? "alias" : options.source ?? (options.repo ? "huggingface" : "local"),
+      repo: options.source === "ollama" && options.repo ? ollamaModelId(options.repo) : options.repo,
       baseRepo,
     },
     modalities: servedModalities(),
@@ -876,11 +965,13 @@ function firstDeclaredInteger(candidates: Array<[number | undefined, string]>): 
 }
 
 function providerFromRepo(repo?: string): string | undefined {
+  if (repo?.startsWith("ollama://")) return "ollama";
   return repo?.split("/")[0];
 }
 
 function displayNameFromRepo(repo?: string): string | undefined {
-  return repo?.split("/").at(-1)?.replace(/[-_]+/g, " ").trim();
+  const name = repo?.replace(/^ollama:\/\//, "").split("/").at(-1)?.replace(/[-_]+/g, " ").trim();
+  return name?.replace(/:latest$/, "");
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -901,6 +992,217 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function ollamaRepoFromCacheDirName(name: string): string {
+  try {
+    return `ollama://${decodeURIComponent(name)}`;
+  } catch {
+    return `ollama://${name}`;
+  }
+}
+
+function ollamaModelId(repo: string): string {
+  return repo.replace(/^ollama:\/\//, "");
+}
+
+function ollamaOption(model: string, inspected: InspectedOllamaModel): ModelResolveOption {
+  const format = inspected.config.model_format?.toLowerCase();
+  const supported = format === "gguf";
+  const quantization = inspected.config.file_type;
+  return {
+    id: `${inspected.reference.repo}@${inspected.modelLayer.digest}`,
+    model,
+    backend: supported ? "gguf" : "mlx",
+    format: supported ? "gguf" : "safetensors",
+    repo: inspected.reference.repo,
+    sizeBytes: inspected.modelLayer.size,
+    quantization,
+    supported,
+    unsupportedReason: supported ? undefined : `Ollama model format ${format ?? "unknown"} is not supported; Clap currently imports GGUF Ollama layers only.`,
+    recommended: false,
+    reason: supported
+      ? `Ollama ${quantization ? `GGUF ${quantization}` : "GGUF"} artifact is runnable with llama.cpp.`
+      : `The Ollama manifest uses the unsupported ${format ?? "unknown"} model format.`,
+  };
+}
+
+async function pullOllamaModel(target: PullTarget, options: PullModelOptions): Promise<PullResult> {
+  const inspected = await inspectOllamaModel(target.repo, options);
+  if (inspected.config.model_format?.toLowerCase() !== "gguf") {
+    throw new Error(`Ollama model ${inspected.reference.id} uses unsupported format ${inspected.config.model_format ?? "unknown"}; Clap currently imports GGUF layers only`);
+  }
+  if (target.backend === "mlx") throw new Error(`Ollama model ${inspected.reference.id} is GGUF; use --backend gguf`);
+  const quantization = inspected.config.file_type?.replace(/[^A-Za-z0-9_.-]/g, "_");
+  const file = quantization ? `model-${quantization}.gguf` : "model.gguf";
+  const modelPath = join(repoCacheDir(target.repo), file);
+  const expectedSha256 = sha256FromDigest(inspected.modelLayer.digest);
+  options.onProgress?.({ bytesReceived: 0, totalBytes: inspected.modelLayer.size, currentFile: file });
+  await downloadOllamaBlob(inspected.reference, inspected.modelLayer.digest, modelPath, {
+    bytesReceived: 0,
+    totalBytes: inspected.modelLayer.size,
+    currentFile: file,
+    onProgress: options.onProgress,
+    signal: options.signal,
+    expectedSha256,
+  });
+  const magic = new TextDecoder().decode(await Bun.file(modelPath).slice(0, 4).arrayBuffer());
+  if (magic !== "GGUF") {
+    await rm(modelPath, { force: true });
+    throw new Error(`Ollama model ${inspected.reference.id} declared GGUF format but its model layer is not a GGUF file`);
+  }
+  const repoDir = dirname(modelPath);
+  for (const entry of await readdir(repoDir, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(".gguf") && entry.name !== file) {
+      await rm(join(repoDir, entry.name), { force: true });
+    }
+  }
+  return {
+    id: inspected.reference.id,
+    repo: inspected.reference.repo,
+    file,
+    backend: "llama",
+    format: "gguf",
+    modelPath,
+    files: [modelPath],
+  };
+}
+
+async function inspectOllamaModel(model: string, options: PullModelOptions): Promise<InspectedOllamaModel> {
+  const reference = parseOllamaReference(model);
+  const manifestUrl = `${ollamaEndpoint()}/v2/${encodeURIComponent(reference.namespace)}/${encodeURIComponent(reference.name)}/manifests/${encodeURIComponent(reference.tag)}`;
+  const response = await fetch(manifestUrl, {
+    signal: options.signal,
+    headers: { Accept: "application/vnd.docker.distribution.manifest.v2+json" },
+  });
+  if (response.status === 404) throw new Error(`Ollama model not found: ${reference.id}`);
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`Ollama registry authentication failed (${response.status}) while inspecting ${reference.id}; private registry authentication is not supported yet`);
+  }
+  if (!response.ok) throw new Error(`failed to inspect Ollama model ${reference.id}: ${response.status} ${response.statusText}`);
+  const manifestValue = await response.json().catch(() => undefined);
+  if (!isRecord(manifestValue)) throw new Error(`invalid Ollama manifest for ${reference.id}: expected a JSON object`);
+  const manifest = manifestValue as OllamaManifest;
+  if (!Array.isArray(manifest.layers)) throw new Error(`invalid Ollama manifest for ${reference.id}: layers are missing`);
+  const modelLayers = manifest.layers
+    .filter((layer) => layer.mediaType === "application/vnd.ollama.image.model")
+    .map((layer) => validateOllamaDescriptor(layer, reference.id, "model layer"));
+  if (modelLayers.length !== 1) {
+    throw new Error(`invalid Ollama manifest for ${reference.id}: expected exactly one model layer, found ${modelLayers.length}`);
+  }
+  const configDescriptor = validateOllamaDescriptor(manifest.config, reference.id, "config");
+  const config = await fetchOllamaConfig(reference, configDescriptor, options);
+  return { reference, manifest, config, modelLayer: modelLayers[0]! };
+}
+
+function validateOllamaDescriptor(value: OllamaDescriptor | undefined, model: string, kind: string): ValidatedOllamaDescriptor {
+  if (!value || typeof value.digest !== "string") throw new Error(`invalid Ollama manifest for ${model}: ${kind} digest is missing`);
+  sha256FromDigest(value.digest);
+  if (!Number.isSafeInteger(value.size) || value.size! < 0) {
+    throw new Error(`invalid Ollama manifest for ${model}: ${kind} size is invalid`);
+  }
+  return value as ValidatedOllamaDescriptor;
+}
+
+async function fetchOllamaConfig(reference: OllamaReference, descriptor: ValidatedOllamaDescriptor, options: PullModelOptions): Promise<OllamaModelConfig> {
+  const response = await fetch(ollamaBlobUrl(reference, descriptor.digest), { signal: options.signal });
+  if (response.status === 404) throw new Error(`Ollama config blob not found for ${reference.id}: ${descriptor.digest}`);
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`Ollama registry authentication failed (${response.status}) while fetching config for ${reference.id}; private registry authentication is not supported yet`);
+  }
+  if (!response.ok) throw new Error(`failed to fetch Ollama config for ${reference.id}: ${response.status} ${response.statusText}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  verifyOllamaBytes(bytes, reference.id, descriptor);
+  const value = JSON.parse(new TextDecoder().decode(bytes));
+  if (!isRecord(value)) throw new Error(`invalid Ollama config for ${reference.id}: expected a JSON object`);
+  return value as OllamaModelConfig;
+}
+
+function verifyOllamaBytes(bytes: Uint8Array, model: string, descriptor: ValidatedOllamaDescriptor): void {
+  if (bytes.byteLength !== descriptor.size) {
+    throw new Error(`size mismatch for Ollama model ${model}: expected ${descriptor.size} bytes, got ${bytes.byteLength}`);
+  }
+  const actual = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const expected = sha256FromDigest(descriptor.digest);
+  if (actual !== expected) throw new Error(`checksum mismatch for Ollama model ${model}: expected sha256 ${expected}, got ${actual}`);
+}
+
+async function downloadOllamaBlob(
+  reference: OllamaReference,
+  digest: string,
+  target: string,
+  progress: Required<Pick<PullProgress, "bytesReceived" | "currentFile">> & Pick<PullProgress, "totalBytes"> & Pick<PullModelOptions, "onProgress" | "signal"> & { expectedSha256: string },
+): Promise<number> {
+  throwIfAborted(progress.signal);
+  await mkdir(dirname(target), { recursive: true });
+  const partial = `${target}.part`;
+  let resumeFrom = existsSync(partial) ? Bun.file(partial).size : 0;
+  const headers: Record<string, string> = {};
+  if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
+  const response = await fetch(ollamaBlobUrl(reference, digest), { signal: progress.signal, headers });
+  if (response.status === 416 && resumeFrom > 0) {
+    await response.body?.cancel().catch(() => undefined);
+    await verifyChecksum(partial, reference.id, digest, progress.expectedSha256);
+    await verifyDownloadedSize(resumeFrom, progress.totalBytes, partial, reference.id);
+    await rename(partial, target);
+    progress.onProgress?.({ bytesReceived: progress.bytesReceived + resumeFrom, totalBytes: progress.totalBytes, currentFile: progress.currentFile });
+    return resumeFrom;
+  }
+  if (response.status === 404) throw new Error(`Ollama model blob not found for ${reference.id}: ${digest}`);
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`Ollama registry authentication failed (${response.status}) while downloading ${reference.id}; private registry authentication is not supported yet`);
+  }
+  if (!response.ok) throw new Error(`failed to download Ollama model ${reference.id}: ${response.status} ${response.statusText}`);
+  const resumed = response.status === 206 && resumeFrom > 0;
+  if (!resumed) resumeFrom = 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error(`failed to download Ollama model ${reference.id}: response body is empty`);
+  const hasher = new Bun.CryptoHasher("sha256");
+  if (resumed) {
+    for await (const chunk of Bun.file(partial).stream()) hasher.update(chunk);
+  }
+  const handle = await open(partial, resumed ? "a" : "w");
+  let fileBytes = resumeFrom;
+  if (resumed) progress.onProgress?.({ bytesReceived: progress.bytesReceived + fileBytes, totalBytes: progress.totalBytes, currentFile: progress.currentFile });
+  try {
+    while (true) {
+      throwIfAborted(progress.signal);
+      const { done, value } = await reader.read();
+      if (done) break;
+      await handle.write(value);
+      hasher.update(value);
+      fileBytes += value.byteLength;
+      progress.onProgress?.({
+        bytesReceived: progress.bytesReceived + fileBytes,
+        totalBytes: progress.totalBytes,
+        currentFile: progress.currentFile,
+      });
+    }
+    throwIfAborted(progress.signal);
+    const actual = hasher.digest("hex");
+    if (actual !== progress.expectedSha256) {
+      await rm(partial, { force: true }).catch(() => undefined);
+      throw new Error(`checksum mismatch for Ollama model ${reference.id}: expected sha256 ${progress.expectedSha256}, got ${actual}. The corrupt partial download was removed; retry the pull.`);
+    }
+    await verifyDownloadedSize(fileBytes, progress.totalBytes, partial, reference.id);
+    await rename(partial, target);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    await handle.close();
+  }
+  return fileBytes;
+}
+
+async function verifyDownloadedSize(actual: number, expected: number | undefined, partial: string, model: string): Promise<void> {
+  if (expected === undefined || actual === expected) return;
+  await rm(partial, { force: true }).catch(() => undefined);
+  throw new Error(`size mismatch for Ollama model ${model}: expected ${expected} bytes, got ${actual}. The corrupt partial download was removed; retry the pull.`);
+}
+
+function ollamaBlobUrl(reference: OllamaReference, digest: string): string {
+  return `${ollamaEndpoint()}/v2/${encodeURIComponent(reference.namespace)}/${encodeURIComponent(reference.name)}/blobs/${digest}`;
 }
 
 function repoFromCacheDirName(name: string): string {
@@ -1101,12 +1403,51 @@ function normalizeRepo(model: string): string {
   return repo;
 }
 
+function isOllamaInput(model: string): boolean {
+  const value = model.trim();
+  if (value.startsWith("ollama://") || /^https:\/\/ollama\.com\/library\//.test(value)) return true;
+  if (!value.includes("/")) return true;
+  return value.lastIndexOf(":") > value.lastIndexOf("/");
+}
+
+function isOllamaRepo(repo: string): boolean {
+  return repo.startsWith("ollama://");
+}
+
+function parseOllamaReference(model: string): OllamaReference {
+  let value = model.trim().replace(/^ollama:\/\//, "").replace(/^https:\/\/ollama\.com\/library\//, "").replace(/\/$/, "");
+  const slash = value.lastIndexOf("/");
+  const colon = value.lastIndexOf(":");
+  const tag = colon > slash ? value.slice(colon + 1) : "latest";
+  if (colon > slash) value = value.slice(0, colon);
+  const parts = value.split("/");
+  if (parts.length === 1) parts.unshift("library");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error(`invalid Ollama model reference: ${model}`);
+  const [namespace, name] = parts as [string, string];
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_-]{0,79}$/.test(namespace)) throw new Error(`invalid Ollama namespace: ${namespace}`);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(name)) throw new Error(`invalid Ollama model name: ${name}`);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(tag)) throw new Error(`invalid Ollama model tag: ${tag || "(empty)"}`);
+  const id = `${namespace === "library" ? name : `${namespace}/${name}`}:${tag}`;
+  return { id, namespace, name, tag, repo: `ollama://${id}` };
+}
+
+function sha256FromDigest(digest: string): string {
+  const match = digest.match(/^sha256:([0-9a-f]{64})$/);
+  if (!match) throw new Error(`invalid Ollama blob digest: ${digest}`);
+  return match[1]!;
+}
+
 function validateRelativeFile(file: string): void {
   if (file.startsWith("/") || file.includes("..")) throw new Error(`invalid file path: ${file}`);
 }
 
 function repoCacheDir(repo: string): string {
+  if (isOllamaRepo(repo)) return join(ollamaCacheRoot(), encodeURIComponent(ollamaModelId(repo)));
   return join(hfCacheRoot(), repo.replace("/", "--"));
+}
+
+function ollamaEndpoint(): string {
+  return (process.env.CLAP_OLLAMA_REGISTRY ?? "https://registry.ollama.ai").replace(/\/$/, "");
 }
 
 function hfEndpoint(): string {
