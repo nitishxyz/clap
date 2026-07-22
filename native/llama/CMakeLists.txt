@@ -51,6 +51,7 @@ set(CLAP_LLAMA_SOURCES
   src/cache-executor.cpp
   clap-llama.cpp
   src/environment.cpp
+  src/generation-stepper.cpp
   src/model-runtime.cpp
   src/prompt.cpp
   src/protocol.cpp
@@ -64,6 +65,7 @@ set(CLAP_LLAMA_SOURCES
 set(CLAP_LLAMA_HEADERS
   include/clap/llama/cache-executor.h
   include/clap/llama/environment.h
+  include/clap/llama/generation-stepper.h
   include/clap/llama/model-runtime.h
   include/clap/llama/prompt.h
   include/clap/llama/protocol.h
@@ -89,6 +91,24 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-generation-stepper
+    tests/generation-stepper.test.cpp
+    src/cache-executor.cpp
+    src/environment.cpp
+    src/generation-stepper.cpp
+    src/model-runtime.cpp
+    src/request-state.cpp
+    src/stop-buffer.cpp
+  )
+  add_dependencies(clap-llama-generation-stepper clap-cache-ffi-build)
+  target_include_directories(clap-llama-generation-stepper PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-generation-stepper PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-generation-stepper COMMAND clap-llama-generation-stepper)
+
   add_executable(clap-llama-cache-adapter cache-adapter.test.cpp)
   add_dependencies(clap-llama-cache-adapter clap-cache-ffi-build)
   target_link_libraries(clap-llama-cache-adapter PRIVATE clap-cache-ffi)
@@ -227,6 +247,7 @@ if(BUILD_TESTING)
     clap-llama-cache-executor
     clap-llama-characterization
     clap-llama-environment
+    clap-llama-generation-stepper
     clap-llama-model-runtime
     clap-llama-prompt
     clap-llama-protocol

@@ -3,6 +3,7 @@
 #include "cache-adapter.h"
 #include "clap/llama/cache-executor.h"
 #include "clap/llama/environment.h"
+#include "clap/llama/generation-stepper.h"
 #include "clap/llama/model-runtime.h"
 #include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
@@ -171,28 +172,6 @@ json retention_telemetry(const LoadedLlama& loaded, std::size_t active, std::siz
   return clap::llama::serialize_retention_telemetry(snapshot);
 }
 
-void batch_add(llama_batch& batch, llama_token token, llama_pos pos, bool logits, llama_seq_id seq) {
-  const int32_t index = batch.n_tokens;
-  batch.token[index] = token;
-  batch.pos[index] = pos;
-  batch.n_seq_id[index] = 1;
-  batch.seq_id[index][0] = seq;
-  batch.logits[index] = logits ? 1 : 0;
-  batch.n_tokens += 1;
-}
-
-std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
-  char buffer[256];
-  int n = llama_token_to_piece(vocab, token, buffer, sizeof(buffer), 0, true);
-  if (n >= 0) return std::string(buffer, n);
-  // Negative return is the required size; retry instead of dropping the piece.
-  std::vector<char> big(static_cast<std::size_t>(-n));
-  n = llama_token_to_piece(vocab, token, big.data(), static_cast<int32_t>(big.size()), 0, true);
-  if (n < 0) return "";
-  return std::string(big.data(), n);
-}
-
-
 const std::string& telemetry_key() {
   static const std::string key = [] {
     if (const char* installed = std::getenv("CLAP_TELEMETRY_HMAC_KEY"); installed && *installed) {
@@ -223,42 +202,6 @@ std::string token_fingerprint(const std::vector<Token>& tokens, std::size_t coun
   return result.str();
 }
 
-void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
-  if (req.anchor_at < 0 || !req.cache_lease) return;
-  const std::size_t count = static_cast<std::size_t>(req.anchor_at);
-  if (count < 16 || static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested != count ||
-      !req.cache_lease) return;
-  const auto next = std::upper_bound(
-      req.anchor_boundaries.begin(), req.anchor_boundaries.end(), count);
-  req.anchor_at = next == req.anchor_boundaries.end()
-      ? -1 : static_cast<int32_t>(*next);
-  std::vector<llama_token> boundary(
-      req.full_prompt_tokens.begin(),
-      req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
-  try {
-    auto anchor_identity = req.cache_identity;
-    const bool structural = std::find(req.structural_boundaries.begin(),
-        req.structural_boundaries.end(), count) != req.structural_boundaries.end();
-    anchor_identity.scope = structural ? CLAP_CACHE_SCOPE_HARNESS : CLAP_CACHE_SCOPE_PROJECT;
-    auto result = loaded.cache_executor->create_anchor(
-        boundary, anchor_identity, static_cast<uint32_t>(req.seq), structural);
-    if (!result.materialized) return;
-    if (!result.no_op && result.target_slot < loaded.slots.size()) {
-      auto& anchor = loaded.slots[result.target_slot];
-      anchor.tokens = boundary;
-      anchor.is_anchor = true;
-      anchor.last_used = ++loaded.use_counter;
-      anchor.coordinator_generation = result.target_generation;
-    }
-    for (const uint32_t victim : result.eviction_slots) {
-      if (victim != result.target_slot && victim < loaded.slots.size()) loaded.slots[victim] = {};
-      loaded.last_eviction_reason = "hard_ceiling";
-    }
-    req.materialized_boundaries.push_back(count);
-  } catch (const std::exception& error) {
-    fprintf(stderr, "clap-llama: coordinated anchor skipped: %s\n", error.what());
-  }
-}
 
 void finalize(LoadedLlama& loaded, ActiveRequest& req) {
   req.sampler.reset();
@@ -344,213 +287,13 @@ void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& me
 
 // Handles one sampled token: EOS, stop sequences, budget checks, streaming
 // emission. Finalizes the request when generation ends.
-void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab, llama_token token) {
-  if (llama_vocab_is_eog(vocab, token)) {
-    const std::string visible = req.stop_buffer.finish();
-    if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(loaded, req);
-    return;
-  }
-  req.completion_tokens += 1;
-  const std::string piece = token_to_piece(vocab, token);
-  if (!piece.empty()) {
-    const auto result = req.stop_buffer.append(piece);
-    if (!result.visible.empty()) emit(req.id, json{{"token", result.visible}});
-    if (result.stop_complete) {
-      req.finish_reason = "stop";
-      finalize(loaded, req);
-      return;
-    }
-  }
-  if (req.completion_tokens >= req.params.max_tokens) {
-    req.finish_reason = "length";
-    const std::string visible = req.stop_buffer.finish();
-    if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(loaded, req);
-    return;
-  }
-  const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.runtime.context()));
-  if (req.n_pos + 1 >= n_ctx) {
-    req.finish_reason = "length";
-    const std::string visible = req.stop_buffer.finish();
-    if (!visible.empty()) emit(req.id, json{{"token", visible}});
-    finalize(loaded, req);
-    return;
-  }
-  req.pending_token = token;
-  req.phase = ActiveRequest::Phase::Decode;
-}
-
-// Advances one request after its slice of the batch decoded successfully.
-void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab) {
-  if (req.phase == ActiveRequest::Phase::Prefill) {
-    const std::size_t chunk = static_cast<std::size_t>(req.step_tokens);
-    const std::size_t chunk_start = req.ingested;
-    if (req.cache_lease) {
-      auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
-      slot.tokens.insert(
-        slot.tokens.end(),
-        req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested),
-        req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested + chunk));
-      if (req.cache_lease.generation() != 0) {
-        try {
-          slot.coordinator_generation = req.cache_lease.advance(
-              req.prompt_tokens.data() + chunk_start, chunk, CLAP_CACHE_SLOT_SESSION, true);
-        } catch (const std::exception& error) {
-          req.cache_fallback = "coordinator_advance_failed";
-          slot.coordinator_generation = 0;
-          emit(req.id, json{{"error", "cache coordinator advance failed closed"},
-                            {"code", "cache_coordinator_error"}});
-          req.mark_terminal(ActiveRequest::TerminalState::Failed);
-          fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
-          return;
-        }
-      }
-    }
-    req.n_pos += req.step_tokens;
-    req.ingested += chunk;
-    if (req.anchor_at >= 0 &&
-        static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested ==
-            static_cast<std::size_t>(req.anchor_at)) {
-      maybe_create_anchor(loaded, req);
-    }
-    if (req.prompt_tokens.size() > 1024 && req.ingested < req.prompt_tokens.size()) {
-      emit(req.id, json{{"prefill", {
-        {"done", req.cached_prompt_tokens + static_cast<int>(req.ingested)},
-        {"total", req.prompt_token_count},
-      }}});
-    }
-    if (req.logits_index >= 0) {
-      const llama_token token = llama_sampler_sample(req.sampler.get(), loaded.runtime.context(), req.logits_index);
-      process_sampled(loaded, req, vocab, token);
-    }
-    return;
-  }
-  req.n_pos += 1;
-  if (req.cache_lease) {
-    auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
-    slot.tokens.push_back(req.pending_token);
-    if (req.cache_lease.generation() != 0) {
-      try {
-        slot.coordinator_generation = req.cache_lease.advance(
-            &req.pending_token, 1, CLAP_CACHE_SLOT_SESSION, true);
-      } catch (const std::exception& error) {
-        req.cache_fallback = "coordinator_advance_failed";
-        slot.coordinator_generation = 0;
-        emit(req.id, json{{"error", "cache coordinator advance failed closed"},
-                          {"code", "cache_coordinator_error"}});
-        req.mark_terminal(ActiveRequest::TerminalState::Failed);
-        fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
-        return;
-      }
-    }
-  }
-  const llama_token token = llama_sampler_sample(req.sampler.get(), loaded.runtime.context(), req.logits_index);
-  process_sampled(loaded, req, vocab, token);
-}
-
-void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_active) {
-  if (req.phase == ActiveRequest::Phase::Prefill && !req.retried) {
-    // Self-heal: wipe this sequence (or everything when alone, which also
-    // clears fragmented unified-KV state) and re-ingest the prompt once.
-    req.retried = true;
-    if (sole_active) {
-      for (auto& s : loaded.slots) {
-        s.tokens.clear();
-        s.is_anchor = false;
-      }
-      if (req.cache_lease) {
-        loaded.slots[static_cast<std::size_t>(req.seq)].coordinator_generation =
-            req.cache_lease.reset_for_retry();
-      }
-    } else {
-      if (req.cache_lease) {
-        auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
-        slot.tokens.clear();
-        if (req.cache_lease.generation() != 0) {
-          slot.coordinator_generation = req.cache_lease.invalidate_and_clear(true);
-        }
-      }
-    }
-    req.prompt_tokens = req.full_prompt_tokens;
-    req.ingested = 0;
-    req.n_pos = 0;
-    req.cached_prompt_tokens = 0;
-    req.materialized_boundaries.clear();
-    req.anchor_at = req.anchor_boundaries.empty()
-        ? -1 : static_cast<int32_t>(req.anchor_boundaries.front());
-    req.cache_realized_reuse_tokens = 0;
-    req.cache_reuse_kind.clear();
-    req.cache_fallback = "decode_retry_full_prefill";
-    fprintf(stderr, "clap-llama: ingest failed for request %s; retrying from scratch\n", req.id.c_str());
-    return;
-  }
-  fail_request(loaded, req,
-    "llama_decode failed; this often indicates llama.cpp GPU memory pressure. "
-    "Check the llama worker log. Try a smaller GGUF quant such as Q4_K_M, reduce "
-    "CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, set CLAP_LLAMA_GPU_LAYERS "
-    "to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.");
-}
-
-// Adds one request's contribution to a batch. Returns tokens added.
-int32_t add_contribution(llama_batch& batch, ActiveRequest& req, int32_t budget) {
-  if (req.phase == ActiveRequest::Phase::Decode) {
-    req.logits_index = batch.n_tokens;
-    req.step_tokens = 1;
-    batch_add(batch, req.pending_token, req.n_pos, true, req.seq);
-    return 1;
-  }
-  std::size_t remaining = req.prompt_tokens.size() - req.ingested;
-  const std::size_t absolute_ingested =
-      static_cast<std::size_t>(req.cached_prompt_tokens) + req.ingested;
-  if (req.anchor_at >= 0 && static_cast<std::size_t>(req.anchor_at) > absolute_ingested) {
-    remaining = std::min(
-        remaining, static_cast<std::size_t>(req.anchor_at) - absolute_ingested);
-  }
-  const int32_t chunk = static_cast<int32_t>(std::min<std::size_t>(remaining, static_cast<std::size_t>(budget)));
-  req.logits_index = -1;
-  req.step_tokens = chunk;
-  for (int32_t i = 0; i < chunk; ++i) {
-    const bool last = req.ingested + static_cast<std::size_t>(i) + 1 == req.prompt_tokens.size();
-    if (last) req.logits_index = batch.n_tokens;
-    batch_add(batch, req.prompt_tokens[req.ingested + static_cast<std::size_t>(i)], req.n_pos + i, last, req.seq);
-  }
-  return chunk;
-}
-
-// Runs one request's contribution as its own batch so a failing sequence can
-// be isolated (and healed) without erroring every stream in the mixed batch.
-void step_single(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab, bool sole_active) {
-  const int32_t size = std::max<int32_t>(req.step_tokens, 1);
-  llama_batch batch = llama_batch_init(size, 0, 1);
-  batch.n_tokens = 0;
-  add_contribution(batch, req, size);
-  const int result = llama_decode(loaded.runtime.context(), batch);
-  llama_batch_free(batch);
-  if (result == 0) {
-    post_decode(loaded, req, vocab);
-  } else {
-    handle_decode_failure(loaded, req, sole_active);
-  }
-}
-
-// One scheduler step: cancellations, then a mixed batch of decode tokens and
-// prefill chunks, then per-request sampling/emission.
 void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& active) {
-  const llama_vocab* vocab = loaded.runtime.vocab();
-  const int32_t n_batch = static_cast<int32_t>(llama_n_batch(loaded.runtime.context()));
-
   for (auto& req : active) {
     if (!req->done && req->cancelled) {
       req->finish_reason = "cancel";
       finalize(loaded, *req);
     }
   }
-
-  llama_batch batch = llama_batch_init(n_batch, 0, 1);
-  batch.n_tokens = 0;
-  std::vector<ActiveRequest*> contributors;
-  int32_t budget = n_batch;
 
   std::vector<clap::llama_native::ScheduleRequest> schedule_requests;
   schedule_requests.reserve(active.size());
@@ -564,31 +307,66 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
         !req->done && has_work,
     });
   }
-  // Decode streams first, then prefill in admission order.
+  std::vector<ActiveRequest*> ordered;
   for (const std::size_t index : clap::llama_native::decode_first_order(schedule_requests)) {
-    if (budget <= 0) break;
-    budget -= add_contribution(batch, *active[index], budget);
-    contributors.push_back(active[index].get());
+    ordered.push_back(active[index].get());
   }
 
-  if (contributors.empty()) {
-    llama_batch_free(batch);
-    return;
+  clap::llama::GenerationStepper stepper(loaded.runtime, loaded.cache_executor.get());
+  const auto events = stepper.step(ordered,
+      static_cast<int32_t>(llama_n_batch(loaded.runtime.context())), active.size() == 1);
+  for (const auto& event : events) {
+    auto& req = *event.request;
+    switch (event.type) {
+      case clap::llama::GenerationEvent::Type::Token:
+        emit(req.id, json{{"token", event.text}});
+        break;
+      case clap::llama::GenerationEvent::Type::Prefill:
+        emit(req.id, json{{"prefill", {{"done", event.done}, {"total", event.total}}}});
+        break;
+      case clap::llama::GenerationEvent::Type::Complete:
+        finalize(loaded, req);
+        break;
+      case clap::llama::GenerationEvent::Type::Failure:
+        if (event.code.empty()) fail_request(loaded, req, event.text);
+        else emit(req.id, json{{"error", event.text}, {"code", event.code}});
+        break;
+      case clap::llama::GenerationEvent::Type::CacheAppend: {
+        auto& slot = loaded.slots[event.slot];
+        slot.tokens.insert(slot.tokens.end(), event.tokens.begin(), event.tokens.end());
+        slot.coordinator_generation = event.generation;
+        break;
+      }
+      case clap::llama::GenerationEvent::Type::CacheResetSlot: {
+        auto& slot = loaded.slots[event.slot];
+        if (event.clear) slot.tokens.clear();
+        slot.coordinator_generation = event.generation;
+        break;
+      }
+      case clap::llama::GenerationEvent::Type::CacheResetAll:
+        for (auto& slot : loaded.slots) {
+          slot.tokens.clear();
+          slot.is_anchor = false;
+        }
+        loaded.slots[static_cast<std::size_t>(req.seq)].coordinator_generation =
+            req.cache_lease.generation();
+        break;
+      case clap::llama::GenerationEvent::Type::CacheAnchor: {
+        if (event.anchor && event.slot < loaded.slots.size()) {
+          auto& anchor = loaded.slots[event.slot];
+          anchor.tokens = event.tokens;
+          anchor.is_anchor = true;
+          anchor.last_used = ++loaded.use_counter;
+          anchor.coordinator_generation = event.generation;
+        }
+        for (const uint32_t victim : event.eviction_slots) {
+          if (victim != event.slot && victim < loaded.slots.size()) loaded.slots[victim] = {};
+          loaded.last_eviction_reason = "hard_ceiling";
+        }
+        break;
+      }
+    }
   }
-
-  const bool sole = contributors.size() == 1 && active.size() == 1;
-  if (llama_decode(loaded.runtime.context(), batch) == 0) {
-    llama_batch_free(batch);
-    for (auto* req : contributors) post_decode(loaded, *req, vocab);
-    return;
-  }
-  llama_batch_free(batch);
-  if (contributors.size() == 1) {
-    handle_decode_failure(loaded, *contributors.front(), sole);
-    return;
-  }
-  fprintf(stderr, "clap-llama: mixed batch decode failed; isolating %zu sequences\n", contributors.size());
-  for (auto* req : contributors) step_single(loaded, *req, vocab, false);
 }
 
 std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::string& id, const json& request) {
