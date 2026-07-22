@@ -50,10 +50,12 @@ set_target_properties(clap-cache-ffi PROPERTIES
 set(CLAP_LLAMA_SOURCES
   clap-llama.cpp
   src/environment.cpp
+  src/protocol.cpp
 )
 
 set(CLAP_LLAMA_HEADERS
   include/clap/llama/environment.h
+  include/clap/llama/protocol.h
 )
 
 add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
@@ -80,8 +82,22 @@ if(BUILD_TESTING)
   target_include_directories(clap-llama-environment PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
   add_test(NAME clap-llama-environment COMMAND clap-llama-environment)
 
+  add_executable(clap-llama-protocol
+    tests/protocol.test.cpp
+    src/protocol.cpp
+  )
+  target_include_directories(clap-llama-protocol PRIVATE
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_compile_definitions(clap-llama-protocol PRIVATE
+    CLAP_LLAMA_PROTOCOL_FIXTURE="${CLAP_ROOT}/packages/runtime-router/fixtures/legacy-worker-protocol/llama-events.jsonl"
+  )
+  add_test(NAME clap-llama-protocol COMMAND clap-llama-protocol)
+
   add_custom_target(clap-llama-tests DEPENDS
     clap-llama-characterization
     clap-llama-environment
+    clap-llama-protocol
   )
 endif()

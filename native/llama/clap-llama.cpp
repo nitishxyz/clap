@@ -2,20 +2,18 @@
 #include "active-concurrency.h"
 #include "cache-adapter.h"
 #include "clap/llama/environment.h"
+#include "clap/llama/protocol.h"
 #include "native-characterization.h"
 #include "stable-boundary.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <condition_variable>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <functional>
-#include <iostream>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -32,57 +30,10 @@ using clap::llama::available_memory_bytes;
 using clap::llama::env_enabled;
 using clap::llama::env_int;
 using clap::llama::env_u64;
-
-// Reads stdin on a dedicated thread so the main thread can poll for cancel
-// messages while a generation is in progress.
-class StdinReader {
- public:
-  StdinReader() : thread_([this] { run(); }) {}
-
-  ~StdinReader() {
-    if (thread_.joinable()) thread_.detach();
-  }
-
-  bool next(std::string& out) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return !lines_.empty() || eof_; });
-    if (lines_.empty()) return false;
-    out = std::move(lines_.front());
-    lines_.pop_front();
-    return true;
-  }
-
-  bool poll(std::string& out) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (lines_.empty()) return false;
-    out = std::move(lines_.front());
-    lines_.pop_front();
-    return true;
-  }
-
- private:
-  void run() {
-    std::string line;
-    while (std::getline(std::cin, line)) {
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        lines_.push_back(line);
-      }
-      cv_.notify_all();
-    }
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      eof_ = true;
-    }
-    cv_.notify_all();
-  }
-
-  std::deque<std::string> lines_;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  bool eof_ = false;
-  std::thread thread_;
-};
+using clap::llama::emit;
+using clap::llama::emit_error;
+using clap::llama::RequestError;
+using clap::llama::StdinReader;
 
 struct LoadedLlama {
   std::string model_path;
@@ -138,34 +89,6 @@ struct SamplingParams {
   double presence_penalty = 0.0;
   double frequency_penalty = 0.0;
   std::vector<std::string> stops;
-};
-
-void emit(const std::string& id, json fields) {
-  if (!id.empty()) fields["id"] = id;
-  // error_handler_t::replace: never throw on stray invalid UTF-8 bytes from
-  // byte-level BPE pieces; substitute U+FFFD instead of killing the request.
-  std::cout << fields.dump(-1, ' ', false, json::error_handler_t::replace) << "\n";
-  std::cout.flush();
-}
-
-void emit_error(const std::string& id, const std::string& message) {
-  emit(id, json{{"error", message}});
-}
-
-void emit_error(const std::string& id, const std::string& message, const std::string& code) {
-  if (code.empty()) {
-    emit_error(id, message);
-  } else {
-    emit(id, json{{"error", message}, {"code", code}});
-  }
-}
-
-// A request rejected at admission (before any ingest) with a machine-readable
-// code the server maps to a client error instead of a backend failure.
-struct RequestError : std::runtime_error {
-  std::string code;
-  RequestError(std::string error_code, const std::string& message)
-      : std::runtime_error(message), code(std::move(error_code)) {}
 };
 
 struct CacheBackpressure : std::runtime_error {
