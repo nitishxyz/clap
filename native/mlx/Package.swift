@@ -5,6 +5,7 @@ let package = Package(
   name: "ClapMLX",
   platforms: [.macOS(.v14)],
   products: [
+    .library(name: "ClapMLXCache", targets: ["ClapMLXCache"]),
     .library(name: "ClapMLXModel", targets: ["ClapMLXModel"]),
     .executable(name: "clap-mlx", targets: ["clap-mlx"]),
   ],
@@ -25,6 +26,10 @@ let package = Package(
     ),
     .target(name: "ClapCachePolicy"),
     .target(
+      name: "ClapMLXCache",
+      dependencies: ["ClapCacheBridge", "ClapCachePolicy"]
+    ),
+    .target(
       name: "ClapMLXModel",
       dependencies: [
         "ClapCachePolicy",
@@ -40,6 +45,7 @@ let package = Package(
       dependencies: [
         "ClapCacheBridge",
         "ClapCachePolicy",
+        "ClapMLXCache",
         "ClapMLXModel",
         .product(name: "MLXLLM", package: "mlx-swift-lm"),
         .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
@@ -59,6 +65,10 @@ let package = Package(
     .testTarget(
       name: "ClapMLXModelTests",
       dependencies: ["ClapMLXModel", "ClapCachePolicy"]
+    ),
+    .testTarget(
+      name: "ClapMLXCacheTests",
+      dependencies: ["ClapMLXCache", "ClapCacheBridge", "ClapCachePolicy"]
     ),
   ]
 )

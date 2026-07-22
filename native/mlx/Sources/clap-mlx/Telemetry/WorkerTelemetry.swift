@@ -1,4 +1,5 @@
 import ClapCacheBridge
+import ClapMLXCache
 import Foundation
 
 func tokenFingerprint(_ tokens: [Int], count: Int) -> String {

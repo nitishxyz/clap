@@ -2,85 +2,71 @@ import ClapCacheBridge
 import ClapCachePolicy
 import Foundation
 
-let cacheTelemetryKey = ProcessInfo.processInfo.environment["CLAP_TELEMETRY_HMAC_KEY"]
-  ?? UUID().uuidString + UUID().uuidString
+public struct CoordinatorCheckpointConfiguration: Sendable {
+  public let enabled: Bool
+  public let minimumTokens: UInt64
+  public let intervalTokens: UInt64
+  public let maximum: UInt32
+  public let budgetBasisPoints: UInt32
+  public let budgetBytes: UInt64
 
-struct CacheIdentity {
-  let fingerprint: [UInt8]
-  let tenant: UInt64
-  let project: UInt64
-  let harness: UInt64
-  let agent: UInt64
-  let session: UInt64
-  let scope: UInt32
-  let priority: UInt32
-  let sideRequest: Bool
-  let exportedNamespace: String?
-
-  init(domain: String, requestId: String?, intent: CacheIntent?) {
-    let isolation = intent?.tenant ?? intent?.namespace ?? "local"
-    let keyed = cacheTelemetryKey + "|"
-    var bytes = [UInt8](repeating: 0, count: 32)
-    (keyed + domain + "|tenant=" + isolation).withCString { cc_fingerprint_string($0, &bytes) }
-    func hash(_ value: String?) -> UInt64 {
-      (keyed + (value ?? "")).withCString { cc_hash_string($0) }
-    }
-    fingerprint = bytes
-    tenant = hash(isolation)
-    project = hash(intent?.project)
-    harness = hash(intent?.harness)
-    agent = hash(intent?.agent)
-    session = intent?.session?.isEmpty == false ? hash(intent?.session) : 0
-    if intent?.session?.isEmpty == false { scope = UInt32(CC_SCOPE_SESSION) }
-    else if intent?.agent?.isEmpty == false { scope = UInt32(CC_SCOPE_AGENT) }
-    else if intent?.project?.isEmpty == false { scope = UInt32(CC_SCOPE_PROJECT) }
-    else if intent?.harness?.isEmpty == false { scope = UInt32(CC_SCOPE_HARNESS) }
-    else { scope = UInt32(CC_SCOPE_TENANT) }
-    priority = intent?.priority == "background"
-      ? UInt32(CC_PRIORITY_BACKGROUND) : UInt32(CC_PRIORITY_INTERACTIVE)
-    sideRequest = intent?.side_request ?? false
-    exportedNamespace = intent?.namespace ?? intent?.tenant
+  public init(enabled: Bool, minimumTokens: UInt64, intervalTokens: UInt64,
+              maximum: UInt32, budgetBasisPoints: UInt32, budgetBytes: UInt64) {
+    self.enabled = enabled
+    self.minimumTokens = minimumTokens
+    self.intervalTokens = intervalTokens
+    self.maximum = maximum
+    self.budgetBasisPoints = budgetBasisPoints
+    self.budgetBytes = budgetBytes
   }
 }
 
-struct CachePlanView {
-  let operation: UInt32
-  let target: Int
-  let targetGeneration: UInt64
-  let donor: Int?
-  let reuseTokens: Int
-  let anchorTokens: Int
-  let anchorBoundaries: [Int]
-  let decisionUs: UInt64
-  let evictions: [Int]
+public struct CachePlanView {
+  public let operation: UInt32
+  public let target: Int
+  public let targetGeneration: UInt64
+  public let donor: Int?
+  public let reuseTokens: Int
+  public let anchorTokens: Int
+  public let anchorBoundaries: [Int]
+  public let decisionUs: UInt64
+  public let evictions: [Int]
 }
 
-struct CacheCandidateEvaluation {
-  let slot: Int
-  let generation: UInt64
-  let state: UInt32
-  let sharedPrefixTokens: Int
-  let namespaceCompatible: Bool
-  let modelCompatible: Bool
-  let sessionCompatible: Bool
-  let generationCompatible: Bool
-  let busyEligible: Bool
-  let leaseEligible: Bool
-  let materialized: Bool
-  let trimEligible: Bool
-  let copyEligible: Bool
-  let eligible: Bool
-  let selected: Bool
-  let rejection: UInt32
+public struct CacheCandidateEvaluation {
+  public let slot: Int
+  public let generation: UInt64
+  public let state: UInt32
+  public let sharedPrefixTokens: Int
+  public let namespaceCompatible: Bool
+  public let modelCompatible: Bool
+  public let sessionCompatible: Bool
+  public let generationCompatible: Bool
+  public let busyEligible: Bool
+  public let leaseEligible: Bool
+  public let materialized: Bool
+  public let trimEligible: Bool
+  public let copyEligible: Bool
+  public let eligible: Bool
+  public let selected: Bool
+  public let rejection: UInt32
 }
 
-struct CacheSlotMaterialization {
-  let materialized: Bool
-  let writable: Bool
-  let partialSuffixTrim: Bool
-  let copyable: Bool
+public struct CacheSlotMaterialization {
+  public let materialized: Bool
+  public let writable: Bool
+  public let partialSuffixTrim: Bool
+  public let copyable: Bool
 
-  var flags: UInt8 {
+  public init(materialized: Bool, writable: Bool, partialSuffixTrim: Bool,
+              copyable: Bool) {
+    self.materialized = materialized
+    self.writable = writable
+    self.partialSuffixTrim = partialSuffixTrim
+    self.copyable = copyable
+  }
+
+  public var flags: UInt8 {
     (materialized ? UInt8(CC_SLOT_MATERIALIZED) : 0) |
       (writable ? UInt8(CC_SLOT_WRITABLE) : 0) |
       (partialSuffixTrim ? UInt8(CC_SLOT_PARTIAL_SUFFIX_TRIM) : 0) |
@@ -88,22 +74,22 @@ struct CacheSlotMaterialization {
   }
 }
 
-struct CacheDecision {
-  let hit: Bool
-  let operation: UInt32
-  let scope: UInt32
-  let target: Int
-  let donor: Int?
-  let plannedReuseTokens: Int
-  let realizedReuseTokens: Int
-  let decisionUs: UInt64
+public struct CacheDecision {
+  public let hit: Bool
+  public let operation: UInt32
+  public let scope: UInt32
+  public let target: Int
+  public let donor: Int?
+  public let plannedReuseTokens: Int
+  public let realizedReuseTokens: Int
+  public let decisionUs: UInt64
 }
 
-enum CacheCoordinatorError: Error, CustomStringConvertible {
+public enum CacheCoordinatorError: Error, CustomStringConvertible {
   case status(String, Int32)
   case unavailable
 
-  var description: String {
+  public var description: String {
     switch self {
     case .status(let operation, let status): return "\(operation) failed with cache status \(status)"
     case .unavailable: return "cache coordinator unavailable"
@@ -112,11 +98,11 @@ enum CacheCoordinatorError: Error, CustomStringConvertible {
 
 }
 
-final class CachePlan {
+public final class CachePlan {
   private var handle: OpaquePointer?
   private unowned let owner: CacheCoordinator
-  let view: CachePlanView
-  let candidates: [CacheCandidateEvaluation]
+  public let view: CachePlanView
+  public let candidates: [CacheCandidateEvaluation]
 
   init(owner: CacheCoordinator, handle: OpaquePointer) throws {
     self.owner = owner
@@ -183,7 +169,7 @@ final class CachePlan {
     }
   }
 
-  func commit(residentTokens: Int, state: UInt32, physicalBytes: UInt64 = 0) throws -> CacheDecision {
+  public func commit(residentTokens: Int, state: UInt32, physicalBytes: UInt64 = 0) throws -> CacheDecision {
     guard let handle else { throw CacheCoordinatorError.unavailable }
     var raw = cc_decision_t()
     try CacheCoordinator.check("cc_plan_commit", cc_plan_commit(handle, UInt64(residentTokens), state, physicalBytes, &raw))
@@ -201,7 +187,7 @@ final class CachePlan {
     )
   }
 
-  func abort() throws {
+  public func abort() throws {
     guard let handle else { return }
     try CacheCoordinator.check("cc_plan_abort", cc_plan_abort(handle))
     cc_plan_destroy(handle)
@@ -209,18 +195,18 @@ final class CachePlan {
   }
 }
 
-final class CacheCoordinator {
+public final class CacheCoordinator {
   private let handle: OpaquePointer
 
-  init(retention: RetentionConfiguration, capacity: Int,
-       checkpoints: CheckpointConfiguration) throws {
+  public init(retention: RetentionConfiguration, capacity: Int,
+              checkpoints: CoordinatorCheckpointConfiguration) throws {
     guard let handle = cc_manager_create_with_retention(
       UInt32(retention.initialEntries), 16, UInt64(max(capacity, 1)),
       UInt32(retention.hardCeiling), UInt32(retention.hardCeiling),
       retention.physicalByteBudget, retention.highWatermarkBytes,
       retention.lowWatermarkBytes, checkpoints.enabled ? 1 : 0,
-      checkpoints.coordinatorMinimumTokens, checkpoints.coordinatorIntervalTokens,
-      checkpoints.coordinatorMaximum, checkpoints.budgetBasisPoints,
+      checkpoints.minimumTokens, checkpoints.intervalTokens,
+      checkpoints.maximum, checkpoints.budgetBasisPoints,
       checkpoints.budgetBytes) else {
       throw CacheCoordinatorError.unavailable
     }
@@ -233,7 +219,7 @@ final class CacheCoordinator {
     if status != CC_OK { throw CacheCoordinatorError.status(operation, status) }
   }
 
-  func plan(tokens: [Int], identity: CacheIdentity, capabilities: UInt64,
+  public func plan(tokens: [Int], identity: CacheIdentity, capabilities: UInt64,
             slots: [CacheSlotMaterialization],
             stableBoundaries: [Int] = [],
             outputReserve: Int, state: UInt32 = UInt32(CC_SLOT_SESSION),
@@ -262,13 +248,13 @@ final class CacheCoordinator {
     catch { cc_plan_destroy(raw); throw error }
   }
 
-  func slot(_ id: Int) throws -> cc_slot_info_t {
+  public func slot(_ id: Int) throws -> cc_slot_info_t {
     var info = cc_slot_info_t()
     try Self.check("cc_manager_slot", cc_manager_slot(handle, UInt32(id), &info))
     return info
   }
 
-  func registerSlot() throws -> (slot: Int, generation: UInt64) {
+  public func registerSlot() throws -> (slot: Int, generation: UInt64) {
     var slot: UInt32 = 0
     var generation: UInt64 = 0
     try Self.check("cc_manager_register_slot",
@@ -276,14 +262,14 @@ final class CacheCoordinator {
     return (Int(slot), generation)
   }
 
-  func retentionTelemetry() throws -> cc_retention_telemetry_t {
+  public func retentionTelemetry() throws -> cc_retention_telemetry_t {
     var telemetry = cc_retention_telemetry_t()
     try Self.check("cc_manager_retention_telemetry",
       cc_manager_retention_telemetry(handle, &telemetry))
     return telemetry
   }
 
-  func advance(slot: Int, generation: UInt64, tokens: [Int], state: UInt32,
+  public func advance(slot: Int, generation: UInt64, tokens: [Int], state: UInt32,
                busy: Bool, physicalBytes: UInt64) throws -> UInt64 {
     let token32 = tokens.map(Int32.init)
     var next: UInt64 = 0
@@ -295,7 +281,7 @@ final class CacheCoordinator {
     return next
   }
 
-  func confirm(slot: Int, generation: UInt64, tokens: [Int], state: UInt32,
+  public func confirm(slot: Int, generation: UInt64, tokens: [Int], state: UInt32,
                busy: Bool, physicalBytes: UInt64) throws -> UInt64 {
     let token32 = tokens.map(Int32.init)
     var next: UInt64 = 0
@@ -307,28 +293,28 @@ final class CacheCoordinator {
     return next
   }
 
-  func setBusy(slot: Int, generation: UInt64, busy: Bool) throws {
+  public func setBusy(slot: Int, generation: UInt64, busy: Bool) throws {
     try Self.check("cc_manager_set_busy", cc_manager_set_busy(handle, UInt32(slot), generation, busy ? 1 : 0))
   }
 
-  func setAnchorProtected(slot: Int, generation: UInt64, protected: Bool) throws {
+  public func setAnchorProtected(slot: Int, generation: UInt64, protected: Bool) throws {
     try Self.check("cc_manager_set_anchor_protected",
       cc_manager_set_anchor_protected(handle, UInt32(slot), generation, protected ? 1 : 0))
   }
 
-  func invalidate(slot: Int, generation: UInt64) throws -> UInt64 {
+  public func invalidate(slot: Int, generation: UInt64) throws -> UInt64 {
     var next: UInt64 = 0
     try Self.check("cc_manager_invalidate", cc_manager_invalidate(handle, UInt32(slot), generation, &next))
     return next
   }
 
-  func reset() throws {
+  public func reset() throws {
     var epoch: UInt64 = 0
     try Self.check("cc_manager_reset", cc_manager_reset(handle, &epoch))
   }
 }
 
-func cacheScopeName(_ scope: UInt32) -> String {
+public func cacheScopeName(_ scope: UInt32) -> String {
   switch scope {
   case UInt32(CC_SCOPE_SESSION): return "session"
   case UInt32(CC_SCOPE_AGENT): return "agent"

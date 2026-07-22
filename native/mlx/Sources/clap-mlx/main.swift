@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import ClapCacheBridge
 import ClapCachePolicy
+import ClapMLXCache
 import ClapMLXModel
 import MLX
 import MLXLLM
@@ -49,23 +50,7 @@ func main() async {
 
     // Physical KV slots mirror Rust coordinator state. The worker executes
     // authorized operations but does not independently choose cache policy.
-    final class KVSlot {
-      var caches: [KVCache] = []
-      var tokens: [Int] = []
-      var lastUsed: UInt64 = 0
-      var busy = false
-      // Anchor slots hold an exact-state snapshot of a shared prefix (e.g.
-      // the org-wide system prompt) taken before rotating/sliding-window
-      // caches rotate it away. They are only used via copy() (whole-copy
-      // branching) and never extended in place.
-      var isAnchor = false
-      var anchorScope: String? = nil
-      // A request-local end-of-prompt snapshot restored after decode. Unlike
-      // a dedicated prefix anchor, this remains the session's normal slot.
-      var isPromptBoundary = false
-      var coordinatorGeneration: UInt64 = 0
-      var cacheIdentity: PhysicalCacheIdentity? = nil
-    }
+    typealias KVSlot = CacheSlot<KVCache>
     var retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
       hardCeiling: retentionConfig.hardCeiling)
     var kvSlots: [KVSlot] {
@@ -93,13 +78,7 @@ func main() async {
     }
 
     func clearPhysicalSlot(_ slot: KVSlot) {
-      slot.caches = []
-      slot.tokens = []
-      slot.isAnchor = false
-      slot.isPromptBoundary = false
-      slot.anchorScope = nil
-      slot.cacheIdentity = nil
-      slot.coordinatorGeneration = 0
+      slot.clear()
     }
 
     func physicalCacheBytes(_ caches: [KVCache]) -> UInt64 {
@@ -153,7 +132,8 @@ func main() async {
         hardCeiling: retentionConfig.hardCeiling)
       do {
         cacheCoordinator = try CacheCoordinator(retention: retentionConfig,
-          capacity: Int.max / 4, checkpoints: configuration.checkpoints)
+          capacity: Int.max / 4,
+          checkpoints: configuration.checkpoints.coordinatorConfiguration)
         for slotID in 0..<retentionConfig.initialEntries {
           let slot = KVSlot()
           slot.coordinatorGeneration = try cacheCoordinator?.slot(slotID).generation ?? 0
@@ -546,7 +526,10 @@ func main() async {
         )
         let outputReserve = maxTokens
 
-        let cacheIdentity = CacheIdentity(domain: cacheDomain, requestId: id, intent: control.cache)
+        let cacheIdentity = CacheIdentity(domain: cacheDomain,
+          input: control.cache?.identityInput ?? CacheIdentityInput(namespace: nil, tenant: nil,
+            project: nil, harness: nil, agent: nil, session: nil, priority: nil,
+            sideRequest: false))
         let physicalIdentity = PhysicalCacheIdentity(fingerprint: cacheIdentity.fingerprint)
         let automaticProposals = configuration.checkpoints.offsets(promptTokens: promptTokens.count)
         let automaticDeduped = automaticProposals.filter { checkpoint in
