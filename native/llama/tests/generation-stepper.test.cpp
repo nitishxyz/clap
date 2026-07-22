@@ -136,6 +136,26 @@ int main() {
     assert(events[0].type == clap::llama::GenerationEvent::Type::Token);
     assert(events[0].text == "hello");
     assert(events[1].type == clap::llama::GenerationEvent::Type::Complete);
+    assert(events[1].completion);
+    assert(events[1].completion->usage.completion_tokens == 1);
+    assert(events[1].completion->visible_tail.empty());
     assert(prefill.finish_reason == "stop");
+    assert(prefill.done);
+  }
+
+  {
+    FakeBackend backend;
+    backend.sampled = {13};
+    backend.pieces[13] = "hel";
+    auto prefill = request({1}, 0);
+    prefill.params.max_tokens = 1;
+    prefill.params.stops = {"hello"};
+    prefill.stop_buffer.reset(prefill.params.stops);
+    clap::llama::GenerationStepper stepper(backend);
+    const auto events = stepper.step({&prefill}, 1, true);
+    assert(events.size() == 1);
+    assert(events[0].completion);
+    assert(events[0].completion->visible_tail == "hel");
+    assert(events[0].completion->finish_reason == "length");
   }
 }

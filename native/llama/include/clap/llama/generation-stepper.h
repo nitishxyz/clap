@@ -5,7 +5,9 @@
 #include "clap/llama/request-state.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,12 +54,19 @@ struct GenerationEvent {
   bool clear = true;
   std::vector<llama_token> tokens;
   std::vector<uint32_t> eviction_slots;
+  std::optional<RequestCompletion> completion;
+  std::optional<RequestFailure> failure;
 };
 
 class GenerationStepper {
  public:
-  GenerationStepper(GenerationBackend& backend, CacheExecutor* cache_executor = nullptr);
-  GenerationStepper(ModelRuntime& runtime, CacheExecutor* cache_executor = nullptr);
+  using Fingerprint = std::function<std::string(
+      const std::vector<llama_token>&, std::size_t)>;
+
+  GenerationStepper(GenerationBackend& backend, CacheExecutor* cache_executor = nullptr,
+                    Fingerprint fingerprint = {});
+  GenerationStepper(ModelRuntime& runtime, CacheExecutor* cache_executor = nullptr,
+                    Fingerprint fingerprint = {});
   ~GenerationStepper();
 
   GenerationStepper(const GenerationStepper&) = delete;
@@ -81,6 +90,7 @@ class GenerationStepper {
   std::unique_ptr<GenerationBackend> owned_backend_;
   GenerationBackend* backend_ = nullptr;
   CacheExecutor* cache_executor_ = nullptr;
+  Fingerprint fingerprint_;
 };
 
 }  // namespace clap::llama

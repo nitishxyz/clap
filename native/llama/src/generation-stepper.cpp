@@ -61,12 +61,16 @@ GenerationEvent event(GenerationEvent::Type type, ActiveRequest& request) {
 
 }  // namespace
 
-GenerationStepper::GenerationStepper(GenerationBackend& backend, CacheExecutor* cache_executor)
-    : backend_(&backend), cache_executor_(cache_executor) {}
+GenerationStepper::GenerationStepper(GenerationBackend& backend, CacheExecutor* cache_executor,
+                                     Fingerprint fingerprint)
+    : backend_(&backend), cache_executor_(cache_executor),
+      fingerprint_(std::move(fingerprint)) {}
 
-GenerationStepper::GenerationStepper(ModelRuntime& runtime, CacheExecutor* cache_executor)
+GenerationStepper::GenerationStepper(ModelRuntime& runtime, CacheExecutor* cache_executor,
+                                     Fingerprint fingerprint)
     : owned_backend_(std::make_unique<LlamaGenerationBackend>(runtime)),
-      backend_(owned_backend_.get()), cache_executor_(cache_executor) {}
+      backend_(owned_backend_.get()), cache_executor_(cache_executor),
+      fingerprint_(std::move(fingerprint)) {}
 
 GenerationStepper::~GenerationStepper() = default;
 
@@ -100,13 +104,11 @@ void GenerationStepper::add_contribution(std::vector<DecodeContribution>& batch,
 void GenerationStepper::process_sampled(ActiveRequest& request, llama_token token,
                                         std::vector<GenerationEvent>& events) {
   if (backend_->is_eog(token)) {
-    const std::string visible = request.stop_buffer.finish();
-    if (!visible.empty()) {
-      auto value = event(GenerationEvent::Type::Token, request);
-      value.text = visible;
+    auto value = event(GenerationEvent::Type::Complete, request);
+    value.completion = request.complete(true, fingerprint_);
+    if (value.completion) {
       events.push_back(std::move(value));
     }
-    events.push_back(event(GenerationEvent::Type::Complete, request));
     return;
   }
   request.completion_tokens += 1;
@@ -120,20 +122,18 @@ void GenerationStepper::process_sampled(ActiveRequest& request, llama_token toke
     }
     if (result.stop_complete) {
       request.finish_reason = "stop";
-      events.push_back(event(GenerationEvent::Type::Complete, request));
+      auto value = event(GenerationEvent::Type::Complete, request);
+      value.completion = request.complete(true, fingerprint_);
+      if (value.completion) events.push_back(std::move(value));
       return;
     }
   }
   if (request.completion_tokens >= request.params.max_tokens ||
       request.n_pos + 1 >= backend_->context_size()) {
     request.finish_reason = "length";
-    const std::string visible = request.stop_buffer.finish();
-    if (!visible.empty()) {
-      auto value = event(GenerationEvent::Type::Token, request);
-      value.text = visible;
-      events.push_back(std::move(value));
-    }
-    events.push_back(event(GenerationEvent::Type::Complete, request));
+    auto value = event(GenerationEvent::Type::Complete, request);
+    value.completion = request.complete(true, fingerprint_);
+    if (value.completion) events.push_back(std::move(value));
     return;
   }
   request.pending_token = token;
@@ -190,15 +190,10 @@ void GenerationStepper::post_decode(ActiveRequest& request,
         } catch (const std::exception& error) {
           request.cache_fallback = "coordinator_advance_failed";
           events.push_back(std::move(append));
-          auto reset = event(GenerationEvent::Type::CacheResetSlot, request);
-          reset.slot = static_cast<uint32_t>(request.seq);
-          reset.clear = false;
-          events.push_back(std::move(reset));
           auto failure = event(GenerationEvent::Type::Failure, request);
-          failure.text = "cache coordinator advance failed closed";
-          failure.code = "cache_coordinator_error";
-          events.push_back(std::move(failure));
-          request.mark_terminal(ActiveRequest::TerminalState::Failed);
+          failure.failure = request.fail(
+              "cache coordinator advance failed closed", "cache_coordinator_error");
+          if (failure.failure) events.push_back(std::move(failure));
           fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
           return;
         }
@@ -237,15 +232,10 @@ void GenerationStepper::post_decode(ActiveRequest& request,
       } catch (const std::exception& error) {
         request.cache_fallback = "coordinator_advance_failed";
         events.push_back(std::move(append));
-        auto reset = event(GenerationEvent::Type::CacheResetSlot, request);
-        reset.slot = static_cast<uint32_t>(request.seq);
-        reset.clear = false;
-        events.push_back(std::move(reset));
         auto failure = event(GenerationEvent::Type::Failure, request);
-        failure.text = "cache coordinator advance failed closed";
-        failure.code = "cache_coordinator_error";
-        events.push_back(std::move(failure));
-        request.mark_terminal(ActiveRequest::TerminalState::Failed);
+        failure.failure = request.fail(
+            "cache coordinator advance failed closed", "cache_coordinator_error");
+        if (failure.failure) events.push_back(std::move(failure));
         fprintf(stderr, "clap-llama: cache metadata advance failed closed: %s\n", error.what());
         return;
       }
@@ -287,11 +277,12 @@ void GenerationStepper::decode_failure(ActiveRequest& request, bool sole_active,
     return;
   }
   auto failure = event(GenerationEvent::Type::Failure, request);
-  failure.text = "llama_decode failed; this often indicates llama.cpp GPU memory pressure. "
+  failure.failure = request.fail(
+      "llama_decode failed; this often indicates llama.cpp GPU memory pressure. "
       "Check the llama worker log. Try a smaller GGUF quant such as Q4_K_M, reduce "
       "CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, set CLAP_LLAMA_GPU_LAYERS "
-      "to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.";
-  events.push_back(std::move(failure));
+      "to a lower value, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.");
+  if (failure.failure) events.push_back(std::move(failure));
 }
 
 void GenerationStepper::isolated(ActiveRequest& request, bool sole_active,

@@ -7,6 +7,7 @@ const violations: string[] = [];
 const cppPhysical = /\b(?:llama_memory_seq_cp|llama_memory_seq_rm|llama_memory_clear)\s*\(/g;
 const cppCoordinator = /(?:\bcoordinator_?|\.coordinator)\s*(?:->|\.)\s*(?:plan|advance|confirm|invalidate|reset|set_busy|set_anchor_protected|register_slot|commit|abort)\s*\(/g;
 const cppDirectCoordinator = /\bclap_cache_(?:plan|advance|confirm|invalidate|reset|set_busy|set_anchor_protected|register_slot|commit|abort)\s*\(/g;
+const cppGeneration = /\b(?:llama_decode|llama_sampler_sample|llama_token_to_piece)\s*\(/g;
 
 for await (const path of new Bun.Glob("native/llama/**/*.{cpp,cc,h,hpp}").scan({ cwd: root })) {
   if (isCppTest(path)) continue;
@@ -17,6 +18,9 @@ for await (const path of new Bun.Glob("native/llama/**/*.{cpp,cc,h,hpp}").scan({
   }
   if (path !== "native/llama/src/cache-executor.cpp" && path !== "native/llama/cache-adapter.h") {
     reportMatches(path, text, cppDirectCoordinator, "direct cache coordinator FFI mutation");
+  }
+  if (path !== "native/llama/src/generation-stepper.cpp") {
+    reportMatches(path, text, cppGeneration, "direct llama generation operation");
   }
 }
 

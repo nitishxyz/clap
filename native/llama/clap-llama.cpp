@@ -203,95 +203,83 @@ std::string token_fingerprint(const std::vector<Token>& tokens, std::size_t coun
 }
 
 
-void finalize(LoadedLlama& loaded, ActiveRequest& req) {
-  req.sampler.reset();
-  if (req.cache_lease) {
-    loaded.slots[static_cast<std::size_t>(req.seq)].busy = false;
-    req.cache_lease.release();
+void emit_completion(LoadedLlama& loaded, const clap::llama::RequestCompletion& completion) {
+  if (completion.released_slot >= 0) {
+    loaded.slots[static_cast<std::size_t>(completion.released_slot)].busy = false;
   }
-  if (!req.mark_terminal(ActiveRequest::TerminalState::Completed)) return;
+  const auto& facts = completion.cache;
   json cache{
-    {"hit", req.cached_prompt_tokens > 0},
-    {"reused_tokens", req.cached_prompt_tokens},
-    {"reuse_kind", req.cache_reuse_kind.empty() ? json(nullptr) : json(req.cache_reuse_kind)},
-    {"reuse_scope", req.cache_reuse_scope.empty() ? json(nullptr) : json(req.cache_reuse_scope)},
-    {"namespace", req.cache_namespace.empty() ? json(nullptr) : json(req.cache_namespace)},
-    {"donor_slot", req.cache_donor_slot < 0 ? json(nullptr) : json(req.cache_donor_slot)},
-    {"donor_generation", req.cache_donor_slot < 0 ? json(nullptr) : json(req.cache_donor_generation)},
-    {"target_slot", static_cast<int>(req.seq)},
-    {"target_generation", req.cache_target_generation},
-    {"miss_reason", req.cached_prompt_tokens > 0 ? json(nullptr) : json("no_shared_prefix")},
-    {"candidates", req.cache_candidates},
-    {"prompt_token_hash", req.prompt_token_hash},
-    {"prompt_token_count", req.prompt_token_count},
-    {"evicted_slots", req.cache_evicted_slots},
-    {"decision_us", req.cache_decision_us},
-    {"planned_reuse_tokens", req.cache_planned_reuse_tokens},
-    {"realized_reuse_tokens", req.cache_realized_reuse_tokens},
-    {"side_request", req.cache_side_request},
-    {"fallback", req.cache_fallback.empty() ? json(nullptr) : json(req.cache_fallback)},
-    {"slot", static_cast<int>(req.seq)},
+    {"hit", facts.hit},
+    {"reused_tokens", facts.reused_tokens},
+    {"reuse_kind", facts.reuse_kind ? json(*facts.reuse_kind) : json(nullptr)},
+    {"reuse_scope", facts.reuse_scope ? json(*facts.reuse_scope) : json(nullptr)},
+    {"namespace", facts.name_space ? json(*facts.name_space) : json(nullptr)},
+    {"donor_slot", facts.donor_slot ? json(*facts.donor_slot) : json(nullptr)},
+    {"donor_generation", facts.donor_generation ? json(*facts.donor_generation) : json(nullptr)},
+    {"target_slot", facts.target_slot},
+    {"target_generation", facts.target_generation},
+    {"miss_reason", facts.miss_reason ? json(*facts.miss_reason) : json(nullptr)},
+    {"candidates", facts.candidates},
+    {"prompt_token_hash", facts.prompt_token_hash},
+    {"prompt_token_count", facts.prompt_token_count},
+    {"evicted_slots", facts.evicted_slots},
+    {"decision_us", facts.decision_us},
+    {"planned_reuse_tokens", facts.planned_reuse_tokens},
+    {"realized_reuse_tokens", facts.realized_reuse_tokens},
+    {"side_request", facts.side_request},
+    {"fallback", facts.fallback ? json(*facts.fallback) : json(nullptr)},
+    {"slot", facts.slot},
   };
-  if (req.stable_boundary.available()) {
-    cache["stable_boundary_token_hash"] = req.stable_boundary.token_hash;
-    cache["stable_boundary_token_count"] = req.stable_boundary.token_count;
-    cache["stable_boundary_kind"] = req.stable_boundary.kind;
+  if (facts.stable_boundary_token_hash) {
+    cache["stable_boundary_token_hash"] = *facts.stable_boundary_token_hash;
+    cache["stable_boundary_token_count"] = *facts.stable_boundary_token_count;
+    cache["stable_boundary_kind"] = *facts.stable_boundary_kind;
   }
   cache["stable_boundaries"] = json::array();
-  for (const auto& resolved : req.resolved_boundaries) {
-    const auto boundary = resolved.token_count;
-    const bool available = (resolved.status == "resolved" || resolved.status == "authorized") &&
-        boundary > 0;
+  for (const auto& boundary : facts.stable_boundaries) {
     cache["stable_boundaries"].push_back(json{
-      {"token_hash", available ? json(token_fingerprint(req.full_prompt_tokens, boundary)) : json(nullptr)},
-      {"token_count", available ? json(boundary) : json(nullptr)},
-      {"kind", resolved.kind},
-      {"label", !resolved.label.empty() ? json(resolved.label) : json(nullptr)},
-      {"requested", resolved.requested},
-      {"status", resolved.status},
-      {"skip_reason", !resolved.skip_reason.empty() ? json(resolved.skip_reason) : json(nullptr)},
-      {"materialized", available ? json(std::find(req.materialized_boundaries.begin(),
-          req.materialized_boundaries.end(), boundary) != req.materialized_boundaries.end()) : json(nullptr)},
+      {"token_hash", boundary.token_hash ? json(*boundary.token_hash) : json(nullptr)},
+      {"token_count", boundary.token_count ? json(*boundary.token_count) : json(nullptr)},
+      {"kind", boundary.kind},
+      {"label", boundary.label ? json(*boundary.label) : json(nullptr)},
+      {"requested", boundary.requested},
+      {"status", boundary.status},
+      {"skip_reason", boundary.skip_reason ? json(*boundary.skip_reason) : json(nullptr)},
+      {"materialized", boundary.materialized ? json(*boundary.materialized) : json(nullptr)},
     });
   }
-  emit(req.id, json{
-    {"done", true},
-    {"finish_reason", req.finish_reason},
-    {"cancelled", req.cancelled},
-    {"usage", json{
-      {"prompt_tokens", req.prompt_token_count},
-      {"completion_tokens", req.completion_tokens},
-    }},
+  if (!completion.visible_tail.empty()) emit(completion.id, json{{"token", completion.visible_tail}});
+  emit(completion.id, json{
+    {"done", true}, {"finish_reason", completion.finish_reason},
+    {"cancelled", completion.cancelled},
+    {"usage", {{"prompt_tokens", completion.usage.prompt_tokens},
+               {"completion_tokens", completion.usage.completion_tokens}}},
     {"cache", std::move(cache)},
   });
 }
 
-void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& message) {
-  req.sampler.reset();
-  if (req.cache_lease) {
-    auto& slot = loaded.slots[static_cast<std::size_t>(req.seq)];
+void emit_failure(LoadedLlama& loaded, const clap::llama::RequestFailure& failure) {
+  if (failure.invalidated_slot >= 0) {
+    auto& slot = loaded.slots[static_cast<std::size_t>(failure.invalidated_slot)];
     slot.busy = false;
     slot.tokens.clear();
-    if (req.cache_lease.generation() != 0) {
-      try {
-        slot.coordinator_generation = req.cache_lease.invalidate_and_clear();
-      } catch (const std::exception& error) {
-        fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n", error.what());
-      }
-    }
-    req.cache_lease.release();
+    slot.coordinator_generation = failure.generation;
   }
-  req.mark_terminal(ActiveRequest::TerminalState::Failed);
-  emit_error(req.id, message);
+  if (!failure.invalidation_error.empty()) {
+    fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n",
+            failure.invalidation_error.c_str());
+  }
+  if (failure.code.empty()) emit_error(failure.id, failure.message);
+  else emit(failure.id, json{{"error", failure.message}, {"code", failure.code}});
 }
-
-// Handles one sampled token: EOS, stop sequences, budget checks, streaming
-// emission. Finalizes the request when generation ends.
 void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& active) {
   for (auto& req : active) {
     if (!req->done && req->cancelled) {
       req->finish_reason = "cancel";
-      finalize(loaded, *req);
+      auto completion = req->complete(false, [](const auto& tokens, std::size_t count) {
+        return token_fingerprint(tokens, count);
+      });
+      if (completion) emit_completion(loaded, *completion);
     }
   }
 
@@ -312,7 +300,10 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
     ordered.push_back(active[index].get());
   }
 
-  clap::llama::GenerationStepper stepper(loaded.runtime, loaded.cache_executor.get());
+  clap::llama::GenerationStepper stepper(
+      loaded.runtime, loaded.cache_executor.get(), [](const auto& tokens, std::size_t count) {
+        return token_fingerprint(tokens, count);
+      });
   const auto events = stepper.step(ordered,
       static_cast<int32_t>(llama_n_batch(loaded.runtime.context())), active.size() == 1);
   for (const auto& event : events) {
@@ -325,11 +316,10 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
         emit(req.id, json{{"prefill", {{"done", event.done}, {"total", event.total}}}});
         break;
       case clap::llama::GenerationEvent::Type::Complete:
-        finalize(loaded, req);
+        if (event.completion) emit_completion(loaded, *event.completion);
         break;
       case clap::llama::GenerationEvent::Type::Failure:
-        if (event.code.empty()) fail_request(loaded, req, event.text);
-        else emit(req.id, json{{"error", event.text}, {"code", event.code}});
+        if (event.failure) emit_failure(loaded, *event.failure);
         break;
       case clap::llama::GenerationEvent::Type::CacheAppend: {
         auto& slot = loaded.slots[event.slot];
@@ -564,7 +554,10 @@ int main() {
       if (!req->done) {
         req->finish_reason = "cancel";
         req->cancelled = true;
-        finalize(loaded, *req);
+        auto completion = req->complete(false, [](const auto& tokens, std::size_t count) {
+          return token_fingerprint(tokens, count);
+        });
+        if (completion) emit_completion(loaded, *completion);
       }
     }
     unload(loaded);

@@ -8,12 +8,76 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 namespace clap::llama {
+
+struct Usage {
+  int prompt_tokens = 0;
+  int completion_tokens = 0;
+};
+
+struct StableBoundaryCompletionFact {
+  std::optional<std::string> token_hash;
+  std::optional<std::size_t> token_count;
+  std::string kind;
+  std::optional<std::string> label;
+  bool requested = false;
+  std::string status;
+  std::optional<std::string> skip_reason;
+  std::optional<bool> materialized;
+};
+
+struct CacheCompletionFacts {
+  bool hit = false;
+  int reused_tokens = 0;
+  std::optional<std::string> reuse_kind;
+  std::optional<std::string> reuse_scope;
+  std::optional<std::string> name_space;
+  std::optional<int> donor_slot;
+  std::optional<uint64_t> donor_generation;
+  int target_slot = 0;
+  uint64_t target_generation = 0;
+  std::optional<std::string> miss_reason;
+  nlohmann::json candidates = nlohmann::json::array();
+  std::string prompt_token_hash;
+  int prompt_token_count = 0;
+  std::vector<uint32_t> evicted_slots;
+  uint64_t decision_us = 0;
+  uint64_t planned_reuse_tokens = 0;
+  uint64_t realized_reuse_tokens = 0;
+  bool side_request = false;
+  std::optional<std::string> fallback;
+  int slot = 0;
+  std::optional<std::string> stable_boundary_token_hash;
+  std::optional<std::size_t> stable_boundary_token_count;
+  std::optional<std::string> stable_boundary_kind;
+  std::vector<StableBoundaryCompletionFact> stable_boundaries;
+};
+
+struct RequestCompletion {
+  std::string id;
+  std::string finish_reason;
+  bool cancelled = false;
+  std::string visible_tail;
+  Usage usage;
+  CacheCompletionFacts cache;
+  int released_slot = -1;
+};
+
+struct RequestFailure {
+  std::string id;
+  std::string message;
+  std::string code;
+  int invalidated_slot = -1;
+  uint64_t generation = 0;
+  std::string invalidation_error;
+};
 
 class SamplerOwner {
  public:
@@ -88,6 +152,10 @@ struct ActiveRequest : PreparedRequest {
 
   bool mark_terminal(TerminalState state) noexcept;
   bool terminal() const noexcept { return terminal_state != TerminalState::Active; }
+  std::optional<RequestCompletion> complete(
+      bool flush_tail,
+      const std::function<std::string(const std::vector<llama_token>&, std::size_t)>& fingerprint);
+  std::optional<RequestFailure> fail(std::string message, std::string code = {});
 
   SamplerOwner sampler;
   llama_seq_id seq = 0;
