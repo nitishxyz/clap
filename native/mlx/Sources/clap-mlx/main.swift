@@ -442,195 +442,76 @@ func main() async {
       }
     }
 
-    @discardableResult
-    func snapshotAnchor(_ req: ActiveRequest, at plant: Int, reason: String) -> Bool {
-      guard let coordinator = cacheCoordinator else { return false }
-      let structural = req.resolvedBoundaries[plant].map {
-        $0.kind != "prompt" && $0.kind != "automatic_token"
-      } ?? false
-      let result = AnchorManager.materialize(coordinator: coordinator,
-        registry: &retainedRegistry, hardCeiling: retentionConfig.hardCeiling,
-        boundary: Array(req.promptTokens.prefix(plant)), sourceCaches: req.caches,
-        sourceFedTokens: req.fedTokens, identity: req.cacheIdentity,
-        scope: req.anchorPlantScopes[plant] ?? req.cacheIdentity.scope,
-        structural: structural, useCounter: &kvUseCounter, operations: cacheOperations())
-      req.cacheMaterializeMs += result.materializeMs
-      if result.evictedVictims {
-        lastEvictionReason = retentionConfig.physicalByteBudget > 0
-          ? "byte_pressure" : "retained_capacity"
-      }
-      if result.materialized {
-        debugLog("planted \(reason) anchor: \(plant) tokens (exact-state snapshot for non-rewindable caches)")
-      }
-      return result.materialized
-    }
-
-    func plantAnchor(_ req: ActiveRequest) {
-      for plant in req.anchorPlantAt where plant == req.fedTokens.count && !req.anchorPlanted.contains(plant) {
-        req.anchorPlanted.insert(plant)
-        if snapshotAnchor(req, at: plant, reason: "prefix") {
-          req.materializedAnchors.insert(plant)
+    func generationBackend(_ lm: any LanguageModel) -> GenerationBackend<KVCache,
+      TokenIterator, NaiveStreamingDetokenizer, GenerateParameters> {
+      GenerationBackend(prefill: { tokens, caches, parameters in
+        try TokenIterator(input: LMInput(tokens: MLXArray(tokens)), model: lm,
+          cache: caches, parameters: parameters)
+      }, nextToken: { iterator in
+        iterator.next()
+      }, appendToken: { detokenizer, token in
+        detokenizer.append(token: token)
+      }, nextText: { detokenizer in
+        detokenizer.next()
+      }, appendAndAdvance: { slotIndex, slot, caches, fedTokens, tokens in
+        CacheExecutor.appendAndAdvance(coordinator: cacheCoordinator,
+          slotIndex: slotIndex, slot: slot, caches: caches,
+          fedTokens: &fedTokens, tokens: tokens, operations: cacheOperations())
+      }, plantAnchor: { plant, caches, fedTokens, identity, scope, structural in
+        guard let coordinator = cacheCoordinator else {
+          return AnchorResult(materialized: false, evictedVictims: false, materializeMs: 0)
         }
-      }
-    }
-
-    func captureContinuationBoundary(_ req: ActiveRequest) {
-      guard let boundary = req.continuationBoundary else { return }
-      req.cacheMaterializeMs += AnchorManager.captureContinuation(
-        snapshots: req.cacheSnapshots, boundary: boundary, caches: req.caches,
-        fedTokens: req.fedTokens, operations: cacheOperations())
-    }
-
-    func advanceCoordinator(_ req: ActiveRequest, tokens: [Int]) {
-      CacheExecutor.appendAndAdvance(coordinator: cacheCoordinator,
-        slotIndex: req.slotIndex, slot: req.slot, caches: req.caches,
-        fedTokens: &req.fedTokens, tokens: tokens, operations: cacheOperations())
+        let result = AnchorManager.materialize(coordinator: coordinator,
+          registry: &retainedRegistry, hardCeiling: retentionConfig.hardCeiling,
+          boundary: fedTokens, sourceCaches: caches, sourceFedTokens: fedTokens,
+          identity: identity, scope: scope, structural: structural,
+          useCounter: &kvUseCounter, operations: cacheOperations())
+        if result.evictedVictims {
+          lastEvictionReason = retentionConfig.physicalByteBudget > 0
+            ? "byte_pressure" : "retained_capacity"
+        }
+        if result.materialized {
+          debugLog("planted prefix anchor: \(plant) tokens (exact-state snapshot for non-rewindable caches)")
+        }
+        return result
+      }, captureContinuation: { snapshots, boundary, caches, fedTokens in
+        AnchorManager.captureContinuation(snapshots: snapshots, boundary: boundary,
+          caches: caches, fedTokens: fedTokens, operations: cacheOperations())
+      }, capturePromptBoundary: { snapshots, promptTokens, caches, fedTokens in
+        let duration = AnchorManager.capturePromptBoundary(snapshots: snapshots,
+          promptTokens: promptTokens, caches: caches, fedTokens: fedTokens,
+          operations: cacheOperations())
+        if duration > 0 {
+          debugLog("captured prompt-boundary anchor: \(promptTokens.count) tokens")
+        }
+        return duration
+      }, now: {
+        DispatchTime.now().uptimeNanoseconds
+      })
     }
 
     func step(_ req: ActiveRequest, prefillQuantum: Int) {
-      guard !req.cancelled, !req.completed, !req.failed,
-            let lm = modelRuntime.languageModel else { return }
-      let stepStartedNs = DispatchTime.now().uptimeNanoseconds
-      req.schedulerWaitMs += Double(stepStartedNs - req.lastStepFinishedNs) / 1_000_000
-      defer { req.lastStepFinishedNs = DispatchTime.now().uptimeNanoseconds }
-      do {
-        if req.iterator == nil {
-          // Split chunks at every Rust-authorized boundary so physical state
-          // exists at each exact nested prefix.
-          var chunkEnd = min(req.pos + prefillQuantum, req.suffix.count)
-          if let plant = req.anchorPlantAt.first(where: { !req.anchorPlanted.contains($0) && $0 > req.reusedTokens + req.pos }) {
-            let rel = plant - req.reusedTokens
-            if req.pos < rel && rel < chunkEnd { chunkEnd = rel }
-          }
-          if let boundary = req.continuationBoundary, req.cacheSnapshots.continuation == nil {
-            let rel = boundary - req.reusedTokens
-            if req.pos < rel && rel < chunkEnd { chunkEnd = rel }
-          }
-          if chunkEnd < req.suffix.count {
-            // Creating the iterator prefills the chunk into the shared cache;
-            // the sampled token is discarded.
-            let chunk = Array(req.suffix[req.pos ..< chunkEnd])
-            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
-            _ = try TokenIterator(input: LMInput(tokens: MLXArray(chunk)), model: lm, cache: req.caches, parameters: req.parameters)
-            req.prefillMs += Double(DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000
-            req.prefillTokens += chunk.count
-            req.prefillChunks += 1
-            req.pos = chunkEnd
-            advanceCoordinator(req, tokens: chunk)
-            emit(id: req.id, prefill: WorkerPrefill(done: req.reusedTokens + req.pos, total: req.promptTokens.count))
-            plantAnchor(req)
-            if let boundary = req.continuationBoundary, boundary - req.reusedTokens == req.pos {
-              captureContinuationBoundary(req)
-            }
-          } else {
-            plantAnchor(req)
-            if let boundary = req.continuationBoundary, boundary - req.reusedTokens == req.pos {
-              captureContinuationBoundary(req)
-            }
-            let tail = Array(req.suffix.dropFirst(req.pos))
-            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
-            req.iterator = try TokenIterator(input: LMInput(tokens: MLXArray(tail)), model: lm, cache: req.caches, parameters: req.parameters)
-            req.prefillMs += Double(DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000
-            req.prefillTokens += tail.count
-            req.prefillChunks += 1
-            req.pos = req.suffix.count
-            advanceCoordinator(req, tokens: tail)
-            // Decode mutates recurrent cache state irreversibly. Preserve the
-            // exact end-of-prompt state in this request and restore it into
-            // the same slot at finalize, so even a one-slot worker can reuse
-            // it for the next tool-result continuation.
-            if req.cacheSnapshots.continuation == nil {
-              let snapshotMs = AnchorManager.capturePromptBoundary(
-                snapshots: req.cacheSnapshots, promptTokens: req.promptTokens,
-                caches: req.caches, fedTokens: req.fedTokens, operations: cacheOperations())
-              req.cacheMaterializeMs += snapshotMs
-              if snapshotMs > 0 {
-                debugLog("captured prompt-boundary anchor in slot \(kvSlots.firstIndex(where: { $0 === req.slot }) ?? -1): \(req.promptTokens.count) tokens")
-              }
-            }
-          }
-          return
+      guard let lm = modelRuntime.languageModel else { return }
+      let events = GenerationStepper.step(req, prefillQuantum: prefillQuantum,
+        decodeLimit: decodeStepsPerPass, eosTokenIds: modelRuntime.eosTokenIds,
+        backend: generationBackend(lm))
+      for event in events {
+        switch event {
+        case .prefill(let done, let total):
+          emit(id: req.id, prefill: WorkerPrefill(done: done, total: total))
+        case .token(let token):
+          emit(id: req.id, token: token)
+        case .content(let content):
+          emit(id: req.id, content: content)
+        case .error(let error):
+          emit(id: req.id, error: error)
+        case .completed:
+          break
         }
-        guard var it = req.iterator else { return }
-        var steps = 0
-        while steps < decodeStepsPerPass {
-          let firstDecodeStartedNs = req.generatedCount == 0
-            ? DispatchTime.now().uptimeNanoseconds : 0
-          guard let token = it.next() else {
-            req.completed = true
-            break
-          }
-          if firstDecodeStartedNs != 0 && req.firstDecodeMs == 0 {
-            req.firstDecodeMs = Double(DispatchTime.now().uptimeNanoseconds - firstDecodeStartedNs) / 1_000_000
-          }
-          steps += 1
-          req.sampledTokens.append(token)
-          if modelRuntime.eosTokenIds.contains(token) {
-            if configuration.debugPrompt {
-              debugLog("eos token \(token) (\(modelRuntime.tokenizer?.convertIdToToken(token) ?? "?")) after \(req.generatedCount) tokens; eos set: \(modelRuntime.eosTokenIds)")
-            }
-            req.finishReason = "stop"
-            req.completed = true
-            break
-          }
-          req.generatedCount += 1
-          req.detokenizer.append(token: token)
-          if let chunk = req.detokenizer.next(), !chunk.isEmpty {
-            req.collected += chunk
-            // Stop sequences: scan collected text; on match truncate and
-            // finish. While streaming, hold back enough of the tail that a
-            // stop split across tokens is never emitted.
-            if !req.stops.isEmpty {
-              let scan = StopSequencePolicy.scan(
-                collected: req.collected, appendedCount: chunk.count,
-                stops: req.stops, emittedCount: req.emitted, holdback: req.holdback)
-              if let matchOffset = scan.matchOffset {
-                req.collected = String(req.collected.prefix(matchOffset))
-                if req.streaming && req.emitted < req.collected.count {
-                  emit(id: req.id, token: String(req.collected.dropFirst(req.emitted)))
-                  req.emitted = req.collected.count
-                }
-                req.finishReason = "stop"
-                req.completed = true
-                break
-              }
-            }
-            if req.streaming {
-              if req.stops.isEmpty {
-                if req.firstEmitMs == 0 {
-                  req.firstEmitMs = Double(DispatchTime.now().uptimeNanoseconds - req.admittedNs) / 1_000_000
-                }
-                emit(id: req.id, token: chunk)
-                req.emitted = req.collected.count
-              } else {
-                let safe = StopSequencePolicy.scan(
-                  collected: req.collected, appendedCount: chunk.count,
-                  stops: req.stops, emittedCount: req.emitted, holdback: req.holdback).safeCount
-                if safe > req.emitted {
-                  if req.firstEmitMs == 0 {
-                    req.firstEmitMs = Double(DispatchTime.now().uptimeNanoseconds - req.admittedNs) / 1_000_000
-                  }
-                  let start = req.collected.index(req.collected.startIndex, offsetBy: req.emitted)
-                  let end = req.collected.index(req.collected.startIndex, offsetBy: safe)
-                  emit(id: req.id, token: String(req.collected[start..<end]))
-                  req.emitted = safe
-                }
-              }
-            }
-          }
-          if req.generatedCount >= req.maxTokens {
-            req.finishReason = "length"
-            req.completed = true
-            break
-          }
-        }
-        req.iterator = it
-      } catch {
-        emit(id: req.id, error: String(describing: error))
-        req.failed = true
       }
     }
 
+    // Returns true when the worker should shut down.
     // Returns true when the worker should shut down.
     func handleLine(_ line: String) async -> Bool {
       guard !line.isEmpty, let data = line.data(using: .utf8),

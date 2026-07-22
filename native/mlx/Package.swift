@@ -36,7 +36,7 @@ let package = Package(
     ),
     .target(
       name: "ClapMLXGeneration",
-      dependencies: ["ClapMLXCache"]
+      dependencies: ["ClapCachePolicy", "ClapMLXCache"]
     ),
     .target(
       name: "ClapMLXModel",

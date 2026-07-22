@@ -14,6 +14,12 @@ public struct AnchorResult {
   public let materialized: Bool
   public let evictedVictims: Bool
   public let materializeMs: Double
+
+  public init(materialized: Bool, evictedVictims: Bool, materializeMs: Double) {
+    self.materialized = materialized
+    self.evictedVictims = evictedVictims
+    self.materializeMs = materializeMs
+  }
 }
 
 public enum AnchorManager {
