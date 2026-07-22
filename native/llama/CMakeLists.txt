@@ -49,9 +49,9 @@ set_target_properties(clap-cache-ffi PROPERTIES
 # translation units here as the native worker is decomposed.
 set(CLAP_LLAMA_SOURCES
   src/cache-executor.cpp
-  clap-llama.cpp
   src/environment.cpp
   src/generation-stepper.cpp
+  src/main.cpp
   src/model-runtime.cpp
   src/prompt.cpp
   src/protocol.cpp
@@ -62,6 +62,7 @@ set(CLAP_LLAMA_SOURCES
   src/stop-buffer.cpp
   src/telemetry.cpp
   src/worker-state.cpp
+  src/worker.cpp
 )
 
 set(CLAP_LLAMA_HEADERS
@@ -78,6 +79,7 @@ set(CLAP_LLAMA_HEADERS
   include/clap/llama/stop-buffer.h
   include/clap/llama/telemetry.h
   include/clap/llama/worker-state.h
+  include/clap/llama/worker.h
 )
 
 add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
@@ -95,6 +97,32 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-worker
+    tests/worker.test.cpp
+    src/cache-executor.cpp
+    src/environment.cpp
+    src/generation-stepper.cpp
+    src/model-runtime.cpp
+    src/prompt.cpp
+    src/protocol.cpp
+    src/request-preparer.cpp
+    src/request-state.cpp
+    src/sampling.cpp
+    src/scheduler.cpp
+    src/stop-buffer.cpp
+    src/telemetry.cpp
+    src/worker-state.cpp
+    src/worker.cpp
+  )
+  add_dependencies(clap-llama-worker clap-cache-ffi-build)
+  target_include_directories(clap-llama-worker PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-worker PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-worker COMMAND clap-llama-worker)
+
   add_executable(clap-llama-scheduler
     tests/scheduler.test.cpp
     src/cache-executor.cpp
@@ -303,5 +331,6 @@ if(BUILD_TESTING)
     clap-llama-stop-buffer
     clap-llama-telemetry
     clap-llama-worker-state
+    clap-llama-worker
   )
 endif()

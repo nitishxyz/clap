@@ -55,7 +55,6 @@ std::vector<SchedulerEvent> Scheduler::cancel(const std::string& target) {
       event.id = target;
       events.push_back(std::move(event));
       waiting_.erase(found);
-      events.push_back(topology());
     }
   }
   return events;
@@ -177,7 +176,6 @@ std::vector<SchedulerEvent> Scheduler::cancel_all() {
     }
   }
   active_.clear();
-  events.push_back(topology());
   return events;
 }
 
