@@ -8,6 +8,7 @@ const cppPhysical = /\b(?:llama_memory_seq_cp|llama_memory_seq_rm|llama_memory_c
 const cppCoordinator = /(?:\bcoordinator_?|\.coordinator)\s*(?:->|\.)\s*(?:plan|advance|confirm|invalidate|reset|set_busy|set_anchor_protected|register_slot|commit|abort)\s*\(/g;
 const cppDirectCoordinator = /\bclap_cache_(?:plan|advance|confirm|invalidate|reset|set_busy|set_anchor_protected|register_slot|commit|abort)\s*\(/g;
 const cppGeneration = /\b(?:llama_decode|llama_sampler_sample|llama_token_to_piece)\s*\(/g;
+const cppGenerationDefinition = /\b(?:auto|bool|int|void)\s+(?:decode|prefill|step)(?:_[A-Za-z0-9]+)*\s*\(/g;
 
 for await (const path of new Bun.Glob("native/llama/**/*.{cpp,cc,h,hpp}").scan({ cwd: root })) {
   if (isCppTest(path)) continue;
@@ -27,6 +28,8 @@ for await (const path of new Bun.Glob("native/llama/**/*.{cpp,cc,h,hpp}").scan({
 const swiftCachePrimitive = /\.(?:copy|trim|clear)\s*\(/g;
 const swiftCoordinator = /\b(?:cacheCoordinator|coordinator)\s*\??\s*\.\s*(?:plan|advance|confirm|invalidate|reset|setBusy|setAnchorProtected|registerSlot|commit|abort)\s*\(/g;
 const swiftRegistry = /\b(?:retainedRegistry|registry)\s*\.\s*(?:register|activate|release|validateEvictions|reconcileEvictions)\s*\(/g;
+const swiftGenerationPrimitive = /\b(?:TokenIterator|LMInput)\s*\(|\bdetokenizer\s*\.\s*(?:append|next)\s*\(|\bStopSequencePolicy\s*\.\s*scan\s*\(/g;
+const swiftGenerationLoop = /\bwhile\s+steps\s*<|\b(?:prefill|decode)StartedNs\b/g;
 
 for await (const path of new Bun.Glob("native/mlx/Sources/**/*.swift").scan({ cwd: root })) {
   if (path.startsWith("native/mlx/Sources/ClapMLXCache/")) continue;
@@ -36,14 +39,21 @@ for await (const path of new Bun.Glob("native/mlx/Sources/**/*.swift").scan({ cw
   reportMatches(path, text, swiftRegistry, "retained registry mutation");
 }
 
+const swiftMain = "native/mlx/Sources/clap-mlx/main.swift";
+const swiftMainText = await Bun.file(resolve(root, swiftMain)).text();
+reportMatches(swiftMain, swiftMainText, swiftGenerationPrimitive,
+  "direct MLX generation operation");
+reportMatches(swiftMain, swiftMainText, swiftGenerationLoop,
+  "mutable generation loop");
+
 if (violations.length > 0) {
-  console.error("Native cache ownership check failed:");
+  console.error("Native ownership check failed:");
   for (const violation of violations) console.error(`  ${violation}`);
-  console.error("Route physical and coordinator mutations through the native cache executors.");
+  console.error("Route cache and generation mutations through their native owners.");
   process.exit(1);
 }
 
-console.log("ok: native cache ownership boundaries");
+console.log("ok: native cache and generation ownership boundaries");
 
 function isCppTest(path: string): boolean {
   return path.includes("/tests/") || path.endsWith(".test.cpp") || path.endsWith(".test.cc");

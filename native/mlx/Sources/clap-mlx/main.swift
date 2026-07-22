@@ -157,8 +157,7 @@ func main() async {
 
     let decodeStepsPerPass = 6
 
-    typealias ActiveRequest = ClapMLXGeneration.ActiveRequest<KVCache, TokenIterator,
-      NaiveStreamingDetokenizer, GenerateParameters>
+    typealias ActiveRequest = MLXActiveRequest
 
     var active: [ActiveRequest] = []
     var pendingChats: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
@@ -437,21 +436,12 @@ func main() async {
       }
     }
 
-    func generationBackend(_ lm: any LanguageModel) -> GenerationBackend<KVCache,
-      TokenIterator, NaiveStreamingDetokenizer, GenerateParameters> {
-      GenerationBackend(prefill: { tokens, caches, parameters in
-        try TokenIterator(input: LMInput(tokens: MLXArray(tokens)), model: lm,
-          cache: caches, parameters: parameters)
-      }, nextToken: { iterator in
-        iterator.next()
-      }, appendToken: { detokenizer, token in
-        detokenizer.append(token: token)
-      }, nextText: { detokenizer in
-        detokenizer.next()
-      }, appendAndAdvance: { slotIndex, slot, caches, fedTokens, tokens in
-        CacheExecutor.appendAndAdvance(coordinator: cacheCoordinator,
-          slotIndex: slotIndex, slot: slot, caches: caches,
-          fedTokens: &fedTokens, tokens: tokens, operations: cacheOperations())
+    func generationBackend(_ lm: any LanguageModel) -> MLXGenerationBackend {
+      mlxGenerationBackend(model: lm,
+        appendAndAdvance: { slotIndex, slot, caches, fedTokens, tokens in
+          CacheExecutor.appendAndAdvance(coordinator: cacheCoordinator,
+            slotIndex: slotIndex, slot: slot, caches: caches,
+            fedTokens: &fedTokens, tokens: tokens, operations: cacheOperations())
       }, plantAnchor: { plant, caches, fedTokens, identity, scope, structural in
         guard let coordinator = cacheCoordinator else {
           return AnchorResult(materialized: false, evictedVictims: false, materializeMs: 0)
