@@ -5,24 +5,6 @@ import Foundation
 let cacheTelemetryKey = ProcessInfo.processInfo.environment["CLAP_TELEMETRY_HMAC_KEY"]
   ?? UUID().uuidString + UUID().uuidString
 
-struct CacheBoundaryDescriptor: Decodable {
-  let kind: String
-  let through_message: Int?
-  let label: String?
-}
-
-struct CacheIntent: Decodable {
-  let namespace: String?
-  let tenant: String?
-  let project: String?
-  let harness: String?
-  let agent: String?
-  let session: String?
-  let priority: String?
-  let side_request: Bool?
-  let boundaries: [CacheBoundaryDescriptor]?
-}
-
 struct CacheIdentity {
   let fingerprint: [UInt8]
   let tenant: UInt64
