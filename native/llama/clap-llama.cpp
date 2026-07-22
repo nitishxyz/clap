@@ -3,6 +3,7 @@
 #include "cache-adapter.h"
 #include "clap/llama/environment.h"
 #include "clap/llama/protocol.h"
+#include "clap/llama/sampling.h"
 #include "clap/llama/stop-buffer.h"
 #include "native-characterization.h"
 #include "stable-boundary.h"
@@ -33,7 +34,10 @@ using clap::llama::env_int;
 using clap::llama::env_u64;
 using clap::llama::emit;
 using clap::llama::emit_error;
+using clap::llama::make_sampler;
 using clap::llama::RequestError;
+using clap::llama::sampling_from_request;
+using clap::llama::SamplingParams;
 using clap::llama::StdinReader;
 
 struct LoadedLlama {
@@ -79,19 +83,6 @@ struct ChatEntry {
   std::string content;
 };
 
-struct SamplingParams {
-  // Zero means omitted by the caller; admission derives a safe request-local
-  // default from the loaded model's remaining effective context.
-  int max_tokens = 0;
-  double temperature = 0.7;
-  double top_p = 0.95;
-  int top_k = 0;
-  uint32_t seed = LLAMA_DEFAULT_SEED;
-  double presence_penalty = 0.0;
-  double frequency_penalty = 0.0;
-  std::vector<std::string> stops;
-};
-
 struct CacheBackpressure : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
@@ -110,30 +101,6 @@ std::vector<ChatEntry> messages_from_request(const json& request) {
     messages.push_back({role, content});
   }
   return messages;
-}
-
-SamplingParams sampling_from_request(const json& request) {
-  SamplingParams params;
-  params.max_tokens = request.value("max_tokens", params.max_tokens);
-  params.temperature = request.value("temperature", params.temperature);
-  params.top_p = request.value("top_p", params.top_p);
-  params.top_k = request.value("top_k", params.top_k);
-  params.presence_penalty = request.value("presence_penalty", params.presence_penalty);
-  params.frequency_penalty = request.value("frequency_penalty", params.frequency_penalty);
-  if (request.contains("seed") && request["seed"].is_number_integer()) {
-    params.seed = static_cast<uint32_t>(request["seed"].get<int64_t>());
-  }
-  if (request.contains("stop")) {
-    const auto& stop = request["stop"];
-    if (stop.is_string()) {
-      params.stops.push_back(stop.get<std::string>());
-    } else if (stop.is_array()) {
-      for (const auto& value : stop) {
-        if (value.is_string()) params.stops.push_back(value.get<std::string>());
-      }
-    }
-  }
-  return params;
 }
 
 std::string templated_prompt(llama_model* model, const std::vector<ChatEntry>& entries,
@@ -417,28 +384,6 @@ std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
   n = llama_token_to_piece(vocab, token, big.data(), static_cast<int32_t>(big.size()), 0, true);
   if (n < 0) return "";
   return std::string(big.data(), n);
-}
-
-llama_sampler* make_sampler(const SamplingParams& params) {
-  auto sparams = llama_sampler_chain_default_params();
-  sparams.no_perf = true;
-  llama_sampler* sampler = llama_sampler_chain_init(sparams);
-  if (params.presence_penalty != 0.0 || params.frequency_penalty != 0.0) {
-    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-      64,
-      1.0f,
-      static_cast<float>(params.frequency_penalty),
-      static_cast<float>(params.presence_penalty)));
-  }
-  if (params.temperature <= 0.0) {
-    llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
-  } else {
-    if (params.top_k > 0) llama_sampler_chain_add(sampler, llama_sampler_init_top_k(params.top_k));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(static_cast<float>(params.top_p), 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(static_cast<float>(params.temperature)));
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(params.seed));
-  }
-  return sampler;
 }
 
 // One in-flight chat request bound to a KV slot. The continuous-batching
