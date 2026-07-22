@@ -343,7 +343,7 @@ export class ResidentWorkerRegistry {
     const worker = new ResidentWorkerProcess(key, backend, modelPath,
       (info) => this.onCrash?.(info), environment,
       (source, previous, current) => this.handleTelemetry(source, previous, current),
-      { modelId: descriptor.modelId ?? key, revision: descriptor.revision });
+      { ...descriptor, modelId: descriptor.modelId ?? key });
     this.workers.set(key, worker);
     this.workerEnvironments.set(key, environment);
     if (!this.pressureTimer) {

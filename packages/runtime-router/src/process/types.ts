@@ -10,6 +10,14 @@ export interface WorkerLaunchIdentity {
 export interface WorkerModelDescriptor {
   modelId: string;
   revision?: string | null;
+  artifactBytes?: number;
+  architecture?: string;
+  modelType?: string;
+  quantization?: string;
+  context?: number;
+  configuredContext?: number;
+  kv?: { type?: string; bytesPerToken?: number };
+  cacheBudget?: number;
 }
 
 export interface WorkerLaunchPaths {

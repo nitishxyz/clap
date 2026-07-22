@@ -36,6 +36,14 @@ export type ResolvedModel = {
   backend: "llama" | "mlx";
   format: "gguf" | "mlx";
   modelPath?: string;
+  artifactBytes?: number;
+  architecture?: string;
+  modelType?: string;
+  quantization?: string;
+  context?: number;
+  configuredContext?: number;
+  kv?: { type?: string; bytesPerToken?: number };
+  cacheBudget?: number;
   /** Immutable upstream revision when known; local artifacts use a content fallback in the server. */
   revision?: string;
   alias?: ModelAlias;
@@ -509,6 +517,11 @@ function findCachedModel(model: string): ResolvedModel | undefined {
       format: cached.format as "gguf" | "mlx",
       modelPath,
       revision: cached.revision,
+      artifactBytes: cached.sizeBytes ?? undefined,
+      architecture: cached.architecture,
+      modelType: cached.modelType,
+      quantization: cached.quantization,
+      context: cached.limit?.context ?? undefined,
       status: "available",
     };
   }

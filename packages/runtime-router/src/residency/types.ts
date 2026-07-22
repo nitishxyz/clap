@@ -87,6 +87,14 @@ export interface ResidencyModelDescriptor {
   readonly backend: string;
   readonly modelId: string;
   readonly revision?: string | null;
+  readonly artifactBytes?: number;
+  readonly architecture?: string;
+  readonly modelType?: string;
+  readonly quantization?: string;
+  readonly context?: number;
+  readonly configuredContext?: number;
+  readonly kv?: Readonly<{ type?: string; bytesPerToken?: number }>;
+  readonly cacheBudget?: number;
 }
 
 interface ResidentModelSnapshotBase {
