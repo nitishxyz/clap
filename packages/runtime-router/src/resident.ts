@@ -131,6 +131,10 @@ export type ResidentCrashListener = (info: {
   backend: ResidentBackend;
   exitCode: number;
   consecutiveCrashes: number;
+  launchId?: string;
+  logPath?: string;
+  metadataPath?: string;
+  classification?: string;
 }) => void;
 
 export function parseWorkerRetention(value: unknown): ResidentMlxRetention | undefined {
@@ -328,13 +332,15 @@ export class ResidentWorkerRegistry {
   // Per-model worker environment (e.g. [models."x"] config sections);
   // consulted once when the worker handle is first created.
   workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
-  getOrCreate(key: string, backend: ResidentBackend, modelPath: string): ResidentWorkerHandle {
+  getOrCreate(key: string, backend: ResidentBackend, modelPath: string,
+    descriptor: Partial<import("./process/types").WorkerModelDescriptor> = {}): ResidentWorkerHandle {
     const existing = this.workers.get(key);
     if (existing) return existing;
     const environment = this.workerEnv?.(modelPath, backend) ?? {};
     const worker = new ResidentWorkerProcess(key, backend, modelPath,
       (info) => this.onCrash?.(info), environment,
-      (source, previous, current) => this.handleTelemetry(source, previous, current));
+      (source, previous, current) => this.handleTelemetry(source, previous, current),
+      { modelId: descriptor.modelId ?? key, revision: descriptor.revision });
     this.workers.set(key, worker);
     this.workerEnvironments.set(key, environment);
     if (!this.pressureTimer) {

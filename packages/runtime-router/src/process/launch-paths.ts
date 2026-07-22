@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import type { WorkerLaunchIdentity, WorkerLaunchPaths } from "./types";
 
@@ -26,7 +26,13 @@ export function resolveClapHome(): string {
 }
 
 export async function canonicalModelPath(modelPath: string): Promise<string> {
-  return realpath(resolve(modelPath));
+  const absolute = resolve(modelPath);
+  try {
+    return await realpath(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return join(await realpath(dirname(absolute)), basename(absolute));
+  }
 }
 
 export async function fingerprintModelPath(modelPath: string): Promise<string> {

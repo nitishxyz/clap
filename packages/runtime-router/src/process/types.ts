@@ -7,6 +7,11 @@ export interface WorkerLaunchIdentity {
   modelPath: string;
 }
 
+export interface WorkerModelDescriptor {
+  modelId: string;
+  revision?: string | null;
+}
+
 export interface WorkerLaunchPaths {
   clapHome: string;
   backend: string;
@@ -28,9 +33,21 @@ export interface WorkerLaunchMetadata {
   command: string[];
   protocolVersion: string;
   startedAt: string;
+  readyAt?: string;
   endedAt?: string;
   exitStatus?: number | null;
   crashClassification?: string | null;
+}
+
+export type WorkerRequestPhase = "handshake" | "load" | "prefill" | "decode" | "idle";
+export type WorkerCrashClassification = WorkerRequestPhase | "protocol_fault" | "unexpected_exit_0" | "expected_exit" | "spawn_failure";
+
+export interface WorkerLaunchContext {
+  paths: WorkerLaunchPaths;
+  metadata: WorkerLaunchMetadata;
+  phase: WorkerRequestPhase;
+  protocolFault: boolean;
+  releaseActive: () => void;
 }
 
 export interface LaunchRetentionLimits {

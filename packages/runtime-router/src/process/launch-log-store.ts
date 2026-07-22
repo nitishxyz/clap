@@ -6,7 +6,10 @@ import {
   type LaunchRetentionLimits,
   type WorkerLaunchMetadata,
   type WorkerLaunchPaths,
+  type WorkerLaunchContext,
+  type WorkerLaunchIdentity,
 } from "./types";
+import { createWorkerLaunchPaths } from "./launch-paths";
 
 export const DEFAULT_MAX_LAUNCHES_PER_MODEL = 20;
 export const DEFAULT_MAX_BYTES_PER_BACKEND = 256 * 1024 * 1024;
@@ -172,7 +175,9 @@ export async function pruneLaunchLogs(
   }
 }
 
-export class LaunchLogStore {
+export class WorkerLaunchLogStore {
+  private readonly writes = new Map<string, Promise<void>>();
+
   registerActive(paths: WorkerLaunchPaths): () => void {
     activeMetadataPaths.add(paths.metadataPath);
     let active = true;
@@ -184,10 +189,72 @@ export class LaunchLogStore {
   }
 
   async writeMetadata(paths: WorkerLaunchPaths, metadata: WorkerLaunchMetadata): Promise<void> {
-    await writeLaunchMetadataAtomic(paths.metadataPath, metadata);
+    const previous = this.writes.get(paths.metadataPath) ?? Promise.resolve();
+    const current = previous.then(() => writeLaunchMetadataAtomic(paths.metadataPath, metadata));
+    this.writes.set(paths.metadataPath, current);
+    try {
+      await current;
+    } finally {
+      if (this.writes.get(paths.metadataPath) === current) this.writes.delete(paths.metadataPath);
+    }
   }
 
   async prune(paths: WorkerLaunchPaths, limits = launchRetentionLimits()): Promise<void> {
     await pruneLaunchLogs(dirname(paths.directory), limits);
   }
+
+  async prepareLaunch(identity: WorkerLaunchIdentity, command: string[]): Promise<WorkerLaunchContext> {
+    const paths = await createWorkerLaunchPaths(identity);
+    const context: WorkerLaunchContext = {
+      paths,
+      phase: "handshake",
+      protocolFault: false,
+      releaseActive: this.registerActive(paths),
+      metadata: {
+        version: WORKER_LAUNCH_METADATA_VERSION,
+        launchId: paths.launchId,
+        modelId: identity.modelId,
+        modelPathFingerprint: paths.modelPathFingerprint,
+        backend: identity.backend,
+        pid: 0,
+        command,
+        protocolVersion: "1",
+        startedAt: new Date().toISOString(),
+      },
+    };
+    try {
+      await this.writeMetadata(paths, context.metadata);
+      return context;
+    } catch (error) {
+      context.releaseActive();
+      throw error;
+    }
+  }
+
+  async markSpawned(context: WorkerLaunchContext, pid: number): Promise<void> {
+    context.metadata = { ...context.metadata, pid };
+    await this.writeMetadata(context.paths, context.metadata);
+  }
+
+  async markReady(context: WorkerLaunchContext): Promise<void> {
+    context.metadata = { ...context.metadata, readyAt: new Date().toISOString() };
+    await this.writeMetadata(context.paths, context.metadata);
+  }
+
+  async finalize(context: WorkerLaunchContext, exitStatus: number | null, classification: string): Promise<void> {
+    context.metadata = {
+      ...context.metadata,
+      endedAt: new Date().toISOString(),
+      exitStatus,
+      crashClassification: classification,
+    };
+    try {
+      await this.writeMetadata(context.paths, context.metadata);
+    } finally {
+      context.releaseActive();
+    }
+    await this.prune(context.paths);
+  }
 }
+
+export { WorkerLaunchLogStore as LaunchLogStore };

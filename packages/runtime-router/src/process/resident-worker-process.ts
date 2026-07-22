@@ -1,22 +1,23 @@
 import type { ChatCompletionRequest, ModelTokenCapabilities } from "@clap/api";
 import { getLlamaWorkerStatus, LlamaWorkerError } from "@clap/runtime-llama";
 import { getMlxWorkerStatus, MlxWorkerError } from "@clap/runtime-mlx";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { V1RequestTracker, type ResidentProtocolFact } from "../protocol/request-tracker";
 import { WorkerProtocolFault } from "../protocol/errors";
-import { classifyWorkerExit, classifyWorkerExitPhase } from "./crash-classification";
+import { classifyWorkerCrash, classifyWorkerExitPhase } from "./crash-classification";
+import { WorkerLaunchLogStore } from "./launch-log-store";
 import { applyWorkerPayload, mapWorkerResultPayload, mapWorkerTelemetryPayload,
   type PendingWorkerResult } from "./result-mapper";
 import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResult,
   type ResidentCrashListener, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
+import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerModelDescriptor } from "./types";
 
 export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private proc?: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
   private readonly pending = new Map<string, PendingWorkerResult>();
   private loaded = false;
-  private logPath?: string;
+  private launch?: WorkerLaunchContext;
+  private starting?: Promise<void>;
   private crashes = 0;
   private consecutiveCrashes = 0;
   private lastCrashAt?: number;
@@ -40,6 +41,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     private readonly envOverrides?: Record<string, string>,
     private readonly onTelemetry?: (worker: ResidentWorkerProcess,
       previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void,
+    private readonly descriptor: WorkerModelDescriptor = { modelId: key },
+    private readonly launchLogs = new WorkerLaunchLogStore(),
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -57,7 +60,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   async load(): Promise<ResidentWorkerInfo> {
     await this.awaitRestartBackoff();
-    this.ensureStarted();
+    await this.ensureStarted();
     if (!this.loaded) {
       const result = await this.sendControl("load", { model: this.modelPath });
       this.tokenCapabilities = result.tokenCapabilities;
@@ -101,7 +104,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   shutdown(): void {
-    for (const pending of this.pending.values()) pending.reject(new Error("resident worker shut down"));
+    for (const pending of this.pending.values()) {
+      pending.reject(this.workerError("resident worker shut down", "resident_worker_error",
+        pending.launchPaths?.stderrPath));
+    }
     this.pending.clear();
     try {
       if (this.proc && this.proc.exitCode === null) {
@@ -125,7 +131,14 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.clearHandshake();
   }
 
-  private ensureStarted(): void {
+  private async ensureStarted(): Promise<void> {
+    if (this.proc && this.proc.exitCode === null) return;
+    if (this.starting) return this.starting;
+    this.starting = this.startWorker();
+    try { await this.starting; } finally { this.starting = undefined; }
+  }
+
+  private async startWorker(): Promise<void> {
     if (this.proc && this.proc.exitCode === null) return;
     this.expectedExit = false;
     this.memory = undefined;
@@ -138,36 +151,31 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       if (this.backend === "mlx") throw new MlxWorkerError(message, "worker_not_found");
       throw new LlamaWorkerError(message, "worker_not_found");
     }
-    mkdirSync(dirname(status.logPath), { recursive: true });
-    // Bun's file-backed stderr starts writing at offset zero but does not
-    // truncate a longer prior file. Rotate and unlink first so stale trailing
-    // bytes cannot survive the next launch. Attribution lives in a sidecar
-    // because any header in the stderr file would be overwritten at offset 0.
-    try {
-      renameSync(status.logPath, `${status.logPath}.previous`);
-    } catch {
-      // No prior launch log (or it was already removed).
-    }
-    rmSync(status.logPath, { force: true });
-    this.workerLaunchId = crypto.randomUUID();
-    writeFileSync(`${status.logPath}.launch.json`, JSON.stringify({
-      launchId: this.workerLaunchId,
-      startedAt: new Date().toISOString(),
+    const launch = await this.launchLogs.prepareLaunch({
       backend: this.backend,
-      key: this.key,
-      command: status.command,
-    }, null, 2) + "\n");
+      modelId: this.descriptor.modelId,
+      revision: this.descriptor.revision,
+      modelPath: this.modelPath,
+    }, status.command);
     const environment = { ...process.env, ...this.envOverrides };
-    const proc = Bun.spawn(status.command, {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: Bun.file(status.logPath),
-      env: environment,
-    });
+    let proc: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
+    try {
+      proc = Bun.spawn(status.command, {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: Bun.file(launch.paths.stderrPath),
+        env: environment,
+      });
+    } catch (error) {
+      await this.launchLogs.finalize(launch, null, "spawn_failure");
+      throw error;
+    }
     this.proc = proc;
-    this.logPath = status.logPath;
+    this.launch = launch;
+    this.workerLaunchId = launch.paths.launchId;
+    await this.launchLogs.markSpawned(launch, proc.pid);
     this.startProtocol();
-    void this.readLoop(proc);
+    void this.readLoop(proc, launch);
   }
 
   private startProtocol(): void {
@@ -193,7 +201,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.v1Tracker = undefined;
   }
 
-  private async readLoop(proc: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>): Promise<void> {
+  private async readLoop(proc: Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>,
+    launch: WorkerLaunchContext): Promise<void> {
     const decoder = new TextDecoder();
     let buffer = "";
     try {
@@ -216,22 +225,26 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     if (this.proc === proc) this.proc = undefined;
     this.loaded = false;
     const phase = classifyWorkerExitPhase(Boolean(this.resolveHandshake), this.pending.size);
+    const classification = classifyWorkerCrash({ protocolFault: launch.protocolFault,
+      expectedExit: this.expectedExit, exitCode, phase: launch.phase });
     const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
-    const exitError = this.workerError(`${this.backend} resident worker exited ${phase} with code ${exitCode}${diagnostic}`);
+    const exitMessage = `${this.backend} resident worker exited ${phase} with code ${exitCode}${diagnostic}`;
+    const exitError = this.workerError(exitMessage, "resident_worker_error", launch.paths.stderrPath);
     if (this.resolveHandshake) {
       this.rejectHandshake?.(exitError);
       this.rejectHandshake = undefined;
       this.resolveHandshake = undefined;
     }
-    if (classifyWorkerExit(this.expectedExit, exitCode) !== "expected_exit") {
-      if (classifyWorkerExit(this.expectedExit, exitCode) === "crash") {
-        this.crashes += 1;
-        this.consecutiveCrashes += 1;
-        this.lastCrashAt = Date.now();
-        this.onCrash?.({ key: this.key, backend: this.backend, exitCode, consecutiveCrashes: this.consecutiveCrashes });
-      }
-      this.rejectAll(exitError);
+    if (classification !== "expected_exit") {
+      this.crashes += 1;
+      this.consecutiveCrashes += 1;
+      this.lastCrashAt = Date.now();
+      this.onCrash?.({ key: this.key, backend: this.backend, exitCode,
+        consecutiveCrashes: this.consecutiveCrashes, launchId: launch.paths.launchId,
+        logPath: launch.paths.stderrPath, metadataPath: launch.paths.metadataPath, classification });
+      this.rejectAllWithLaunch(exitMessage, launch.paths);
     }
+    await this.launchLogs.finalize(launch, exitCode, classification);
   }
 
   // Exponential backoff between restarts after crashes (1s, 2s, 4s... capped
@@ -256,6 +269,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     try {
       const fact = this.v1Tracker!.consumeLine(line);
       if (fact.kind === "ready") {
+        if (this.launch) {
+          this.launch.phase = "idle";
+          void this.launchLogs.markReady(this.launch);
+        }
         this.resolveHandshake?.();
         this.resolveHandshake = undefined;
         this.rejectHandshake = undefined;
@@ -291,20 +308,30 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     const pending = this.pending.get(fact.requestId);
     if (!pending) return;
     if (fact.kind === "started") {
+      pending.phase = pending.phase === "load" ? "load" : "prefill";
+      if (this.launch) this.launch.phase = pending.phase;
       const onDispatch = pending.onDispatch;
       pending.onDispatch = undefined;
       onDispatch?.();
       return;
     }
-    if (fact.kind === "token") { pending.content.push(fact.text); pending.onToken?.(fact.text); return; }
+    if (fact.kind === "token") {
+      pending.phase = "decode";
+      if (this.launch) this.launch.phase = "decode";
+      pending.content.push(fact.text); pending.onToken?.(fact.text); return;
+    }
     if (fact.kind === "content") {
       if (typeof fact.content === "string") { pending.content.push(fact.content); pending.onToken?.(fact.content); }
       return;
     }
-    if (fact.kind === "prefill_progress") { pending.onProgress?.(fact.done, fact.total); return; }
+    if (fact.kind === "prefill_progress") {
+      pending.phase = "prefill";
+      if (this.launch) this.launch.phase = "prefill";
+      pending.onProgress?.(fact.done, fact.total); return;
+    }
     if (fact.kind === "failed") {
       this.pending.delete(fact.requestId);
-      pending.reject(this.workerError(fact.error.message, fact.error.code));
+      pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath));
       return;
     }
     this.applyWorkerPayload(mapWorkerResultPayload(
@@ -312,18 +339,20 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       fact.requestId,
       pending.content.length > 0,
     ));
+    if (this.pending.size === 0 && this.launch) this.launch.phase = "idle";
   }
 
   private protocolUnhealthy(cause: Error): void {
+    if (this.launch) this.launch.protocolFault = true;
     const diagnostic = this.lastDiagnostic ? `. Last worker diagnostic: ${this.lastDiagnostic}` : "";
     const detail = cause instanceof WorkerProtocolFault
       ? `worker protocol ${cause.code}: ${cause.message}${diagnostic}`
       : `worker protocol failure: ${cause.message}${diagnostic}`;
-    const error = this.workerError(detail, "worker_protocol_error");
+    const error = this.workerError(detail, "worker_protocol_error", this.launch?.paths.stderrPath);
     this.rejectHandshake?.(error);
     this.rejectHandshake = undefined;
     this.resolveHandshake = undefined;
-    this.rejectAll(error);
+    this.rejectAllWithLaunch(detail, this.launch?.paths, "worker_protocol_error");
     this.loaded = false;
     this.expectedExit = false;
     try { this.proc?.kill(); } catch { /* process already exited */ }
@@ -331,11 +360,14 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private async sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
-    this.ensureStarted();
+    await this.ensureStarted();
     await this.handshake;
     const id = `req_${crypto.randomUUID()}`;
     const promise = new Promise<ResidentChatResult>((resolve, reject) => {
-      this.pending.set(id, { content: [], resolve, reject, onToken, onProgress, onDispatch });
+      const phase = type === "load" ? "load" : type === "chat" ? "prefill" : "idle";
+      this.pending.set(id, { content: [], resolve, reject, onToken, onProgress, onDispatch,
+        launchPaths: this.launch?.paths, phase });
+      if (this.launch) this.launch.phase = phase;
     });
     if (signal) {
       const cancel = () => {
@@ -370,9 +402,16 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.pending.clear();
   }
 
-  private workerError(message: string, code = "resident_worker_error"): Error {
+  private rejectAllWithLaunch(message: string, fallback?: WorkerLaunchPaths, code = "resident_worker_error"): void {
+    for (const pending of this.pending.values()) {
+      pending.reject(this.workerError(message, code, pending.launchPaths?.stderrPath ?? fallback?.stderrPath));
+    }
+    this.pending.clear();
+  }
+
+  private workerError(message: string, code = "resident_worker_error", logPath = this.launch?.paths.stderrPath): Error {
     const detail = code === "worker_protocol_error" || code === "context_length_exceeded"
-      ? message : enrichWorkerError(message, this.backend, this.logPath);
+      ? `${message}${logPath ? ` See ${logPath}.` : ""}` : enrichWorkerError(message, this.backend, logPath);
     if (this.backend === "mlx") return new MlxWorkerError(detail, code);
     return new LlamaWorkerError(detail, code);
   }

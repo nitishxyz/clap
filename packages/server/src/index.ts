@@ -166,7 +166,8 @@ export function createServer(
             continue;
           }
           await assertResidentModelPath(resolved.model);
-          const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend, resolved.model.modelPath ?? resolved.model.input);
+          const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend,
+            resolved.model.modelPath ?? resolved.model.input, { modelId: resolved.model.id });
           const info = await worker.load();
           const model = lifecycle.load(resolved.model, { keepAlive, worker: info });
           metrics.event("load", `${model.id} warmed on boot (keep-alive ${model.keepAlive})`, { model: model.id });
@@ -581,7 +582,8 @@ export function createServer(
     const resolved = resolveAvailableModel(request.model, request.backend);
     if ("response" in resolved) return resolved.response(c);
     await assertResidentModelPath(resolved.model);
-    const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend, resolved.model.modelPath ?? resolved.model.input);
+    const worker = residents.getOrCreate(lifecycleKey(resolved.model), resolved.model.backend,
+      resolved.model.modelPath ?? resolved.model.input, { modelId: resolved.model.id });
     let info;
     try {
       info = await worker.load();
@@ -1331,7 +1333,7 @@ export function inferParserFamilies(markerText: string, nameText: string): strin
 }
 
 async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, handle?: RequestHandle) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   let result: ResidentChatResult | undefined;
   try {
     handle?.phase("loading");
@@ -1448,7 +1450,7 @@ function strictStreamSSE(c: Parameters<typeof streamSSE>[0], callback: (stream: 
 }
 
 function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void, handle?: RequestHandle) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath);
+  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   return strictStreamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();

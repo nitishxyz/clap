@@ -2,6 +2,7 @@ import type { ModelTokenCapabilities } from "@clap/api";
 import { parseWorkerRetention, parseWorkerTokenCapabilities, type ResidentCacheInfo,
   type ResidentChatResult, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentProgress, type ResidentTiming, type ResidentUsage } from "../resident";
+import type { WorkerLaunchPaths, WorkerRequestPhase } from "./types";
 
 export type PendingWorkerResult = {
   content: string[];
@@ -15,6 +16,8 @@ export type PendingWorkerResult = {
   cache?: ResidentCacheInfo;
   timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
+  launchPaths?: WorkerLaunchPaths;
+  phase: WorkerRequestPhase;
 };
 
 export type WorkerPayloadContext = {
