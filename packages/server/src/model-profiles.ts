@@ -34,8 +34,9 @@ export type ProfileMarkers = {
 
 export type ModelProfileDefinition = {
   name: string;
-  // Substrings matched (case-insensitive) against the model id and against
-  // template family hints derived from model metadata.
+  // User profiles may list an exact model id here. For all profiles these are
+  // also matched exactly against family hints derived from model metadata.
+  // Model ids are never substring-matched to infer a built-in family.
   families?: string[];
   // Ordered built-in tool parser primitives to try. Available names:
   // harmony, function-message, xml-function, tagged-json, qwen-bracket,
@@ -65,6 +66,10 @@ export const builtinProfiles: ModelProfileDefinition[] = [
 export const genericProfile: ModelProfileDefinition = {
   name: "generic",
   parsers: [
+    // Try the more specific `call:` envelopes before harmony's broad
+    // call:name matcher so protocol markers can identify Gemma syntax without
+    // relying on the model id.
+    "gemma-call",
     "harmony",
     "function-message",
     "xml-function",
@@ -73,9 +78,9 @@ export const genericProfile: ModelProfileDefinition = {
     "deepseek",
     "mistral",
     "python-tag",
-    "gemma-call",
     "json",
   ],
+  markers: { replace: { '<|"|>': '"' } },
 };
 
 let cachedUserProfiles: ModelProfileDefinition[] | undefined;

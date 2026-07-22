@@ -33,8 +33,7 @@ import { InsufficientModelMemoryError, listBackends, ModelLifecycleManager, Resi
   type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { readFile, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
@@ -50,6 +49,8 @@ export { configPaths, loadClapConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
 import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
+import { inferParserFamilies, resolveParserTemplateInfo } from "./parsers/traits";
+export { inferParserFamilies } from "./parsers/traits";
 import { MetricsCollector, type RequestHandle } from "./metrics";
 import { sampleGpuUsage } from "./gpu-usage";
 import { cpuCoreCount, processRssBytes, sampleProcessUsage, systemCpuPercent, systemMemoryBytes,
@@ -1422,79 +1423,6 @@ async function assertResidentModelPath(model: ResolvedModel): Promise<void> {
   const path = model.modelPath ?? model.input;
   if (model.backend === "llama") await assertGgufModelPath(path);
   else await assertMlxModelPath(path);
-}
-
-async function resolveParserTemplateInfo(model: ResolvedModel): Promise<ParserTemplateInfo | undefined> {
-  const root = await metadataRoot(model);
-  if (!root) return undefined;
-  const sourceFiles: string[] = [];
-  const chunks: string[] = [];
-  const nameChunks: string[] = [];
-  for (const file of ["tokenizer_config.json", "tokenizer.json", "config.json", "generation_config.json", "chat_template.jinja"]) {
-    const path = join(root, file);
-    try {
-      const text = await readFile(path, "utf8");
-      sourceFiles.push(file);
-      chunks.push(text.slice(0, 250_000));
-      // tokenizer.json is mostly raw vocabulary; family names like "harmony"
-      // or "hermes" appear as ordinary word tokens in any large vocab, so only
-      // template/config files may vote on family by name.
-      if (file !== "tokenizer.json") nameChunks.push(text.slice(0, 250_000));
-    } catch {
-      // optional metadata file
-    }
-  }
-  if (!chunks.length) return undefined;
-  const haystack = chunks.join("\n").toLowerCase();
-  const familyHints = inferParserFamilies(haystack, nameChunks.join("\n").toLowerCase());
-  return {
-    familyHints,
-    hasToolCalls: /tool_call|tool_calls|\[tool_calls\]|python_tag|call:/.test(haystack),
-    hasReasoning: /enable_thinking|reasoning_effort|reasoning_content|<think>|analysis|commentary|final/.test(haystack),
-    implicitThink: templatePrefillsThink(chunks.join("\n")),
-    sourceFiles,
-  };
-}
-
-// Detects chat templates (Qwen3.6, DeepSeek-R1, ...) that emit a literal
-// <think> tag as part of the generation prompt, which means the model's raw
-// output begins inside a reasoning block without an opening tag.
-function templatePrefillsThink(templateText: string): boolean {
-  for (const match of templateText.matchAll(/\{\{-?\s*'([^']*)'\s*-?\}\}/g)) {
-    const literal = match[1] ?? "";
-    if (literal.includes("<think>") && !literal.includes("</think>")) return true;
-  }
-  return false;
-}
-
-async function metadataRoot(model: ResolvedModel): Promise<string | undefined> {
-  const path = model.modelPath ?? model.input;
-  try {
-    const info = await stat(path);
-    return info.isDirectory() ? path : dirname(path);
-  } catch {
-    return undefined;
-  }
-}
-
-export function inferParserFamilies(markerText: string, nameText: string): string[] {
-  const hints: string[] = [];
-  const add = (family: string, markers: RegExp, names?: RegExp) => {
-    if ((markers.test(markerText) || (names?.test(nameText) ?? false)) && !hints.includes(family)) hints.push(family);
-  };
-  // Marker patterns are distinctive protocol tokens safe to match anywhere
-  // (including tokenizer vocabulary); family-name patterns only run against
-  // template/config metadata where a name is an intentional signal.
-  add("harmony", /<\|channel\|>/, /gpt-oss|harmony/);
-  // "enable_thinking" is intentionally not a qwen signal: other families
-  // (gemma included) adopted the same template toggle name.
-  add("qwen", /<\|tool_call_start\|>|<function=/, /qwen/);
-  add("deepseek", /<｜tool▁calls▁begin｜>/, /deepseek/);
-  add("mistral", /\[tool_calls\]/, /mistral|mixtral/);
-  add("llama", /<\|python_tag\|>/, undefined);
-  add("gemma", /functiongemma/, /gemma/);
-  add("hermes", /<tool_call>/, /hermes|xlam|functionary/);
-  return hints;
 }
 
 function workerDescriptor(model: ResolvedModel) {

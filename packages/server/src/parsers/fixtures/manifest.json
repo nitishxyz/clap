@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "cases": [
+    "plain-text.json",
+    "qwen-template-tool.json"
+  ]
+}

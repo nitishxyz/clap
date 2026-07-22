@@ -1,0 +1,8 @@
+{
+  "name": "qwen template marker",
+  "model": "/tmp/ambiguous.gguf",
+  "familyHints": ["qwen"],
+  "input": "<|tool_call_start|>{\"name\":\"search\",\"arguments\":{\"query\":\"clap\"}}<|tool_call_end|>",
+  "expectedParser": "qwen",
+  "expected": { "toolName": "search", "finishReason": "tool_calls" }
+}

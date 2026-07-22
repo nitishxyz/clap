@@ -1,0 +1,7 @@
+{
+  "name": "plain text fallback",
+  "model": "org/qwen-named-but-untyped",
+  "input": "hello",
+  "expectedParser": "plain",
+  "expected": { "content": "hello", "finishReason": "stop" }
+}

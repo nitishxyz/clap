@@ -29,7 +29,7 @@ describe("user model profiles", () => {
   test("custom regex parser from a user profile parses a novel tool format", () => {
     writeProfile("acme.json", {
       name: "acme",
-      families: ["acme"],
+      families: [request.model],
       customParsers: [{ pattern: "@@invoke\\s+(?<name>[\\w.-]+)\\s+(?<args>\\{[\\s\\S]*?\\})@@" }],
       parsers: ["json"],
     });
@@ -42,7 +42,7 @@ describe("user model profiles", () => {
   test("profile markers suppress leaked protocol text and strip end tokens", () => {
     writeProfile("acme.json", {
       name: "acme",
-      families: ["acme"],
+      families: [request.model],
       parsers: ["json"],
       markers: { suppress: ["<|acme_call|>"], strip: ["<|acme_end|>"] },
     });
@@ -53,7 +53,7 @@ describe("user model profiles", () => {
   test("profile implicitThink treats untagged output as reasoning", () => {
     writeProfile("acme.json", {
       name: "acme",
-      families: ["acme"],
+      families: [request.model],
       parsers: ["json"],
       implicitThink: true,
     });
@@ -65,7 +65,7 @@ describe("user model profiles", () => {
   test("profileStreamExtras exposes markers and implicit think to the stream filter", () => {
     writeProfile("acme.json", {
       name: "acme",
-      families: ["acme"],
+      families: [request.model],
       parsers: ["json"],
       implicitThink: true,
       markers: { suppress: ["<|acme_call|>"] },
@@ -78,15 +78,16 @@ describe("user model profiles", () => {
     expect(filter.suppressed).toBe(true);
   });
 
-  test("user profiles win over built-ins for the same family", () => {
+  test("an exact user profile wins over built-in template traits", () => {
+    const model = "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit";
     writeProfile("qwen-override.json", {
       name: "qwen",
-      families: ["qwen"],
+      families: [model],
       customParsers: [{ pattern: "OVERRIDE:(?<name>[\\w.-]+)", name: undefined }],
       parsers: [],
     });
-    const qwenRequest = { ...request, model: "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit" };
-    const parsed = parseAssistantOutput("OVERRIDE:run_task", qwenRequest);
+    const qwenRequest = { ...request, model };
+    const parsed = parseAssistantOutput("OVERRIDE:run_task", qwenRequest, { familyHints: ["qwen"] });
     expect(parsed.finishReason).toBe("tool_calls");
     expect(parsed.toolCalls?.[0]?.function.name).toBe("run_task");
   });

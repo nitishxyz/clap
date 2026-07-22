@@ -578,17 +578,17 @@ describe("clap server", () => {
     expect(body.error.code).toBe("not_cached");
   });
 
-  test("selects parser families from model ids", () => {
+  test("selects parser families only from explicit template traits", () => {
     const request = { model: "qwen", messages: [{ role: "user" as const, content: "hi" }], stream: false };
     expect(selectParser("/tmp/ambiguous.gguf", request, { familyHints: ["qwen"] }).name).toBe("qwen");
     expect(selectParser("qwen-ish", request, { familyHints: ["mistral"] }).name).toBe("mistral");
-    expect(selectParser("Qwen/Qwen2.5-7B-Instruct", request).name).toBe("qwen");
-    expect(selectParser("deepseek-ai/deepseek-r1", request).name).toBe("deepseek");
-    expect(selectParser("NousResearch/Hermes-3", request).name).toBe("hermes");
-    expect(selectParser("mistralai/Mistral-7B", request).name).toBe("mistral");
-    expect(selectParser("meta-llama/Llama-3.1", request).name).toBe("llama");
-    expect(selectParser("google/functiongemma", request).name).toBe("gemma");
-    expect(selectParser("/tmp/model.Q4_K_M.gguf", request).name).toBe("generic");
+    expect(selectParser("Qwen/Qwen2.5-7B-Instruct", request).name).toBe("plain");
+    expect(selectParser("deepseek-ai/deepseek-r1", request).name).toBe("plain");
+    expect(selectParser("NousResearch/Hermes-3", request).name).toBe("plain");
+    expect(selectParser("mistralai/Mistral-7B", request).name).toBe("plain");
+    expect(selectParser("meta-llama/Llama-3.1", request).name).toBe("plain");
+    expect(selectParser("google/functiongemma", request).name).toBe("plain");
+    expect(selectParser("/tmp/model.Q4_K_M.gguf", request).name).toBe("plain");
   });
 
   test("template-selected parsers parse ambiguous model ids", () => {

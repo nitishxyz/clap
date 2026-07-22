@@ -1,41 +1,8 @@
 import type { ChatCompletionRequest, ChatMessage, ChatToolCall } from "@clap/api";
 import { builtinProfiles, genericProfile, loadUserProfiles, resetUserProfileCache, type CustomParserSpec, type ModelProfileDefinition } from "./model-profiles";
-
-export type ParsedAssistantOutput = {
-  content: string | null;
-  reasoning?: string;
-  toolCalls?: ChatToolCall[];
-  finishReason: "stop" | "tool_calls";
-};
-
-type NormalizedOutput = {
-  content: string;
-  reasoning?: string;
-  toolCalls?: ChatToolCall[];
-};
-
-type ParserContext = {
-  request: ChatCompletionRequest;
-  toolMode: boolean;
-};
-
-type ToolParser = (text: string, context: ParserContext) => ChatToolCall[];
-
-type AssistantOutputParser = {
-  name: string;
-  families: string[];
-  toolParsers: ToolParser[];
-  profile?: ModelProfileDefinition;
-  parse: (text: string, context: ParserContext) => NormalizedOutput;
-};
-
-export type ParserTemplateInfo = {
-  familyHints?: string[];
-  hasToolCalls?: boolean;
-  hasReasoning?: boolean;
-  implicitThink?: boolean;
-  sourceFiles?: string[];
-};
+import { selectRegisteredParser } from "./parsers/registry";
+import type { AssistantOutputParser, ParsedAssistantOutput, ParserContext, ParserTemplateInfo, ToolParser } from "./parsers/types";
+export type { ParsedAssistantOutput, ParserTemplateInfo } from "./parsers/types";
 
 export type PrepareChatOptions = {
   // The runtime renders tool declarations natively through the model's chat
@@ -120,19 +87,15 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
 // vLLM, SGLang, and Unsloth: choose a model/template-aware parser first, then
 // extract reasoning before interpreting remaining content as tool calls.
 export function selectParser(model: string, _request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo): AssistantOutputParser {
-  const registries = [userRegistry(), builtinRegistry];
-  for (const hint of templateInfo?.familyHints ?? []) {
-    for (const registry of registries) {
-      const parser = registry.find((candidate) => candidate.name === hint || candidate.families.includes(hint));
-      if (parser) return parser;
-    }
-  }
-  const id = model.toLowerCase();
-  for (const registry of registries) {
-    const parser = registry.find((candidate) => candidate.families.some((family) => id.includes(family.toLowerCase())));
-    if (parser) return parser;
-  }
-  return genericParser;
+  return selectRegisteredParser({
+    model,
+    request: _request,
+    traits: templateInfo,
+    user: userRegistry(),
+    builtin: builtinRegistry,
+    generic: genericParser,
+    plain: plainParser,
+  });
 }
 
 // Extra streaming behavior derived from the selected profile: additional
@@ -283,6 +246,7 @@ function makeRegexToolParser(spec: CustomParserSpec): ToolParser {
 }
 
 const genericParser = compileProfile(genericProfile);
+const plainParser = compileProfile({ ...genericProfile, name: "plain" });
 const builtinRegistry = builtinProfiles.map(compileProfile);
 
 let compiledUserRegistry: AssistantOutputParser[] | undefined;
