@@ -70,6 +70,9 @@ struct PreparedRequest {
   std::vector<ResolvedPromptBoundary> resolved_boundaries;
   nlohmann::json cache_candidates = nlohmann::json::array();
   bool cache_side_request = false;
+  llama_seq_id sequence = 0;
+  int32_t initial_position = 0;
+  int32_t initial_anchor_at = -1;
 };
 
 struct ActiveRequest : PreparedRequest {
@@ -77,6 +80,7 @@ struct ActiveRequest : PreparedRequest {
   enum class TerminalState { Active, Completed, Failed };
 
   ActiveRequest() = default;
+  explicit ActiveRequest(PreparedRequest&& prepared);
   ActiveRequest(const ActiveRequest&) = delete;
   ActiveRequest& operator=(const ActiveRequest&) = delete;
   ActiveRequest(ActiveRequest&&) noexcept = default;

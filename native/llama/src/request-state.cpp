@@ -4,6 +4,12 @@
 
 namespace clap::llama {
 
+ActiveRequest::ActiveRequest(PreparedRequest&& prepared)
+    : PreparedRequest(std::move(prepared)), seq(sequence), n_pos(initial_position),
+      anchor_at(initial_anchor_at) {
+  stop_buffer.reset(params.stops);
+}
+
 SamplerOwner::SamplerOwner(SamplerOwner&& other) noexcept
     : sampler_(other.sampler_), deleter_(other.deleter_) {
   other.sampler_ = nullptr;
