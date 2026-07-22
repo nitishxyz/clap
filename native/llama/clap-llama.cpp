@@ -1,6 +1,7 @@
 #include "llama.h"
 #include "active-concurrency.h"
 #include "cache-adapter.h"
+#include "clap/llama/cache-executor.h"
 #include "clap/llama/environment.h"
 #include "clap/llama/model-runtime.h"
 #include "clap/llama/prompt.h"
@@ -62,7 +63,8 @@ struct LoadedLlama {
   };
   std::vector<CacheSlot> slots;
   uint64_t use_counter = 0;
-  std::unique_ptr<clap::llama_cache::Coordinator> coordinator;
+  std::unique_ptr<clap::llama::CacheExecutor> cache_executor;
+  clap::llama_cache::Coordinator* coordinator = nullptr;
 };
 
 struct CacheBackpressure : std::runtime_error {
@@ -71,7 +73,8 @@ struct CacheBackpressure : std::runtime_error {
 
 void unload(LoadedLlama& loaded) {
   if (loaded.coordinator) loaded.coordinator->reset();
-  loaded.coordinator.reset();
+  loaded.coordinator = nullptr;
+  loaded.cache_executor.reset();
   loaded.slots.clear();
   loaded.runtime.reset();
   loaded.max_active = 0;
@@ -94,24 +97,27 @@ void load_model(LoadedLlama& loaded, const std::string& model_path) {
       retained_max, loaded.runtime.hybrid(), loaded.runtime.has_encoder()});
   loaded.max_active = loaded.active_policy.selected_max;
   try {
-    loaded.coordinator = std::make_unique<clap::llama_cache::Coordinator>(
-      1, 16, static_cast<uint64_t>(n_ctx),
-      static_cast<uint32_t>(retained_max),
-      static_cast<uint32_t>(retained_max), 0, 0, 0,
-      env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0,
-      static_cast<uint64_t>(env_int("CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS", 2048)),
-      static_cast<uint64_t>(env_int("CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS", 2048)),
-      static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_MAX", 8)),
-      static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS", 2500)),
-      env_u64("CLAP_CACHE_CHECKPOINT_BUDGET_BYTES", 0));
-    for (int32_t expected = 1; expected < retained_max; ++expected) {
-      const auto registered = loaded.coordinator->register_slot();
-      if (registered.slot != static_cast<uint32_t>(expected) || registered.generation == 0) {
-        throw std::runtime_error("cache coordinator returned unstable slot registration");
-      }
-    }
+    clap::llama::CacheExecutorConfig config;
+    config.slot_count = static_cast<uint32_t>(retained_max);
+    config.logical_token_capacity = static_cast<uint64_t>(n_ctx);
+    config.max_anchors = static_cast<uint32_t>(retained_max);
+    config.hard_max_retained_entries = static_cast<uint32_t>(retained_max);
+    config.automatic_checkpoints = env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0;
+    config.checkpoint_minimum_tokens = static_cast<uint64_t>(
+        env_int("CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS", 2048));
+    config.checkpoint_interval_tokens = static_cast<uint64_t>(
+        env_int("CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS", 2048));
+    config.checkpoint_max = static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_MAX", 8));
+    config.checkpoint_budget_basis_points = static_cast<uint32_t>(
+        env_int("CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS", 2500));
+    config.checkpoint_budget_bytes = env_u64("CLAP_CACHE_CHECKPOINT_BUDGET_BYTES", 0);
+    loaded.cache_executor = std::make_unique<clap::llama::CacheExecutor>(
+        config, std::make_unique<clap::llama::LlamaPhysicalCacheBackend>(
+            loaded.runtime.context()));
+    loaded.coordinator = &loaded.cache_executor->coordinator();
   } catch (const std::exception& error) {
-    loaded.coordinator.reset();
+    loaded.coordinator = nullptr;
+    loaded.cache_executor.reset();
     fprintf(stderr, "clap-llama: cache coordinator unavailable; using no-cache fresh mode: %s\n", error.what());
   }
 }
@@ -366,34 +372,35 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
                               std::vector<llama_token>& prompt_tokens,
                               int32_t output_reserve,
                               const std::vector<uint64_t>& stable_boundaries) {
-  if (!loaded.coordinator) return false;
-  clap::llama_cache::Plan plan;
-  std::vector<uint8_t> slot_capabilities;
-  slot_capabilities.reserve(loaded.slots.size());
-  for (const auto& slot : loaded.slots) {
-    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
-    if (!slot.tokens.empty()) {
-      flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
-      if (!loaded.runtime.hybrid()) flags |= CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM;
+  if (!loaded.cache_executor) return false;
+  auto& executor_slots = loaded.cache_executor->slots();
+  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
+    executor_slots[index].tokens = loaded.slots[index].tokens;
+    executor_slots[index].busy = loaded.slots[index].busy;
+    executor_slots[index].is_anchor = loaded.slots[index].is_anchor;
+    if (loaded.slots[index].coordinator_generation != 0) {
+      executor_slots[index].generation = loaded.slots[index].coordinator_generation;
     }
-    slot_capabilities.push_back(flags);
-  }
-  try {
-    plan = loaded.coordinator->plan(prompt_tokens, req.cache_identity,
-        llama_cache_capabilities(loaded), static_cast<uint64_t>(output_reserve),
-        CLAP_CACHE_SLOT_SESSION, slot_capabilities, stable_boundaries);
-  } catch (const clap::llama_cache::Error& error) {
-    if (error.status == CLAP_CACHE_NO_CAPACITY || error.status == CLAP_CACHE_SLOT_BUSY) {
-      throw CacheBackpressure(error.what());
-    }
-    req.cache_fallback = "coordinator_plan_failed_closed";
-    fprintf(stderr, "clap-llama: cache coordinator plan failed closed: %s\n", error.what());
-    throw;
   }
 
-  const auto view = plan.view();
+  clap::llama::CacheAdmissionResult decision = [&] {
+    try {
+      return loaded.cache_executor->admit({
+          prompt_tokens, req.cache_identity, llama_cache_capabilities(loaded),
+          static_cast<uint64_t>(output_reserve), CLAP_CACHE_SLOT_SESSION, {},
+          stable_boundaries, loaded.runtime.hybrid(), {}});
+    } catch (const clap::llama_cache::Error& error) {
+      if (error.status == CLAP_CACHE_NO_CAPACITY || error.status == CLAP_CACHE_SLOT_BUSY) {
+        throw CacheBackpressure(error.what());
+      }
+      req.cache_fallback = "coordinator_plan_failed_closed";
+      fprintf(stderr, "clap-llama: cache coordinator plan failed closed: %s\n", error.what());
+      throw;
+    }
+  }();
+
   req.cache_candidates = json::array();
-  for (const auto& candidate : plan.candidates()) {
+  for (const auto& candidate : decision.candidates) {
     const char* rejection = candidate_rejection(candidate.rejection);
     req.cache_candidates.push_back(json{
       {"slot", candidate.slot}, {"generation", candidate.generation},
@@ -412,116 +419,63 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
       {"rejection", rejection ? json(rejection) : json(nullptr)},
     });
   }
-  const std::size_t target = view.target.slot;
-  const std::size_t donor = view.has_donor ? view.donor.slot : SIZE_MAX;
-  if (target >= loaded.slots.size() || (donor != SIZE_MAX && donor >= loaded.slots.size())) {
-    plan.abort();
-    throw std::runtime_error("cache coordinator returned an invalid slot");
+
+  const std::size_t target = decision.target_slot;
+  const std::size_t resident = static_cast<std::size_t>(decision.realized_reuse_tokens);
+  auto& slot = loaded.slots[target];
+  slot.tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() +
+      static_cast<std::ptrdiff_t>(resident));
+  slot.coordinator_generation = decision.target_generation;
+  slot.last_used = ++loaded.use_counter;
+  slot.busy = true;
+  slot.is_anchor = false;
+  for (const uint32_t victim : decision.eviction_slots) {
+    if (victim != target && victim < loaded.slots.size()) loaded.slots[victim] = {};
+    req.cache_evicted_slots.push_back(victim);
+    loaded.last_eviction_reason = "hard_ceiling";
   }
-
-  llama_memory_t mem = llama_get_memory(loaded.runtime.context());
-  try {
-    for (const auto& victim : plan.evictions()) {
-      if (victim.slot >= loaded.slots.size() || victim.slot == target) continue;
-      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(victim.slot), -1, -1);
-      loaded.slots[victim.slot] = {};
-      req.cache_evicted_slots.push_back(victim.slot);
-      loaded.last_eviction_reason = "hard_ceiling";
-    }
-
-    auto& slot = loaded.slots[target];
-    std::size_t resident = 0;
-    if (view.operation != CLAP_CACHE_OPERATION_CONTINUE) {
-      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
-      slot.tokens.clear();
-      slot.is_anchor = false;
-    }
-    if (view.operation == CLAP_CACHE_OPERATION_CONTINUE) {
-      resident = std::min<std::size_t>(view.reuse_tokens, prompt_tokens.size() - 1);
-      if (resident == 0 || !llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target),
-                                                static_cast<llama_pos>(resident), -1)) {
-        throw std::runtime_error("coordinator-selected continuation could not be materialized");
-      }
-    } else if (view.operation == CLAP_CACHE_OPERATION_BRANCH) {
-      resident = std::min<std::size_t>(view.reuse_tokens, prompt_tokens.size() - 1);
-      if (resident > 0) {
-        if (loaded.runtime.hybrid() && resident == loaded.slots[donor].tokens.size()) {
-          llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
-                              static_cast<llama_seq_id>(target), -1, -1);
-        } else if (!loaded.runtime.hybrid()) {
-          llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
-                              static_cast<llama_seq_id>(target), 0,
-                              static_cast<llama_pos>(resident));
-        } else {
-          throw std::runtime_error("coordinator-selected branch could not be materialized");
-        }
-      }
-    } else if (view.operation == CLAP_CACHE_OPERATION_RESTORE &&
-               view.reuse_tokens < prompt_tokens.size()) {
-      resident = static_cast<std::size_t>(view.reuse_tokens);
-      llama_memory_seq_cp(mem, static_cast<llama_seq_id>(donor),
-                          static_cast<llama_seq_id>(target), -1, -1);
-    }
-
-    const auto decision = plan.commit(resident, CLAP_CACHE_SLOT_SESSION);
-    const auto info = loaded.coordinator->slot(static_cast<uint32_t>(target));
-    slot.tokens.assign(prompt_tokens.begin(), prompt_tokens.begin() +
-        static_cast<std::ptrdiff_t>(resident));
-    slot.coordinator_generation = info.generation;
-    slot.last_used = ++loaded.use_counter;
-    slot.busy = true;
-    req.coordinator = loaded.coordinator.get();
-    req.slot = &slot;
-    req.seq = static_cast<llama_seq_id>(target);
-    req.n_pos = static_cast<int32_t>(resident);
-    req.cached_prompt_tokens = static_cast<int>(decision.realized_reuse_tokens);
-    req.cache_planned_reuse_tokens = decision.planned_reuse_tokens;
-    req.cache_realized_reuse_tokens = decision.realized_reuse_tokens;
-    req.cache_decision_us = decision.decision_us;
-    req.anchor_boundaries.clear();
-    for (const auto boundary : plan.anchor_boundaries()) {
-      const auto count = static_cast<std::size_t>(boundary);
-      req.anchor_boundaries.push_back(count);
-      const auto known = std::find_if(req.resolved_boundaries.begin(),
-          req.resolved_boundaries.end(), [count](const auto& value) {
-            return value.token_count == count;
-          });
-      if (known == req.resolved_boundaries.end()) {
-        req.resolved_boundaries.push_back(
-            {count, "automatic_token", "", false, "authorized", ""});
-      }
-    }
-    req.anchor_at = req.anchor_boundaries.empty()
-        ? -1 : static_cast<int32_t>(req.anchor_boundaries.front());
-    req.stable_boundary = clap::llama_boundary::exact(
-        req.full_prompt_tokens, static_cast<std::size_t>(view.anchor_tokens), "prompt",
-        [](const auto& tokens, std::size_t count) {
-          return token_fingerprint(tokens, count);
+  req.coordinator = loaded.coordinator;
+  req.slot = &slot;
+  req.seq = static_cast<llama_seq_id>(target);
+  req.n_pos = static_cast<int32_t>(resident);
+  req.cached_prompt_tokens = static_cast<int>(decision.realized_reuse_tokens);
+  req.cache_planned_reuse_tokens = decision.planned_reuse_tokens;
+  req.cache_realized_reuse_tokens = decision.realized_reuse_tokens;
+  req.cache_decision_us = decision.decision_us;
+  req.anchor_boundaries.clear();
+  for (const auto boundary : decision.anchor_boundaries) {
+    const auto count = static_cast<std::size_t>(boundary);
+    req.anchor_boundaries.push_back(count);
+    const auto known = std::find_if(req.resolved_boundaries.begin(),
+        req.resolved_boundaries.end(), [count](const auto& value) {
+          return value.token_count == count;
         });
-    req.cache_donor_slot = decision.has_donor ? static_cast<int>(decision.donor_slot) : -1;
-    req.cache_donor_generation = decision.has_donor
-        ? loaded.coordinator->slot(decision.donor_slot).generation : 0;
-    req.cache_target_generation = info.generation;
-    req.cache_reuse_scope = cache_scope_name(decision.scope);
-    if (decision.operation == CLAP_CACHE_OPERATION_CONTINUE && resident > 0) {
-      req.cache_reuse_kind = "slot";
-    } else if (decision.operation == CLAP_CACHE_OPERATION_RESTORE && resident > 0) {
-      req.cache_reuse_kind = "anchor";
-    } else if (decision.operation == CLAP_CACHE_OPERATION_BRANCH && resident > 0) {
-      req.cache_reuse_kind = "branch";
+    if (known == req.resolved_boundaries.end()) {
+      req.resolved_boundaries.push_back(
+          {count, "automatic_token", "", false, "authorized", ""});
     }
-    for (const auto& victim : plan.evictions()) {
-      if (victim.slot == target) req.cache_evicted_slots.push_back(victim.slot);
-      if (victim.slot == target) loaded.last_eviction_reason = "hard_ceiling";
-    }
-    prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() +
-        static_cast<std::ptrdiff_t>(resident));
-    return true;
-  } catch (...) {
-    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
-    loaded.slots[target] = {};
-    throw;
   }
+  req.anchor_at = req.anchor_boundaries.empty()
+      ? -1 : static_cast<int32_t>(req.anchor_boundaries.front());
+  req.stable_boundary = clap::llama_boundary::exact(
+      req.full_prompt_tokens, static_cast<std::size_t>(decision.anchor_tokens), "prompt",
+      [](const auto& tokens, std::size_t count) {
+        return token_fingerprint(tokens, count);
+      });
+  req.cache_donor_slot = decision.has_donor ? static_cast<int>(decision.donor_slot) : -1;
+  req.cache_donor_generation = decision.donor_generation;
+  req.cache_target_generation = decision.target_generation;
+  req.cache_reuse_scope = cache_scope_name(decision.scope);
+  if (decision.operation == CLAP_CACHE_OPERATION_CONTINUE && resident > 0) {
+    req.cache_reuse_kind = "slot";
+  } else if (decision.operation == CLAP_CACHE_OPERATION_RESTORE && resident > 0) {
+    req.cache_reuse_kind = "anchor";
+  } else if (decision.operation == CLAP_CACHE_OPERATION_BRANCH && resident > 0) {
+    req.cache_reuse_kind = "branch";
+  }
+  prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.begin() +
+      static_cast<std::ptrdiff_t>(resident));
+  return true;
 }
 
 void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {

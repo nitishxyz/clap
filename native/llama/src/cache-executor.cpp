@@ -1,5 +1,6 @@
 #include "clap/llama/cache-executor.h"
 
+#include <exception>
 #include <stdexcept>
 #include <utility>
 
@@ -81,9 +82,113 @@ CacheAdmissionResult CacheExecutor::preview(const CacheAdmissionRequest& request
   CacheAdmissionResult result{
       view.operation, view.target.slot, view.target.generation,
       view.donor.slot, view.donor.generation, view.reuse_tokens,
-      std::move(evictions), plan.anchor_boundaries()};
+      view.reuse_tokens, 0, view.decision_us, 0, view.anchor_tokens,
+      view.has_donor != 0, std::move(evictions), plan.anchor_boundaries(), plan.candidates()};
   plan.abort();
   return result;
+}
+
+CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) {
+  std::vector<uint8_t> capabilities;
+  capabilities.reserve(slots_.size());
+  for (const auto& slot : slots_) {
+    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
+    if (!slot.tokens.empty()) {
+      flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
+      if (!request.hybrid) flags |= CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM;
+    }
+    capabilities.push_back(flags);
+  }
+  auto plan = coordinator_->plan(request.tokens, request.identity, request.capabilities,
+      request.output_reserve, request.result_state,
+      request.slot_capabilities.empty() ? capabilities : request.slot_capabilities,
+      request.stable_boundaries);
+  const auto view = plan.view();
+  const std::size_t target = view.target.slot;
+  const std::size_t donor = view.has_donor ? view.donor.slot : SIZE_MAX;
+  if (target >= slots_.size() || (donor != SIZE_MAX && donor >= slots_.size()) ||
+      view.target.generation != slots_[target].generation ||
+      (donor != SIZE_MAX && view.donor.generation != slots_[donor].generation)) {
+    plan.abort();
+    for (uint32_t slot = 0; slot < slots_.size(); ++slot) {
+      slots_[slot].generation = coordinator_->slot(slot).generation;
+    }
+    throw std::runtime_error("cache coordinator returned an invalid slot");
+  }
+  std::size_t resident = 0;
+  bool committed = false;
+  try {
+    auto& slot = slots_[target];
+    if (view.operation != CLAP_CACHE_OPERATION_CONTINUE) {
+      backend_->remove(static_cast<int32_t>(target), -1, -1);
+      slot.tokens.clear();
+      slot.is_anchor = false;
+    }
+    if (view.operation == CLAP_CACHE_OPERATION_CONTINUE) {
+      resident = std::min<std::size_t>(view.reuse_tokens, request.tokens.size() - 1);
+      if (resident == 0 || !backend_->remove(static_cast<int32_t>(target),
+          static_cast<int32_t>(resident), -1)) {
+        throw std::runtime_error("coordinator-selected continuation could not be materialized");
+      }
+    } else if (view.operation == CLAP_CACHE_OPERATION_BRANCH) {
+      resident = std::min<std::size_t>(view.reuse_tokens, request.tokens.size() - 1);
+      if (resident > 0) {
+        if (request.hybrid && resident == slots_[donor].tokens.size()) {
+          backend_->copy(static_cast<int32_t>(donor), static_cast<int32_t>(target), -1, -1);
+        } else if (!request.hybrid) {
+          backend_->copy(static_cast<int32_t>(donor), static_cast<int32_t>(target),
+                         0, static_cast<int32_t>(resident));
+        } else {
+          throw std::runtime_error("coordinator-selected branch could not be materialized");
+        }
+      }
+    } else if (view.operation == CLAP_CACHE_OPERATION_RESTORE &&
+               view.reuse_tokens < request.tokens.size()) {
+      resident = static_cast<std::size_t>(view.reuse_tokens);
+      backend_->copy(static_cast<int32_t>(donor), static_cast<int32_t>(target), -1, -1);
+    }
+    if (request.commit_hook) request.commit_hook();
+    const auto decision = plan.commit(resident, request.result_state);
+    committed = true;
+    const auto info = coordinator_->slot(static_cast<uint32_t>(target));
+    slot.tokens.assign(request.tokens.begin(), request.tokens.begin() +
+        static_cast<std::ptrdiff_t>(resident));
+    slot.generation = info.generation;
+    slot.busy = true;
+
+    std::vector<uint32_t> evictions;
+    for (const auto& victim : plan.evictions()) {
+      if (victim.slot >= slots_.size()) continue;
+      if (victim.slot != target) {
+        backend_->remove(static_cast<int32_t>(victim.slot), -1, -1);
+        slots_[victim.slot] = {};
+        slots_[victim.slot].generation = coordinator_->slot(victim.slot).generation;
+      }
+      evictions.push_back(victim.slot);
+    }
+    return {decision.operation, static_cast<uint32_t>(target), info.generation,
+      decision.donor_slot, decision.has_donor ? coordinator_->slot(decision.donor_slot).generation : 0,
+      resident, decision.planned_reuse_tokens, decision.realized_reuse_tokens,
+      decision.decision_us, decision.scope, view.anchor_tokens, decision.has_donor != 0,
+      std::move(evictions), plan.anchor_boundaries(), plan.candidates()};
+  } catch (...) {
+    const auto failure = std::current_exception();
+    if (!committed) {
+      try { plan.abort(); } catch (...) {}
+    }
+    try { backend_->remove(static_cast<int32_t>(target), -1, -1); } catch (...) {}
+    for (uint32_t slot = 0; slot < slots_.size(); ++slot) {
+      try {
+        slots_[slot].generation = coordinator_->slot(slot).generation;
+      } catch (...) {
+        slots_[slot].generation = 0;
+      }
+    }
+    slots_[target].tokens.clear();
+    slots_[target].busy = false;
+    slots_[target].is_anchor = false;
+    std::rethrow_exception(failure);
+  }
 }
 
 CacheLease CacheExecutor::acquire(uint32_t slot_id) {
@@ -99,7 +204,7 @@ CacheLease CacheExecutor::acquire(uint32_t slot_id) {
 CacheSlotSnapshot CacheExecutor::slot(uint32_t slot_id) const {
   if (slot_id >= slots_.size()) throw std::out_of_range("cache slot is out of range");
   const auto& slot = slots_[slot_id];
-  return {slot_id, slot.generation, slot.busy, slot.anchor, slot.tokens.size()};
+  return {slot_id, slot.generation, slot.busy, slot.is_anchor, slot.tokens.size()};
 }
 
 void CacheExecutor::release(uint32_t slot_id, uint64_t generation) {
