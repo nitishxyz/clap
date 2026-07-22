@@ -232,6 +232,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(clap-llama-cache-checkpoint PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-checkpoint COMMAND clap-llama-cache-checkpoint)
+  set_tests_properties(clap-llama-cache-checkpoint PROPERTIES LABELS "tier-a;cache")
 
   add_executable(clap-llama-cache-transaction
     tests/cache-transaction.test.cpp
@@ -245,6 +246,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(clap-llama-cache-transaction PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-transaction COMMAND clap-llama-cache-transaction)
+  set_tests_properties(clap-llama-cache-transaction PROPERTIES LABELS "tier-a;cache")
 
   add_executable(clap-llama-cache-request-lifecycle
     tests/cache-request-lifecycle.test.cpp
@@ -263,6 +265,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(clap-llama-cache-request-lifecycle PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-request-lifecycle COMMAND clap-llama-cache-request-lifecycle)
+  set_tests_properties(clap-llama-cache-request-lifecycle PROPERTIES LABELS "tier-a;cache")
 
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)

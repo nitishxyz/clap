@@ -144,20 +144,13 @@ jobs:
           path: native/mlx/.build
           key: swiftpm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.native }}-${{ hashFiles('native/mlx/Package.swift', 'native/mlx/Package.resolved', 'native/mlx/Sources/**/*', 'native/mlx/Tests/**/*', 'native/cache/include/**/*', 'native/cache/Cargo.lock', 'native/cache/Cargo.toml', 'native/cache/crates/**/*') }}
       - run: bun install --frozen-lockfile
-      - name: Build Rust bridge archive
-        run: cargo build --release --locked -p clap-cache-ffi --manifest-path native/cache/Cargo.toml
-      - name: Test llama cache adapter
-        run: |
-          c++ -std=c++17 -Wall -Wextra -Werror native/llama/cache-adapter.test.cpp \
-            -I native/cache/include native/cache/target/release/libclap_cache_ffi.a \
-            -framework Security -framework SystemConfiguration -o "$RUNNER_TEMP/cache-adapter-test"
-          "$RUNNER_TEMP/cache-adapter-test"
+      - name: Vendor llama.cpp sources
+        run: bun run runtime:llama:vendor
+      - name: Test native cache Tier A
+        run: bun run native:cache:tier-a
       - name: Build llama worker
         run: |
-          bun run runtime:llama:vendor
           bun run runtime:llama:build
-      - name: Test Swift cache bridge
-        run: swift test --package-path native/mlx -c release
       - name: Build Swift MLX worker
         run: bun run runtime:mlx:build
       - name: Validate native bundle
