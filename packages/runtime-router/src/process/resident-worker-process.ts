@@ -58,6 +58,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void,
     private readonly descriptor: WorkerModelDescriptor = { modelId: key },
     private readonly launchLogs = new WorkerLaunchLogStore(),
+    private readonly spawnWorker: typeof Bun.spawn = Bun.spawn,
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -170,10 +171,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       modelId: this.descriptor.modelId, revision: this.descriptor.revision, modelPath: this.modelPath }, status.command);
     let proc: WorkerProcess;
     try {
-      proc = Bun.spawn(status.command, { stdin: "pipe", stdout: "pipe",
+      proc = this.spawnWorker(status.command, { stdin: "pipe", stdout: "pipe",
         stderr: Bun.file(context.paths.stderrPath), env: { ...process.env, ...this.envOverrides } });
     } catch (error) {
-      await this.launchLogs.finalize(context, null, "spawn_failure");
+      await this.ignoreMetadataFailure(() => this.launchLogs.finalize(context, null, "spawn_failure"));
       throw error;
     }
     let resolveHandshake!: () => void;
@@ -189,7 +190,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.workerLaunchId = context.paths.launchId;
     this.lastLaunchPaths = context.paths;
     this.crashClassification = undefined;
-    await this.launchLogs.markSpawned(context, proc.pid);
+    await this.ignoreMetadataFailure(() => this.launchLogs.markSpawned(context, proc.pid));
     launch.handshakeTimer = setTimeout(() => {
       if (this.active === launch && launch.resolveHandshake) this.protocolUnhealthy(launch,
         new WorkerProtocolFault("handshake_timeout", "Worker did not send ready within 1000ms", "worker"));
@@ -251,7 +252,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.retention = undefined;
       this.tokenCapabilities = undefined;
     }
-    await this.launchLogs.finalize(launch.context, exitCode, classification);
+    await this.ignoreMetadataFailure(() => this.launchLogs.finalize(launch.context, exitCode, classification));
     launch.resolveExited();
   }
 
@@ -260,7 +261,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       const fact = launch.tracker.consumeLine(line);
       if (fact.kind === "ready") {
         launch.context.phase = "idle";
-        void this.launchLogs.markReady(launch.context);
+        void this.ignoreMetadataFailure(() => this.launchLogs.markReady(launch.context));
         launch.resolveHandshake?.();
         this.clearHandshake(launch, false);
       } else this.handleV1Fact(launch, fact);
@@ -394,6 +395,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private async closeOnce(launch: ActiveLaunch): Promise<void> {
     launch.expectedExit = true;
+    if (launch.resolveHandshake) {
+      launch.rejectHandshake?.(this.workerError("resident worker shut down", "resident_worker_error",
+        launch.context.paths.stderrPath));
+      this.clearHandshake(launch);
+    }
     this.rejectLaunchPending(launch, "resident worker shut down");
     if (launch.proc.exitCode === null) {
       const id = `cmd_${crypto.randomUUID()}`;
@@ -421,6 +427,10 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.pending.delete(id); pending.cleanup?.();
       pending.reject(this.workerError(message, code, pending.launchPaths.stderrPath));
     }
+  }
+
+  private async ignoreMetadataFailure(operation: () => Promise<void>): Promise<void> {
+    try { await operation(); } catch { /* diagnostics persistence must not replace worker outcomes */ }
   }
 
   private async awaitRestartBackoff(): Promise<void> {

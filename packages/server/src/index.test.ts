@@ -2422,6 +2422,18 @@ describe("clap server", () => {
       const unloadBody = await unload.json();
       expect(unloadBody.unloaded).toBe(true);
 
+      let metadata;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        metadata = JSON.parse(await readFile(loadBody.model.worker.launchMetadataPath, "utf8"));
+        if (metadata.endedAt) break;
+        await Bun.sleep(10);
+      }
+      expect(metadata).toMatchObject({
+        launchId: loadBody.model.worker.launchId,
+        crashClassification: "expected_exit",
+        endedAt: expect.any(String),
+      });
+
       const empty = await app.request("/clap/v1/runtime/models");
       expect((await empty.json()).models).toEqual([]);
     } finally {

@@ -14,6 +14,7 @@ async function faultWorker(scenario: string) {
   const dir = await mkdtemp(join(tmpdir(), `clap-v1-fault-${scenario}-`));
   const worker = join(dir, "worker");
   const previous = process.env.CLAP_LLAMA_WORKER;
+  const previousHome = process.env.CLAP_HOME;
   const source = `#!/usr/bin/env bun
 const scenario = ${JSON.stringify(scenario)};
 const send = (value) => console.log(typeof value === "string" ? value : JSON.stringify(value));
@@ -25,6 +26,7 @@ if (scenario === "version_mismatch") { send({ protocol: 2, type: "ready", worker
 if (scenario === "non_json") { send("not-json"); await Bun.sleep(10000); }
 if (scenario === "unknown_type") { send({ protocol: 1, type: "surprise" }); await Bun.sleep(10000); }
 send({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} });
+if (scenario === "exit_idle") setTimeout(() => process.exit(23), 100);
 const terminal = new Set();
 const complete = (id, sequence, result) => { if (terminal.has(id)) return; terminal.add(id); scoped("completed", id, sequence, { result }); };
 const decoder = new TextDecoder(); let buffer = "";
@@ -48,7 +50,10 @@ for await (const chunk of Bun.stdin.stream()) {
       }
       continue;
     }
-    if (command.type !== "generate") { scoped("started", id, 1); complete(id, 2, { kind: "unloaded" }); continue; }
+    if (command.type !== "generate") {
+      if (scenario === "exit_control" && command.type === "set_max_active") process.exit(24);
+      scoped("started", id, 1); complete(id, 2, { kind: "unloaded" }); continue;
+    }
     if (scenario === "exit_before_start") process.exit(19);
     if (scenario === "duplicate_accepted") { scoped("accepted", id, 1); continue; }
     scoped("started", id, 1);
@@ -70,13 +75,16 @@ for await (const chunk of Bun.stdin.stream()) {
 }`;
   await writeFile(worker, source); await chmod(worker, 0o755);
   process.env.CLAP_LLAMA_WORKER = worker;
+  process.env.CLAP_HOME = join(dir, "home");
   cleanup.push(async () => {
     if (previous === undefined) delete process.env.CLAP_LLAMA_WORKER;
     else process.env.CLAP_LLAMA_WORKER = previous;
+    if (previousHome === undefined) delete process.env.CLAP_HOME;
+    else process.env.CLAP_HOME = previousHome;
     await rm(dir, { recursive: true, force: true });
   });
   const registry = new ResidentWorkerRegistry();
-  cleanup.push(async () => registry.shutdownAll());
+  cleanup.push(async () => registry.shutdownAsync());
   return registry.getOrCreate(scenario, "llama", join(dir, "model.gguf"));
 }
 
@@ -138,8 +146,29 @@ describe.serial("resident v1 fault-injection matrix", () => {
       await expect(operation).rejects.toThrow(phase);
       expect(tokens.every((token) => token === "valid")).toBe(true);
       expect(worker.info().state).toBe("not_started");
+      expect(worker.info().stderrLogPath).toContain(worker.info().launchId!);
+      const expectedClassification = scenario === "exit_handshake" ? "handshake"
+        : scenario === "exit_load" ? "load"
+        : scenario === "exit_before_start" ? "prefill"
+        : scenario === "exit_prefill" ? "prefill" : "decode";
+      expect(worker.info().crashClassification).toBe(expectedClassification);
     });
   }
+
+  test("an idle exit is classified and links its exact stderr", async () => {
+    const worker = await faultWorker("exit_idle");
+    await worker.load().catch(() => {});
+    await Bun.sleep(150);
+    expect(worker.info()).toMatchObject({ state: "not_started", crashClassification: "idle" });
+    expect(worker.info().stderrLogPath).toContain(worker.info().launchId!);
+  });
+
+  test("an exit during a control command is classified", async () => {
+    const worker = await faultWorker("exit_control");
+    await worker.load();
+    await expect(worker.setMaxActive!(2)).rejects.toThrow("during request");
+    expect(worker.info().crashClassification).toBe("idle");
+  });
 
   test("an exact diagnostic is retained on the subsequent worker failure", async () => {
     const worker = await faultWorker("diagnostic_exit");

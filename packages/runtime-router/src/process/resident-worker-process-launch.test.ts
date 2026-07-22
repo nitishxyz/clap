@@ -3,7 +3,9 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerRegistry } from "../resident";
-import type { WorkerLaunchMetadata } from "./types";
+import { ResidentWorkerProcess } from "./resident-worker-process";
+import { WorkerLaunchLogStore } from "./launch-log-store";
+import type { WorkerLaunchContext, WorkerLaunchMetadata } from "./types";
 
 const originalHome = process.env.CLAP_HOME;
 const originalWorker = process.env.CLAP_LLAMA_WORKER;
@@ -122,5 +124,38 @@ describe.serial("resident worker per-launch logs", () => {
     expect(finalized[0]?.crashClassification).toBe("decode");
     await worker.unload();
     registry.shutdownAll();
+  });
+
+  test("sidecar update failures do not mask the original worker exit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clap-sidecar-failure-"));
+    process.env.CLAP_HOME = join(root, "home");
+    process.env.CLAP_LLAMA_WORKER = await crashOnceWorker(root);
+    const model = join(root, "model.gguf"); await writeFile(model, "model");
+    class FailingUpdates extends WorkerLaunchLogStore {
+      override async markReady(_context: WorkerLaunchContext): Promise<void> { throw new Error("sidecar ready failed"); }
+      override async finalize(_context: WorkerLaunchContext): Promise<void> { throw new Error("sidecar finalize failed"); }
+    }
+    const worker = new ResidentWorkerProcess("sidecar", "llama", model, undefined, undefined,
+      undefined, { modelId: "sidecar" }, new FailingUpdates());
+    await expect(worker.chat({ model: "sidecar", messages: [{ role: "user", content: "crash" }], stream: false }))
+      .rejects.toThrow("exited during request with code 9");
+    expect(worker.info().stderrLogPath).toContain(worker.info().launchId!);
+    await worker.shutdownAsync();
+  });
+
+  test("records spawn failure without creating a resident process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clap-spawn-failure-"));
+    const home = join(root, "home");
+    process.env.CLAP_HOME = home;
+    process.env.CLAP_LLAMA_WORKER = await workerScript(root);
+    const model = join(root, "model.gguf"); await writeFile(model, "model");
+    const original = new Error("synthetic spawn failure");
+    const spawn = (() => { throw original; }) as typeof Bun.spawn;
+    const worker = new ResidentWorkerProcess("spawn", "llama", model, undefined, undefined,
+      undefined, { modelId: "spawn" }, new WorkerLaunchLogStore(), spawn);
+    await expect(worker.load()).rejects.toBe(original);
+    expect(worker.info().state).toBe("not_started");
+    const metadata = await waitForFinalized(home, 1);
+    expect(metadata[0]).toMatchObject({ exitStatus: null, crashClassification: "spawn_failure" });
   });
 });

@@ -3,6 +3,9 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerProcess } from "./resident-worker-process";
+import { ResidentWorkerRegistry } from "../resident";
+import { ModelLifecycleManager } from "../lifecycle";
+import type { ResolvedModel } from "@clap/models";
 import type { WorkerLaunchMetadata } from "./types";
 
 const originalHome = process.env.CLAP_HOME;
@@ -146,5 +149,28 @@ describe.serial("resident worker lifecycle races", () => {
     await Bun.sleep(350);
     expect(worker.info()).toMatchObject({ state: "resident", launchId: replacement });
     await worker.shutdownAsync();
+  });
+
+  test("registry shutdown and model expiry finalize their launches", async () => {
+    const first = await setup();
+    const shutdownRegistry = new ResidentWorkerRegistry();
+    const shutdownWorker = shutdownRegistry.getOrCreate("shutdown", "llama", first.worker.modelPath);
+    await shutdownWorker.load();
+    await shutdownRegistry.shutdownAsync();
+    expect((await finalized(first.home)).crashClassification).toBe("expected_exit");
+
+    const second = await setup();
+    const expiryRegistry = new ResidentWorkerRegistry();
+    const expiryWorker = expiryRegistry.getOrCreate("expiry", "llama", second.worker.modelPath);
+    await expiryWorker.load();
+    let now = Date.now();
+    const lifecycle = new ModelLifecycleManager(() => now, (entry) => expiryRegistry.shutdown(entry.key));
+    const model: ResolvedModel = { id: "expiry", input: "expiry", backend: "llama", format: "gguf",
+      modelPath: second.worker.modelPath, status: "available" };
+    lifecycle.load(model, { keepAlive: "1s", worker: expiryWorker.info() });
+    now += 1_001;
+    expect(lifecycle.list()).toEqual([]);
+    await expiryRegistry.shutdownAsync();
+    expect((await finalized(second.home)).crashClassification).toBe("expected_exit");
   });
 });

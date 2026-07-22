@@ -105,4 +105,32 @@ describe("launch log store", () => {
       pruneLaunchLogs(backend, { maxLaunchesPerModel: 0, maxBytesPerBackend: 0 })));
     expect(await exists(join(backend, "model", "old.json"))).toBe(false);
   });
+
+  test("prunes finalized logs while another model is active", async () => {
+    const backend = await mkdtemp(join(tmpdir(), "clap-active-model-"));
+    const activeDirectory = join(backend, "active-model");
+    const oldDirectory = join(backend, "old-model");
+    await createLaunch(activeDirectory, "active", "2026-01-01T00:00:00Z", 30);
+    await createLaunch(oldDirectory, "old", "2026-01-01T00:00:00Z", 30);
+    const paths = { directory: activeDirectory, metadataPath: join(activeDirectory, "active.json"),
+      stderrPath: join(activeDirectory, "active.stderr.log") } as WorkerLaunchPaths;
+    const release = new LaunchLogStore().registerActive(paths);
+    await pruneLaunchLogs(backend, { maxLaunchesPerModel: 0, maxBytesPerBackend: 0 });
+    expect(await exists(paths.metadataPath)).toBe(true);
+    expect(await exists(join(oldDirectory, "old.json"))).toBe(false);
+    release();
+  });
+
+  test("applies backend byte pressure across model directories", async () => {
+    const backend = await mkdtemp(join(tmpdir(), "clap-backend-bytes-"));
+    await createLaunch(join(backend, "first"), "first", "2026-01-01T00:00:00Z", 100);
+    await createLaunch(join(backend, "second"), "second", "2026-01-02T00:00:00Z", 100);
+    const secondBytes = (await Bun.file(join(backend, "second", "second.json")).size) + 100;
+    await Promise.all([
+      pruneLaunchLogs(backend, { maxLaunchesPerModel: 20, maxBytesPerBackend: secondBytes }),
+      pruneLaunchLogs(backend, { maxLaunchesPerModel: 20, maxBytesPerBackend: secondBytes }),
+    ]);
+    expect(await exists(join(backend, "first", "first.json"))).toBe(false);
+    expect(await exists(join(backend, "second", "second.json"))).toBe(true);
+  });
 });
