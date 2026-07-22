@@ -37,6 +37,49 @@ describe("worker protocol v1 fixtures", () => {
 });
 
 describe("worker protocol validation", () => {
+  test("requires a strict opaque cache identity on generate requests", () => {
+    const identity = fixtureCacheIdentity();
+    const base = { protocol: 1, type: "generate", request_id: "req", prompt: "hello" };
+    expect(decodeWorkerRequest({ ...base, cache_identity: identity })).toMatchObject({ cache_identity: identity });
+    expect(() => decodeWorkerRequest(base)).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerRequest({ ...base, cache_identity: { ...identity, tenant_root: "ABC" } })).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerRequest({ ...base, cache_identity: { ...identity, namespace_id: "18446744073709551616" } })).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerRequest({ ...base, cache_identity: { ...identity, secret: "raw-secret" } })).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerRequest({ ...base, cache_identity: {
+      ...identity, physical: { ...identity.physical, installation_key: "raw-secret" },
+    } })).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerRequest({ ...base, cache_identity: {
+      ...identity, display: { namespace: "x".repeat(129) },
+    } })).toThrow(ProtocolValidationError);
+  });
+
+function fixtureCacheIdentity() {
+  const fingerprint = "a".repeat(64);
+  return {
+    version: 1,
+    generation: "sec_fixture",
+    tenant_root: fingerprint,
+    scope: "tenant",
+    scope_fingerprint: fingerprint,
+    namespace_fingerprint: "b".repeat(64),
+    namespace_id: "1",
+    priority: "interactive",
+    side_request: false,
+    display: {},
+    physical: {
+      fingerprint: "c".repeat(64),
+      backend: "llama",
+      resolved_revision: "local:fixture",
+      model_artifact_fingerprint: "d".repeat(64),
+      tokenizer_fingerprint: "d".repeat(64),
+      context_allocation: 4096,
+      kv_format: "f16",
+      unified_kv: true,
+      layout_version: 1,
+    },
+  } as const;
+}
+
   test("requires protocol exactly 1 and nonempty request IDs", () => {
     expect(() => decodeWorkerRequest({ protocol: 2, type: "shutdown", request_id: "req" })).toThrow(ProtocolValidationError);
     expect(() => decodeWorkerRequest({ protocol: 1, type: "shutdown", request_id: "" })).toThrow(ProtocolValidationError);

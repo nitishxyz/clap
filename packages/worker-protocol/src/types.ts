@@ -28,7 +28,34 @@ export type ProtocolError = {
 };
 
 export type LoadRequest = { protocol: 1; type: "load"; request_id: string; model: string; [key: string]: unknown };
-export type GenerateRequest = { protocol: 1; type: "generate"; request_id: string; prompt: string; [key: string]: unknown };
+export type CacheIdentity = {
+  version: 1;
+  generation: string;
+  tenant_root: string;
+  project_fingerprint?: string;
+  harness_fingerprint?: string;
+  agent_fingerprint?: string;
+  session_fingerprint?: string;
+  scope: "tenant" | "project" | "harness" | "agent" | "session";
+  scope_fingerprint: string;
+  namespace_fingerprint: string;
+  namespace_id: string;
+  priority: "interactive" | "background";
+  side_request: boolean;
+  display: { namespace?: string; project?: string; harness?: string; agent?: string; session?: string };
+  physical: {
+    fingerprint: string;
+    backend: "llama" | "mlx";
+    resolved_revision: string;
+    model_artifact_fingerprint: string;
+    tokenizer_fingerprint: string;
+    context_allocation: number;
+    kv_format: string;
+    unified_kv: boolean;
+    layout_version: number;
+  };
+};
+export type GenerateRequest = { protocol: 1; type: "generate"; request_id: string; prompt: string; cache_identity: CacheIdentity; [key: string]: unknown };
 export type CancelRequest = { protocol: 1; type: "cancel"; request_id: string; target_request_id: string; [key: string]: unknown };
 export type SetMaxActiveRequest = { protocol: 1; type: "set_max_active"; request_id: string; max_active: number; [key: string]: unknown };
 export type UnloadRequest = { protocol: 1; type: "unload"; request_id: string; [key: string]: unknown };

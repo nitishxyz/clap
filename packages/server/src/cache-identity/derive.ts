@@ -143,8 +143,8 @@ function derivePhysicalDomain(key: Uint8Array, physical: PhysicalCacheDomain): U
   const modelRevision = sanitizePhysicalField("model revision", physical.modelRevision);
   const tokenizer = sanitizePhysicalField("tokenizer", physical.tokenizer);
   const kvFormat = sanitizePhysicalField("KV format", physical.kvFormat);
-  if (!Number.isSafeInteger(physical.contextAllocation) || physical.contextAllocation <= 0) {
-    throw new Error("Physical cache context allocation must be a positive safe integer");
+  if (!Number.isSafeInteger(physical.contextAllocation) || physical.contextAllocation < 0) {
+    throw new Error("Physical cache context allocation must be a nonnegative safe integer");
   }
   if (!Number.isSafeInteger(physical.layoutVersion) || physical.layoutVersion <= 0) {
     throw new Error("Physical cache layout version must be a positive safe integer");

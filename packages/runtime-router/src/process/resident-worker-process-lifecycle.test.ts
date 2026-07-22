@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerProcess } from "./resident-worker-process";
+import { testResidentChatOptions } from "../test-cache-identity";
 import { ResidentWorkerRegistry } from "../resident";
 import { ModelLifecycleManager } from "../lifecycle";
 import type { ResolvedModel } from "@clap/models";
@@ -142,7 +143,7 @@ describe.serial("resident worker lifecycle races", () => {
     const model = join(root, "model.gguf"); await writeFile(model, "model");
     const worker = new ResidentWorkerProcess("key", "llama", model);
     await worker.load();
-    await expect(worker.chat({ model: "key", messages: [{ role: "user", content: "x" }], stream: false }))
+    await expect(worker.chat({ model: "key", messages: [{ role: "user", content: "x" }], stream: false }, undefined, undefined, undefined, undefined, testResidentChatOptions))
       .rejects.toMatchObject({ code: "worker_protocol_error" });
     await worker.load();
     const replacement = worker.info().launchId;

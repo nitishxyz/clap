@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerRegistry } from "../resident";
 import { ResidentWorkerProcess } from "./resident-worker-process";
+import { testResidentChatOptions } from "../test-cache-identity";
 import { WorkerLaunchLogStore } from "./launch-log-store";
 import type { WorkerLaunchContext, WorkerLaunchMetadata } from "./types";
 
@@ -110,7 +111,7 @@ describe.serial("resident worker per-launch logs", () => {
     const worker = registry.getOrCreate("restart", "llama", model);
     let firstError: Error | undefined;
     try {
-      await worker.chat({ model: "restart", messages: [{ role: "user", content: "crash" }], stream: false });
+      await worker.chat({ model: "restart", messages: [{ role: "user", content: "crash" }], stream: false }, undefined, undefined, undefined, undefined, testResidentChatOptions);
     } catch (error) {
       firstError = error as Error;
     }
@@ -137,7 +138,7 @@ describe.serial("resident worker per-launch logs", () => {
     }
     const worker = new ResidentWorkerProcess("sidecar", "llama", model, undefined, undefined,
       undefined, { modelId: "sidecar" }, new FailingUpdates());
-    await expect(worker.chat({ model: "sidecar", messages: [{ role: "user", content: "crash" }], stream: false }))
+    await expect(worker.chat({ model: "sidecar", messages: [{ role: "user", content: "crash" }], stream: false }, undefined, undefined, undefined, undefined, testResidentChatOptions))
       .rejects.toThrow("exited during request with code 9");
     expect(worker.info().stderrLogPath).toContain(worker.info().launchId!);
     await worker.shutdownAsync();

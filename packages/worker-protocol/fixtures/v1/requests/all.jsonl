@@ -1,5 +1,5 @@
 {"protocol":1,"type":"load","request_id":"req_load","model":"/models/example"}
-{"protocol":1,"type":"generate","request_id":"req_generate","prompt":"Hello","max_tokens":16}
+{"protocol":1,"type":"generate","request_id":"req_generate","prompt":"Hello","max_tokens":16,"cache_identity":{"version":1,"generation":"sec_fixture","tenant_root":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope":"tenant","scope_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","namespace_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","namespace_id":"1","priority":"interactive","side_request":false,"display":{},"physical":{"fingerprint":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","backend":"llama","resolved_revision":"local:fixture","model_artifact_fingerprint":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","tokenizer_fingerprint":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","context_allocation":4096,"kv_format":"f16","unified_kv":true,"layout_version":1}}}
 {"protocol":1,"type":"cancel","request_id":"req_cancel","target_request_id":"req_generate"}
 {"protocol":1,"type":"set_max_active","request_id":"req_limit","max_active":2}
 {"protocol":1,"type":"unload","request_id":"req_unload"}

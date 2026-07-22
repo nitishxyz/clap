@@ -320,6 +320,55 @@ describe("clap server", () => {
     }
   });
 
+  test("sends stable opaque identities and isolates API key tenants in worker envelopes", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousLog = process.env.CLAP_FAKE_WORKER_REQUEST_LOG;
+    const root = await mkdtemp(join(tmpdir(), "clap-identity-envelope-"));
+    const home = join(root, "home");
+    const modelPath = join(root, "identity.gguf");
+    const logPath = join(root, "requests.jsonl");
+    try {
+      process.env.CLAP_HOME = home;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(root);
+      process.env.CLAP_FAKE_WORKER_REQUEST_LOG = logPath;
+      await mkdir(home);
+      await writeFile(modelPath, "identity fixture");
+      const app = createServer();
+      const createKey = async (name: string) => {
+        const response = await app.request("/clap/v1/keys", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }),
+        });
+        return (await response.json() as { key: string }).key;
+      };
+      const firstKey = await createKey("first");
+      const secondKey = await createKey("second");
+      const chat = (authorization?: string) => app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hello" }] }),
+      });
+      expect((await chat(`Bearer ${firstKey}`)).status).toBe(200);
+      expect((await chat(`Bearer ${secondKey}`)).status).toBe(200);
+      expect((await chat()).status).toBe(200);
+      expect((await chat()).status).toBe(200);
+
+      const envelopes = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+        .filter((request) => request.type === "generate");
+      expect(envelopes).toHaveLength(4);
+      expect(envelopes[0].cache_identity.tenant_root).not.toBe(envelopes[1].cache_identity.tenant_root);
+      expect(envelopes[2].cache_identity).toEqual(envelopes[3].cache_identity);
+      expect(envelopes.every((request) => request.cache_identity.scope === "tenant")).toBe(true);
+      expect(JSON.stringify(envelopes)).not.toContain(firstKey);
+      expect(JSON.stringify(envelopes)).not.toContain(secondKey);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_REQUEST_LOG", previousLog);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("valid credentials override local trust and survive internal delegation", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
@@ -3071,6 +3120,7 @@ async function waitForDownloadProgress(id: string) {
 async function fakeWorker(dir: string): Promise<string> {
   const path = join(dir, "fake-clap-worker");
   await writeFile(path, `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 const decoder = new TextDecoder();
 let buffer = "";
 const sequence = new Map();
@@ -3087,6 +3137,7 @@ for await (const chunk of Bun.stdin.stream()) {
     buffer = buffer.slice(newline + 1);
     if (!line) continue;
     const request = JSON.parse(line);
+    if (process.env.CLAP_FAKE_WORKER_REQUEST_LOG) appendFileSync(process.env.CLAP_FAKE_WORKER_REQUEST_LOG, JSON.stringify(request) + "\\n");
     const id = request.request_id;
     send("accepted", id);
     if (request.type === "shutdown") {

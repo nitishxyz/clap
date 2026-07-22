@@ -9,7 +9,7 @@ import { applyWorkerPayload, mapWorkerResultPayload, mapWorkerTelemetryPayload,
   type PendingWorkerResult } from "./result-mapper";
 import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResult,
   type ResidentCrashListener, type ResidentMlxMemory, type ResidentMlxRetention,
-  type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
+  type ResidentChatOptions, type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
 import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerModelDescriptor } from "./types";
 
 type WorkerProcess = Bun.Subprocess<"pipe", "pipe", ReturnType<typeof Bun.file>>;
@@ -102,9 +102,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   async chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal,
-    onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult> {
+    onProgress?: ResidentProgress, onDispatch?: () => void, options?: ResidentChatOptions): Promise<ResidentChatResult> {
     await this.load();
-    return this.sendControl("chat", request, onToken, signal, onProgress, onDispatch);
+    if (!options?.cacheIdentity) throw new Error("resident chat requires an internal cache identity");
+    const { cache_identity: _untrustedIdentity, ...publicRequest } = request as ChatCompletionRequest & { cache_identity?: unknown };
+    return this.sendControl("chat", publicRequest, onToken, signal, onProgress, onDispatch, undefined, options.cacheIdentity);
   }
 
   async setMaxActive(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void> {
@@ -352,7 +354,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private async sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void,
     signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void,
-    expectedLaunch?: ActiveLaunch): Promise<ResidentChatResult> {
+    expectedLaunch?: ActiveLaunch, cacheIdentity?: ResidentChatOptions["cacheIdentity"]): Promise<ResidentChatResult> {
     const launch = expectedLaunch ?? await this.ensureStarted();
     if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker is shutting down");
     await launch.handshake;
@@ -381,7 +383,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     launch.tracker.register(id);
     const requestType = type === "chat" ? "generate" : type;
     this.write(launch, requestType === "generate"
-      ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body }
+      ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body, cache_identity: cacheIdentity }
       : { protocol: 1, type: requestType, request_id: id, ...body });
     return promise;
   }

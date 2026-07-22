@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerRegistry } from "./resident";
+import { testResidentChatOptions } from "./test-cache-identity";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -117,7 +118,7 @@ describe.serial("resident v1 fault-injection matrix", () => {
   ] as const) {
     test(`${scenario} poisons no output and makes the worker unhealthy`, async () => {
       const worker = await faultWorker(scenario); const tokens: string[] = [];
-      try { await worker.chat(request, (token) => tokens.push(token)); throw new Error("chat unexpectedly succeeded"); }
+      try { await worker.chat(request, (token) => tokens.push(token), undefined, undefined, undefined, testResidentChatOptions); throw new Error("chat unexpectedly succeeded"); }
       catch (error) { expect(protocolCode(error)).toBe(code); }
       expect(tokens).not.toContain("poison");
       expect(worker.info().state).toBe("not_started");
@@ -127,7 +128,7 @@ describe.serial("resident v1 fault-injection matrix", () => {
   for (const scenario of ["duplicate_terminal", "late_token"] as const) {
     test(`${scenario} cannot mutate resolved content and terminates the worker`, async () => {
       const worker = await faultWorker(scenario);
-      const result = await worker.chat(request);
+      const result = await worker.chat(request, undefined, undefined, undefined, undefined, testResidentChatOptions);
       expect(result.content).toBe("ok");
       await Bun.sleep(20);
       expect(worker.info().state).toBe("not_started");
@@ -142,7 +143,7 @@ describe.serial("resident v1 fault-injection matrix", () => {
     test(`${scenario} rejects in-flight work without fabricating completion`, async () => {
       const worker = await faultWorker(scenario); const tokens: string[] = [];
       const operation = scenario === "exit_handshake" || scenario === "exit_load"
-        ? worker.load() : worker.chat(request, (token) => tokens.push(token));
+        ? worker.load() : worker.chat(request, (token) => tokens.push(token), undefined, undefined, undefined, testResidentChatOptions);
       await expect(operation).rejects.toThrow(phase);
       expect(tokens.every((token) => token === "valid")).toBe(true);
       expect(worker.info().state).toBe("not_started");
@@ -172,7 +173,7 @@ describe.serial("resident v1 fault-injection matrix", () => {
 
   test("an exact diagnostic is retained on the subsequent worker failure", async () => {
     const worker = await faultWorker("diagnostic_exit");
-    await expect(worker.chat(request)).rejects.toThrow("EXACT diagnostic: model exploded");
+    await expect(worker.chat(request, undefined, undefined, undefined, undefined, testResidentChatOptions)).rejects.toThrow("EXACT diagnostic: model exploded");
   });
 
   test("a crash invokes restart backoff before the next load attempt", async () => {
@@ -188,8 +189,8 @@ describe.serial("resident v1 fault-injection matrix", () => {
   test("an unknown request ID rejects every pending request without cross-ID tokens", async () => {
     const worker = await faultWorker("unknown_id"); const left: string[] = []; const right: string[] = [];
     const results = await Promise.allSettled([
-      worker.chat(request, (token) => left.push(token)),
-      worker.chat(request, (token) => right.push(token)),
+      worker.chat(request, (token) => left.push(token), undefined, undefined, undefined, testResidentChatOptions),
+      worker.chat(request, (token) => right.push(token), undefined, undefined, undefined, testResidentChatOptions),
     ]);
     expect(results.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
     expect([...left, ...right]).toEqual([]);
@@ -199,7 +200,7 @@ describe.serial("resident v1 fault-injection matrix", () => {
     test(`${scenario} gives generation exactly one terminal outcome`, async () => {
       const worker = await faultWorker(scenario); const controller = new AbortController();
       if (scenario !== "cancel_race") controller.abort();
-      const result = await worker.chat(request, () => controller.abort(), controller.signal);
+      const result = await worker.chat(request, () => controller.abort(), controller.signal, undefined, undefined, testResidentChatOptions);
       if (scenario === "cancel_race") expect(result.finishReason).toBe("cancel");
       else expect(result).toMatchObject({ content: "ok", finishReason: "stop" });
     });

@@ -29,7 +29,7 @@ import {
 import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
-import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type ResidentChatResult } from "@clap/runtime-router";
+import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { readFile, stat } from "node:fs/promises";
@@ -38,7 +38,7 @@ import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { CacheEventStore, type PersistedCacheDecision } from "./cache-event-store";
-import { derivePhysicalModelDomain, type PhysicalModelDomain } from "./cache-identity";
+import { deriveCacheIdentity, derivePhysicalModelDomain, loadOrCreateInstallationSecret, type DerivedCacheIdentity, type PhysicalModelDomain } from "./cache-identity";
 import {
   classifyPersistedCacheOutcome,
   firstDecisionIdsForWorkerModelDomain,
@@ -88,6 +88,40 @@ export function normalizeCacheIntent(request: ChatCompletionRequest): ChatComple
     cache: {
       ...cache,
       namespace: cache.namespace ?? tenant,
+    },
+  };
+}
+
+function workerCacheIdentity(
+  identity: DerivedCacheIdentity,
+  physical: PhysicalModelDomain,
+  sideRequest: boolean,
+): CacheIdentity {
+  return {
+    version: 1,
+    generation: identity.generation,
+    tenant_root: identity.tenantRoot,
+    project_fingerprint: identity.fingerprints.project,
+    harness_fingerprint: identity.fingerprints.harness,
+    agent_fingerprint: identity.fingerprints.agent,
+    session_fingerprint: identity.fingerprints.session,
+    scope: identity.scope.kind,
+    scope_fingerprint: identity.scope.fingerprint,
+    namespace_fingerprint: identity.physical.namespace,
+    namespace_id: identity.physical.namespaceId.toString(),
+    priority: identity.priority,
+    side_request: sideRequest,
+    display: identity.display,
+    physical: {
+      fingerprint: identity.physical.fingerprint,
+      backend: physical.backend,
+      resolved_revision: physical.resolvedRevision,
+      model_artifact_fingerprint: physical.modelArtifactFingerprint,
+      tokenizer_fingerprint: physical.tokenizerFingerprint,
+      context_allocation: physical.contextAllocation,
+      kv_format: physical.kvFormat,
+      unified_kv: physical.unifiedKv,
+      layout_version: physical.layoutVersion,
     },
   };
 }
@@ -286,6 +320,8 @@ export function createServer(
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
+  let installationSecretPromise: ReturnType<typeof loadOrCreateInstallationSecret> | undefined;
+  const installationSecret = () => installationSecretPromise ??= loadOrCreateInstallationSecret();
   app.use("*", async (c, next) => {
     let address: string | undefined;
     let embedded = true;
@@ -794,12 +830,31 @@ export function createServer(
       return resolved.response(c);
     }
     handle.capture({ ...request, backend: resolved.model.backend });
+    if (resolved.model.backend === "llama" && resolved.model.modelPath) {
+      await assertGgufModelPath(resolved.model.modelPath);
+    }
 
     // Prepare the immutable physical cache descriptor once cache intent is
     // present. Dispatch integration consumes this in the next phase; content
     // hashes are memoized by canonical path and stat signature.
-    let physicalModelDomain: PhysicalModelDomain | undefined;
-    if (request.cache) physicalModelDomain = await preparePhysicalModelDomain(resolved.model);
+    const physicalModelDomain = await preparePhysicalModelDomain(resolved.model);
+    const principal = c.get("requestIdentity").cachePrincipal;
+    if (!principal) throw new Error("Authenticated cache principal is unavailable");
+    const derivedIdentity = deriveCacheIdentity(
+      await installationSecret(),
+      principal,
+      request.cache ?? {},
+      {
+        backend: physicalModelDomain.backend,
+        modelRevision: physicalModelDomain.modelRevision,
+        tokenizer: physicalModelDomain.tokenizerFingerprint,
+        contextAllocation: physicalModelDomain.contextAllocation,
+        kvFormat: physicalModelDomain.kvFormat,
+        unifiedKv: physicalModelDomain.unifiedKv,
+        layoutVersion: physicalModelDomain.layoutVersion,
+      },
+    );
+    const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
 
     const templateInfo = await resolveParserTemplateInfo(resolved.model);
     let routedRequest: ChatCompletionRequest;
@@ -818,13 +873,12 @@ export function createServer(
         error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
       }), 400);
     }
-    void physicalModelDomain;
     if (isGgufModel(routedRequest.model)) {
       await assertGgufModelPath(routedRequest.model);
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity);
     }
     if (await isMlxModelDirectory(routedRequest.model)) {
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle);
+      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity);
     }
 
     handle.finish({ status: "error", errorCode: "not_cached" });
@@ -868,6 +922,7 @@ export function createServer(
     routedRequest: ChatCompletionRequest,
     templateInfo: ParserTemplateInfo | undefined,
     handle: RequestHandle,
+    cacheIdentity: CacheIdentity,
   ) {
     let release: () => void;
     try {
@@ -888,9 +943,9 @@ export function createServer(
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
           lifecycle.finishUsage(loaded);
           release();
-        }, handle);
+        }, handle, cacheIdentity);
       }
-      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle));
+      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle, cacheIdentity));
       release();
       return response;
     } catch (error) {
@@ -1398,7 +1453,7 @@ export function inferParserFamilies(markerText: string, nameText: string): strin
   return hints;
 }
 
-async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, handle?: RequestHandle) {
+async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   let result: ResidentChatResult | undefined;
   try {
@@ -1410,7 +1465,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     // queued until worker prefill progress or the first token proves it is
     // actually running.
     handle?.phase("queued");
-    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
+    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"), { cacheIdentity });
     entry.worker = worker.info();
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
@@ -1515,7 +1570,7 @@ function strictStreamSSE(c: Parameters<typeof streamSSE>[0], callback: (stream: 
   return c.newResponse(responseReadable);
 }
 
-function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo?: ParserTemplateInfo, onDone?: () => void, handle?: RequestHandle) {
+function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, onDone: (() => void) | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   return strictStreamSSE(c, async (stream) => {
     const id = completionId();
@@ -1579,7 +1634,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         enqueueWrite(async () => {
           for (const delta of deltas) await writeDelta(delta);
         });
-      }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"));
+      }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"), { cacheIdentity });
       // A disconnected client makes queued SSE writes reject before the
       // worker's cancellation result arrives. Drain that queue without
       // propagating its transport error so the final worker cache decision can

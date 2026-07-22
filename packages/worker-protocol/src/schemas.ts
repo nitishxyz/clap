@@ -10,8 +10,46 @@ const content = z.union([
 ]);
 
 const requestBase = { protocol, request_id: requestId };
+const fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
+const displayLabel = z.string().min(1).max(128);
+export const CacheIdentitySchema = z.object({
+  version: z.literal(1),
+  generation: z.string().min(1).max(64),
+  tenant_root: fingerprint,
+  project_fingerprint: fingerprint.optional(),
+  harness_fingerprint: fingerprint.optional(),
+  agent_fingerprint: fingerprint.optional(),
+  session_fingerprint: fingerprint.optional(),
+  scope: z.enum(["tenant", "project", "harness", "agent", "session"]),
+  scope_fingerprint: fingerprint,
+  namespace_fingerprint: fingerprint,
+  namespace_id: z.string().regex(/^[1-9][0-9]{0,19}$/)
+    .refine((value) => BigInt(value) <= 0xffff_ffff_ffff_ffffn, "namespace_id must fit unsigned 64-bit"),
+  priority: z.enum(["interactive", "background"]),
+  side_request: z.boolean(),
+  display: z.object({
+    namespace: displayLabel.optional(),
+    project: displayLabel.optional(),
+    harness: displayLabel.optional(),
+    agent: displayLabel.optional(),
+    session: displayLabel.optional(),
+  }).strict(),
+  physical: z.object({
+    fingerprint,
+    backend: z.enum(["llama", "mlx"]),
+    resolved_revision: z.string().min(1).max(256),
+    model_artifact_fingerprint: fingerprint,
+    tokenizer_fingerprint: fingerprint,
+    context_allocation: z.number().int().nonnegative(),
+    kv_format: z.string().min(1).max(64),
+    unified_kv: z.boolean(),
+    layout_version: z.number().int().positive(),
+  }).strict(),
+}).strict();
 export const LoadRequestSchema = extensibleObject({ ...requestBase, type: z.literal("load"), model: z.string().min(1) });
-export const GenerateRequestSchema = extensibleObject({ ...requestBase, type: z.literal("generate"), prompt: z.string() });
+export const GenerateRequestSchema = extensibleObject({
+  ...requestBase, type: z.literal("generate"), prompt: z.string(), cache_identity: CacheIdentitySchema,
+});
 export const CancelRequestSchema = extensibleObject({ ...requestBase, type: z.literal("cancel"), target_request_id: requestId });
 export const SetMaxActiveRequestSchema = extensibleObject({ ...requestBase, type: z.literal("set_max_active"), max_active: z.number().int().positive() });
 export const UnloadRequestSchema = extensibleObject({ ...requestBase, type: z.literal("unload") });

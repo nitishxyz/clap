@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ResidentWorkerRegistry } from "./resident";
+import { testResidentChatOptions as cacheOptions } from "./test-cache-identity";
 
 function restore(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
@@ -102,8 +103,9 @@ describe.serial("resident worker v1 migration", () => {
       const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("v1", "llama", join(dir, "model.gguf"));
       const tokens: string[] = []; const progress: Array<[number, number]> = []; let dispatches = 0;
-      const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "hello" }], stream: true },
-        (token) => tokens.push(token), undefined, (done, total) => progress.push([done, total]), () => dispatches++);
+      const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "hello" }], stream: true,
+        cache_identity: { secret: "caller-controlled" } } as never,
+        (token) => tokens.push(token), undefined, (done, total) => progress.push([done, total]), () => dispatches++, cacheOptions);
       expect(result).toMatchObject({
         content: "v1 response",
         finishReason: "stop",
@@ -117,6 +119,8 @@ describe.serial("resident worker v1 migration", () => {
       expect(commands.map(({ type }) => type)).toEqual(["load", "generate"]);
       expect(commands.every(({ protocol, request_id }) => protocol === 1 && request_id.startsWith("req_"))).toBe(true);
       expect(commands[1].request.messages[0].content).toBe("hello");
+      expect(commands[1].cache_identity).toEqual(cacheOptions.cacheIdentity);
+      expect(commands[1].request.cache_identity).toBeUndefined();
       registry.shutdownAll();
     } finally { restore("CLAP_LLAMA_WORKER", previous); await rm(dir, { recursive: true, force: true }); }
   });
@@ -127,7 +131,7 @@ describe.serial("resident worker v1 migration", () => {
       const fake = await v1Worker(dir); process.env.CLAP_LLAMA_WORKER = fake.path; await writeFile(join(dir, "model.gguf"), "gguf");
       const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("v1", "llama", join(dir, "model.gguf")); const controller = new AbortController();
-      const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "cancel" }], stream: true }, () => controller.abort(), controller.signal);
+      const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "cancel" }], stream: true }, () => controller.abort(), controller.signal, undefined, undefined, cacheOptions);
       expect(result.finishReason).toBe("cancel");
       const commands = (await readFile(fake.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
       const generate = commands.find(({ type }) => type === "generate"); const cancel = commands.find(({ type }) => type === "cancel");

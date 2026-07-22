@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, LoadedModel, ModelTokenCapabilities } from "@clap/api";
+import type { CacheIdentity } from "@clap/worker-protocol";
 import { freemem, totalmem } from "node:os";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
@@ -103,13 +104,14 @@ export type ResidentChatResult = {
 };
 
 export type ResidentProgress = (done: number, total: number) => void;
+export type ResidentChatOptions = { cacheIdentity: CacheIdentity };
 export type ResidentWorkerHandle = {
   key: string;
   backend: ResidentBackend;
   modelPath: string;
   info(): ResidentWorkerInfo;
   load(): Promise<ResidentWorkerInfo>;
-  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void): Promise<ResidentChatResult>;
+  chat(request: ChatCompletionRequest, onToken?: (token: string) => void, signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void, options?: ResidentChatOptions): Promise<ResidentChatResult>;
   setMaxActive?(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void>;
   unload(): Promise<void>;
   shutdown(): void;
