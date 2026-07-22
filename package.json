@@ -24,6 +24,7 @@
     "runtime:llama:build": "bun run scripts/build-llama.ts",
     "runtime:llama:test": "cmake -S native/llama -B build/llama-test -DBUILD_TESTING=ON && cmake --build build/llama-test --target clap-llama-tests && ctest --test-dir build/llama-test --output-on-failure",
     "runtime:mlx:build": "bun run scripts/build-mlx.ts",
+    "runtime:mlx:protocol:test": "bun run scripts/check-mlx-worker-protocol.ts",
     "runtime:mlx:test": "cargo build --release --locked -p clap-cache-ffi --manifest-path native/cache/Cargo.toml && swift test --package-path native/mlx",
     "llama:vendor": "bun run runtime:llama:vendor",
     "llama:build": "bun run runtime:llama:build",

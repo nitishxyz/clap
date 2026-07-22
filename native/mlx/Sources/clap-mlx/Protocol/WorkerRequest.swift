@@ -1,4 +1,38 @@
+import ClapMLXWorkerCore
 import Foundation
+
+enum WorkerProtocolMode {
+  case legacy
+  case v1
+
+  static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Self {
+    environment["CLAP_WORKER_PROTOCOL"] == "v1" ? .v1 : .legacy
+  }
+}
+
+struct V1Request {
+  let type: String
+  let requestID: String
+  let targetRequestID: String?
+  let control: ControlRequest
+  let controlData: Data
+}
+
+typealias V1DecodeError = V1EnvelopeDecodeError
+
+func decodeV1Request(_ line: String) throws -> V1Request {
+  let envelope = try decodeV1Envelope(line)
+  let control: ControlRequest
+  do {
+    control = try JSONDecoder().decode(ControlRequest.self, from: envelope.legacyPayload)
+  } catch {
+    throw V1DecodeError(code: "invalid_request", requestID: envelope.requestID,
+      description: "Invalid \(envelope.type) request payload: \(error)")
+  }
+  return V1Request(type: envelope.type, requestID: envelope.requestID,
+    targetRequestID: envelope.targetRequestID, control: control,
+    controlData: envelope.legacyPayload)
+}
 
 struct ChatMessage: Decodable {
   let role: String

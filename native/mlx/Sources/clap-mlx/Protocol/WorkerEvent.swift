@@ -1,5 +1,12 @@
 import Foundation
 
+struct V1ProtocolError: Encodable {
+  let code: String
+  let message: String
+  let retryable: Bool
+  let fatal: Bool
+}
+
 struct WorkerUsage: Encodable {
   let prompt_tokens: Int
   let completion_tokens: Int
