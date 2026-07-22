@@ -1,0 +1,15 @@
+{"protocol":1,"type":"ready","worker_capabilities":{"backend":"fixture","streaming":true},"model_capabilities":{"context_window":4096}}
+{"protocol":1,"type":"accepted","request_id":"req_generate","sequence":0}
+{"protocol":1,"type":"started","request_id":"req_generate","sequence":1}
+{"protocol":1,"type":"token","request_id":"req_generate","sequence":2,"text":"Hello"}
+{"protocol":1,"type":"content","request_id":"req_generate","sequence":3,"content":{"type":"text","text":"Hello"}}
+{"protocol":1,"type":"prefill_progress","request_id":"req_generate","sequence":4,"completed":8,"total":16}
+{"protocol":1,"type":"completed","request_id":"req_load","sequence":1,"result":{"kind":"loaded","model":"example"}}
+{"protocol":1,"type":"completed","request_id":"req_generate","sequence":5,"result":{"kind":"generated","content":"Hello","finish_reason":"stop"}}
+{"protocol":1,"type":"completed","request_id":"req_cancel","sequence":1,"result":{"kind":"cancelled"}}
+{"protocol":1,"type":"completed","request_id":"req_limit","sequence":1,"result":{"kind":"max_active_updated","max_active":2}}
+{"protocol":1,"type":"completed","request_id":"req_unload","sequence":1,"result":{"kind":"unloaded"}}
+{"protocol":1,"type":"completed","request_id":"req_shutdown","sequence":1,"result":{"kind":"shutdown"}}
+{"protocol":1,"type":"failed","request_id":"req_generate","sequence":5,"error":{"code":"generation_failed","message":"Generation failed","retryable":true,"fatal":false}}
+{"protocol":1,"type":"telemetry","telemetry":{"resident_bytes":1024}}
+{"protocol":1,"type":"diagnostic","level":"warning","message":"Fixture diagnostic"}

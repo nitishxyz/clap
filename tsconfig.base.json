@@ -12,6 +12,7 @@
     "paths": {
       "@clap/api": ["packages/api/src/index.ts"],
       "@clap/models": ["packages/models/src/index.ts"],
+      "@clap/worker-protocol": ["packages/worker-protocol/src/index.ts"],
       "@clap/runtime-router": ["packages/runtime-router/src/index.ts"],
       "@clap/runtime-llama": ["packages/runtime-llama/src/index.ts"],
       "@clap/runtime-mlx": ["packages/runtime-mlx/src/index.ts"],

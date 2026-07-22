@@ -96,6 +96,13 @@
         "zod": "^3.23.8",
       },
     },
+    "packages/worker-protocol": {
+      "name": "@clap/worker-protocol",
+      "version": "1.0.0",
+      "dependencies": {
+        "zod": "^3.23.8",
+      },
+    },
   },
   "packages": {
     "@asteasolutions/zod-to-openapi": ["@asteasolutions/zod-to-openapi@7.3.4", "", { "dependencies": { "openapi3-ts": "^4.1.2" }, "peerDependencies": { "zod": "^3.20.2" } }, "sha512-/2rThQ5zPi9OzVwes6U7lK1+Yvug0iXu25olp7S0XsYmOqnyMfxH7gdSQjn/+DSOHRg7wnotwGJSyL+fBKdnEA=="],
@@ -153,6 +160,8 @@
     "@clap/server": ["@clap/server@workspace:packages/server"],
 
     "@clap/web": ["@clap/web@workspace:apps/web"],
+
+    "@clap/worker-protocol": ["@clap/worker-protocol@workspace:packages/worker-protocol"],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.25.12", "", { "os": "aix", "cpu": "ppc64" }, "sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA=="],
 
