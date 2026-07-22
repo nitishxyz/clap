@@ -1,6 +1,7 @@
 #include "clap/llama/protocol.h"
 
 #include <cassert>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <streambuf>
@@ -51,6 +52,13 @@ nlohmann::json emitted_event(const std::string& output) {
 }  // namespace
 
 int main() {
+  unsetenv("CLAP_WORKER_PROTOCOL");
+  assert(clap::llama::protocol_mode_from_environment() == clap::llama::ProtocolMode::V1);
+  setenv("CLAP_WORKER_PROTOCOL", "legacy", 1);
+  assert(clap::llama::protocol_mode_from_environment() == clap::llama::ProtocolMode::Legacy);
+  setenv("CLAP_WORKER_PROTOCOL", "v1", 1);
+  assert(clap::llama::protocol_mode_from_environment() == clap::llama::ProtocolMode::V1);
+
   SyncCountingBuffer buffer;
   std::ostream output(&buffer);
 

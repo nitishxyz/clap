@@ -1,6 +1,17 @@
 import CoreFoundation
 import Foundation
 
+public enum WorkerProtocolMode: Equatable, Sendable {
+  case legacy
+  case v1
+
+  public static func fromEnvironment(
+    _ environment: [String: String] = ProcessInfo.processInfo.environment
+  ) -> Self {
+    environment["CLAP_WORKER_PROTOCOL"] == "legacy" ? .legacy : .v1
+  }
+}
+
 public struct V1RequestEnvelope {
   public let type: String
   public let requestID: String

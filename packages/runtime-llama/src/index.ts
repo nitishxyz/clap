@@ -137,12 +137,20 @@ function resolveLlamaWorkerCommand(): { command: string[]; source: LlamaWorkerSt
   const configured = process.env.CLAP_LLAMA_WORKER;
   if (configured) {
     const command = splitCommand(configured);
-    return isExecutableFile(command[0]) ? { command, source: "configured" } : null;
+    const source = isEmbeddedWorkerCommand(command[0], "clap-llama") ? "bundled" : "configured";
+    return isExecutableFile(command[0]) ? { command, source } : null;
   }
   for (const bundled of bundledWorkerCandidates("clap-llama")) {
     if (isExecutableFile(bundled)) return { command: [bundled], source: "bundled" };
   }
   return null;
+}
+
+function isEmbeddedWorkerCommand(command: string | undefined, name: string): boolean {
+  const build = process.env.CLAP_EMBED_BUILD;
+  if (!command || !build) return false;
+  const home = process.env.CLAP_HOME ?? join(process.env.HOME ?? ".", ".clap");
+  return resolve(command) === resolve(home, "libexec", build, name);
 }
 
 function bundledWorkerCandidates(name: string): string[] {

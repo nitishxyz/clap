@@ -26,7 +26,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     assert(!worker.dispatch(R"({"type":"shutdown","id":"bye"})"));
     const auto events = lines(output.str());
     assert(events.size() == 1);
@@ -36,7 +36,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     assert(worker.dispatch("{"));
     const auto events = lines(output.str());
     assert(events.size() == 1);
@@ -47,7 +47,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     worker.dispatch(R"({"type":"load","id":"load"})");
     worker.dispatch(R"({"type":"unload","id":"unload"})");
     const auto events = lines(output.str());
@@ -58,7 +58,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     worker.dispatch(R"({"type":"set_max_active","id":"limit","max_active":0})");
     const auto events = lines(output.str());
     assert(events.size() == 1);
@@ -69,7 +69,7 @@ int main() {
   {
     std::istringstream input;
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     worker.dispatch(R"({"id":"queued","model":"missing.gguf"})");
     worker.dispatch(R"({"type":"cancel","id":"queued"})");
     const auto events = lines(output.str());
@@ -86,7 +86,7 @@ int main() {
         R"({"type":"unload","id":"u"})" "\n"
         R"({"type":"shutdown","id":"s"})" "\n");
     std::ostringstream output;
-    clap::llama::Worker worker(input, output);
+    clap::llama::Worker worker(input, output, clap::llama::ProtocolMode::Legacy);
     assert(worker.run() == 0);
     const auto events = lines(output.str());
     assert(events.size() == 2);

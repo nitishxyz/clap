@@ -1,15 +1,6 @@
 import ClapMLXWorkerCore
 import Foundation
 
-enum WorkerProtocolMode {
-  case legacy
-  case v1
-
-  static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Self {
-    environment["CLAP_WORKER_PROTOCOL"] == "v1" ? .v1 : .legacy
-  }
-}
-
 struct V1Request {
   let type: String
   let requestID: String

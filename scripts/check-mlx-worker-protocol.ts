@@ -6,7 +6,7 @@ const root = resolve(import.meta.dir, "..");
 const worker = resolve(root, "libexec/clap-mlx");
 const process = Bun.spawn([worker], {
   cwd: root,
-  env: { ...Bun.env, CLAP_WORKER_PROTOCOL: "v1" },
+  env: Object.fromEntries(Object.entries(Bun.env).filter(([key]) => key !== "CLAP_WORKER_PROTOCOL")),
   stdin: "pipe",
   stdout: "pipe",
   stderr: "pipe",

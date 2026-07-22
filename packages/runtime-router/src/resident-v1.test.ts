@@ -45,7 +45,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const request = command.request;
       if (request.messages[0].content !== "cancel") {
         send("content", command.request_id, { content: "response" });
-        send("completed", command.request_id, { result: { kind: "generated", content: "v1 response", finish_reason: "stop", usage: { prompt_tokens: 2, completion_tokens: 2 } } });
+        send("completed", command.request_id, { result: { kind: "generated", content: "v1 response", finish_reason: "stop", usage: { prompt_tokens: 2, completion_tokens: 2 }, cache: { hit: true, reused_tokens: 2, reuse_kind: "slot" }, timing: { prefill_ms: 3, first_emit_ms: 4 } } });
       }
     }
     if (command.type === "unload") send("completed", command.request_id, { result: { kind: "unloaded" } });
@@ -81,7 +81,7 @@ describe("resident worker v1 migration", () => {
     try {
       process.env.CLAP_LLAMA_WORKER = await executable(join(dir, "bad-worker"),
         "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ protocol: 2, type: 'ready', worker_capabilities: {}, model_capabilities: {} }));\nawait Bun.sleep(10000);\n");
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "v1";
+      const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("bad", "llama", join(dir, "model.gguf"));
       await expect(worker.load()).rejects.toMatchObject({ code: "worker_protocol_error" });
       expect(worker.info().state).toBe("not_started");
@@ -106,12 +106,18 @@ describe("resident worker v1 migration", () => {
     try {
       const fake = await v1Worker(dir); process.env.CLAP_LLAMA_WORKER = fake.path;
       await writeFile(join(dir, "model.gguf"), "gguf");
-      const registry = new ResidentWorkerRegistry(); registry.workerProtocolMode = "v1";
+      const registry = new ResidentWorkerRegistry();
       const worker = registry.getOrCreate("v1", "llama", join(dir, "model.gguf"));
       const tokens: string[] = []; const progress: Array<[number, number]> = []; let dispatches = 0;
       const result = await worker.chat({ model: "model", messages: [{ role: "user", content: "hello" }], stream: true },
         (token) => tokens.push(token), undefined, (done, total) => progress.push([done, total]), () => dispatches++);
-      expect(result).toMatchObject({ content: "v1 response", finishReason: "stop", usage: { promptTokens: 2, completionTokens: 2 } });
+      expect(result).toMatchObject({
+        content: "v1 response",
+        finishReason: "stop",
+        usage: { promptTokens: 2, completionTokens: 2 },
+        cache: { hit: true, reusedTokens: 2, reuseKind: "slot" },
+        timing: { prefillMs: 3, firstEmitMs: 4 },
+      });
       expect(tokens).toEqual(["v1 ", "response"]); expect(progress).toEqual([[2, 2]]); expect(dispatches).toBe(1);
       expect(worker.info().tokenCapabilities?.modelContextWindowSource).toBe("worker");
       const commands = (await readFile(fake.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));

@@ -1,7 +1,7 @@
 import type { Backend, ChatCompletionRequest } from "@clap/api";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 export type MlxWorkerStatus = {
   available: boolean;
@@ -267,12 +267,20 @@ function resolveMlxWorkerCommand(): { command: string[]; source: MlxWorkerStatus
   const configured = process.env.CLAP_MLX_WORKER;
   if (configured) {
     const command = splitCommand(configured);
-    return isExecutableFile(command[0]) ? { command, source: "configured" } : null;
+    const source = isEmbeddedWorkerCommand(command[0], "clap-mlx") ? "bundled" : "configured";
+    return isExecutableFile(command[0]) ? { command, source } : null;
   }
   for (const bundled of bundledWorkerCandidates("clap-mlx")) {
     if (isExecutableFile(bundled)) return { command: [bundled], source: "bundled" };
   }
   return null;
+}
+
+function isEmbeddedWorkerCommand(command: string | undefined, name: string): boolean {
+  const build = process.env.CLAP_EMBED_BUILD;
+  if (!command || !build) return false;
+  const home = process.env.CLAP_HOME ?? join(process.env.HOME ?? ".", ".clap");
+  return resolve(command) === resolve(home, "libexec", build, name);
 }
 
 function bundledWorkerCandidates(name: string): string[] {

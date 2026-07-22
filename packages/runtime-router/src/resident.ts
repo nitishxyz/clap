@@ -226,7 +226,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private workerLaunchId?: string;
   private readonly legacyProtocol = new LegacyWorkerProtocol();
   private v1Tracker?: V1RequestTracker;
-  private activeProtocol: "legacy" | "v1" = "legacy";
+  private activeProtocol: "legacy" | "v1" = "v1";
   private handshake?: Promise<void>;
   private resolveHandshake?: () => void;
   private rejectHandshake?: (error: Error) => void;
@@ -241,7 +241,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     private readonly envOverrides?: Record<string, string>,
     private readonly onTelemetry?: (worker: ResidentWorkerProcess,
       previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void,
-    private readonly protocolMode: ResidentWorkerProtocolMode = "legacy",
+    private readonly protocolMode: ResidentWorkerProtocolMode = "auto",
   ) {}
 
   info(): ResidentWorkerInfo {
@@ -310,9 +310,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         // Deliberate termination (unload/server shutdown): the SIGTERM exit
         // (143) must not count as a crash or trigger restart backoff.
         this.expectedExit = true;
-        this.write(this.activeProtocol === "v1"
-          ? { protocol: 1, type: "shutdown", request_id: `cmd_${crypto.randomUUID()}` }
-          : { type: "shutdown" });
+        if (this.activeProtocol === "v1") {
+          const id = `cmd_${crypto.randomUUID()}`;
+          this.v1Tracker?.register(id);
+          this.write({ protocol: 1, type: "shutdown", request_id: id });
+        } else this.write({ type: "shutdown" });
         this.proc.kill();
       }
     } catch {
@@ -357,11 +359,16 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       key: this.key,
       command: status.command,
     }, null, 2) + "\n");
+    const environment = { ...process.env, ...this.envOverrides };
+    if (status.source === "bundled") delete environment.CLAP_WORKER_PROTOCOL;
+    else if (this.protocolMode === "legacy" || this.protocolMode === "v1") {
+      environment.CLAP_WORKER_PROTOCOL = this.protocolMode;
+    }
     const proc = Bun.spawn(status.command, {
       stdin: "pipe",
       stdout: "pipe",
       stderr: Bun.file(status.logPath),
-      env: this.envOverrides ? { ...process.env, ...this.envOverrides } : process.env,
+      env: environment,
     });
     this.proc = proc;
     this.logPath = status.logPath;
@@ -372,7 +379,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private startProtocol(source: "configured" | "bundled" | "missing"): void {
     this.clearHandshake();
     this.startupBytes = false;
-    if (this.protocolMode === "legacy") {
+    if (this.protocolMode === "legacy" && source === "configured") {
       this.activeProtocol = "legacy";
       this.handshake = Promise.resolve();
       return;
@@ -393,7 +400,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
         this.resolveHandshake?.();
         this.resolveHandshake = undefined;
         this.rejectHandshake = undefined;
-      }, 50);
+      }, 1_000);
     }
   }
 
@@ -673,7 +680,12 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   }
 
   private handleV1Fact(fact: ResidentProtocolFact): void {
-    if (fact.kind === "telemetry") { this.handleLegacyMessage(fact.telemetry); return; }
+    if (fact.kind === "telemetry") {
+      const telemetry = fact.telemetry;
+      this.handleLegacyMessage("memory" in telemetry || "retention" in telemetry
+        ? telemetry : { retention: telemetry });
+      return;
+    }
     if (fact.kind === "ready" || fact.kind === "diagnostic" || fact.kind === "accepted") return;
     const pending = this.pending.get(fact.requestId);
     if (!pending) return;
@@ -689,20 +701,16 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       return;
     }
     if (fact.kind === "prefill_progress") { pending.onProgress?.(fact.done, fact.total); return; }
-    this.pending.delete(fact.requestId);
-    if (fact.kind === "failed") { pending.reject(this.workerError(fact.error.message, fact.error.code)); return; }
+    if (fact.kind === "failed") {
+      this.pending.delete(fact.requestId);
+      pending.reject(this.workerError(fact.error.message, fact.error.code));
+      return;
+    }
     const result = fact.result as Record<string, unknown>;
-    const usage = result.usage as Record<string, unknown> | undefined;
-    pending.usage = usage ? {
-      promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined,
-      completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
-    } : pending.usage;
-    if (result.finish_reason === "stop" || result.finish_reason === "length" || result.finish_reason === "cancel") pending.finishReason = result.finish_reason;
-    const capabilities = parseWorkerTokenCapabilities(result.token_capabilities);
-    if (capabilities) pending.tokenCapabilities = capabilities;
-    if (result.kind === "generated" && pending.content.length === 0 && typeof result.content === "string") pending.content.push(result.content);
-    pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason,
-      cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities });
+    const { content: resultContent, ...resultWithoutContent } = result;
+    const content = pending.content.length === 0 && typeof resultContent === "string"
+      ? { content: resultContent } : {};
+    this.handleLegacyMessage({ ...resultWithoutContent, ...content, id: fact.requestId, done: true });
   }
 
   private protocolUnhealthy(cause: Error): void {
@@ -981,8 +989,8 @@ export class ResidentWorkerRegistry {
   // Per-model worker environment (e.g. [models."x"] config sections);
   // consulted once when the worker handle is first created.
   workerEnv?: (modelPath: string, backend: ResidentBackend) => Record<string, string> | undefined;
-  /** Temporary migration control. Legacy remains the default until bundled workers speak v1. */
-  workerProtocolMode: ResidentWorkerProtocolMode = "legacy";
+  /** Configured workers may coexist in auto/legacy mode; bundled workers always require v1. */
+  workerProtocolMode: ResidentWorkerProtocolMode = "auto";
 
   getOrCreate(key: string, backend: ResidentBackend, modelPath: string): ResidentWorkerHandle {
     const existing = this.workers.get(key);

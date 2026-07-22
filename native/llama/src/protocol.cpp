@@ -93,7 +93,7 @@ RequestError::RequestError(std::string error_code, const std::string& message)
 
 ProtocolMode protocol_mode_from_environment() {
   const char* value = std::getenv("CLAP_WORKER_PROTOCOL");
-  return value && std::string(value) == "v1" ? ProtocolMode::V1 : ProtocolMode::Legacy;
+  return value && std::string(value) == "legacy" ? ProtocolMode::Legacy : ProtocolMode::V1;
 }
 
 V1DecodeError::V1DecodeError(std::string error_code, std::string recoverable_request_id,
