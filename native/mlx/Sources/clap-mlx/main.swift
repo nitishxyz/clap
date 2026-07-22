@@ -494,43 +494,27 @@ func main() async {
             return nil
           }
         }
-        let entries = normalizedMessageEntries(control.messages ?? [])
-        guard !entries.isEmpty else {
+        let descriptors = (control.cache?.boundaries ?? []).map {
+          PromptBoundaryDescriptor(kind: $0.kind, throughMessage: $0.through_message,
+            label: $0.label)
+        }
+        let prepared: PreparedPrompt
+        do {
+          prepared = try PromptRenderer.render(messages: promptMessages(control.messages ?? []),
+            tools: toolSpecs, boundaries: descriptors,
+            modelDirectory: modelRuntime.directory ?? modelDirectory,
+            tokenizer: promptTokenizerAdapter(tok)) { message in
+              if message.hasPrefix("required ") || message.hasPrefix("failed with ") {
+                debugLog("chat template for \(modelRuntime.modelIdentifier ?? model) \(message)")
+              } else {
+                debugLog(message)
+              }
+            }
+        } catch PromptRendererError.noMessages {
           emit(id: id, error: "chat request contains no messages")
           return nil
         }
-        let structuredMessages = structuredTemplateMessages(control.messages ?? [])
-
-        let usesFallback = usesGemma4FallbackPrompt(modelRuntime.directory ?? modelDirectory)
-        var promptTokens: [Int]
-        if usesFallback {
-          promptTokens = tok.encode(text: gemma4Prompt(entries: entries), addSpecialTokens: false)
-        } else {
-          do {
-            promptTokens = try tok.applyChatTemplate(messages: structuredMessages, tools: toolSpecs)
-          } catch {
-            if toolSpecs != nil {
-              let compatible = (toolSpecs ?? []).map { templateCompatibleToolSpec($0) }
-              if let tokens = try? tok.applyChatTemplate(messages: structuredMessages, tools: compatible) {
-                debugLog("chat template for \(modelRuntime.modelIdentifier ?? model) required a nullable-preserving compatibility view of all \(compatible.count) caller-provided tools")
-                promptTokens = tokens
-              } else {
-                debugLog("chat template for \(modelRuntime.modelIdentifier ?? model) failed with all \(toolSpecs?.count ?? 0) caller-provided tools (\(error)); retrying with JSON tool instructions")
-                let patched = toolInstructionPatchedEntries(entries, tools: toolSpecs ?? [])
-                let retryMessages = templateMessages(patched)
-                if let tokens = try? tok.applyChatTemplate(messages: retryMessages, tools: nil) {
-                  promptTokens = tokens
-                } else {
-                  debugLog("template retry without tools failed; using plain transcript")
-                  promptTokens = tok.encode(text: plainTranscript(patched))
-                }
-              }
-            } else {
-              debugLog("chat template failed (\(error)); using plain transcript")
-              promptTokens = tok.encode(text: plainTranscript(entries))
-            }
-          }
-        }
+        let promptTokens = prepared.tokens
         if configuration.debugPrompt {
           debugLog("prompt (\(promptTokens.count) tokens): \(tok.decode(tokenIds: promptTokens, skipSpecialTokens: false))")
         }
@@ -572,92 +556,18 @@ func main() async {
               slot.tokens.elementsEqual(promptTokens.prefix(checkpoint))
           }
         }.count
-        var stableBoundaries: [Int] = []
-        var stableBoundaryScopes: [Int: UInt32] = [:]
-        var resolvedBoundaries: [Int: ActiveRequest.BoundaryInfo] = [:]
-        var boundaryTelemetry: [ActiveRequest.BoundaryInfo] = []
-        func resolveBoundary(messages: [[String: any Sendable]], tools: [ToolSpec]?, kind: String,
-                             label: String?, requested: Bool) {
-          guard !messages.isEmpty else {
-            if requested {
-              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
-                requested: true, status: "skipped", skipReason: "unsupported_template_boundary"))
-            }
-            return
-          }
-          let rendered: [Int]
-          do {
-            rendered = try tok.applyChatTemplate(
-              messages: messages, tools: tools,
-              additionalContext: ["add_generation_prompt": false])
-          } catch {
-            if requested {
-              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
-                requested: true, status: "skipped", skipReason: "unsupported_template_boundary"))
-            }
-            return
-          }
-          guard let boundary = exactTemplateBoundary(
-            prefix: rendered, final: promptTokens, eosToken: tok.eosTokenId) else {
-            if requested {
-              boundaryTelemetry.append(.init(tokenCount: nil, kind: kind, label: label,
-                requested: true, status: "skipped", skipReason: "non_prefix_template_boundary"))
-            }
-            return
-          }
-          stableBoundaries.append(boundary)
-          stableBoundaryScopes[boundary] = cacheIdentity.scope
-          if resolvedBoundaries[boundary] == nil || requested {
-            resolvedBoundaries[boundary] = .init(tokenCount: boundary, kind: kind, label: label,
-              requested: requested, status: "resolved", skipReason: nil)
-          }
-          if requested {
-            boundaryTelemetry.append(.init(tokenCount: boundary, kind: kind, label: label,
-              requested: true, status: "resolved", skipReason: nil))
-          }
+        let stableBoundaries = prepared.stableBoundaries
+        let stableBoundaryScopes = Dictionary(uniqueKeysWithValues:
+          stableBoundaries.map { ($0, cacheIdentity.scope) })
+        var resolvedBoundaries = prepared.resolvedBoundaries.mapValues { boundary in
+          ActiveRequest.BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
+            label: boundary.label, requested: boundary.requested, status: boundary.status,
+            skipReason: boundary.skipReason)
         }
-        if !usesFallback {
-          let leadingSystemCount = structuredMessages.prefix { ($0["role"] as? String) == "system" }.count
-          let systemPrefixCounts = leadingSystemCount > 0 ? Array(1...leadingSystemCount) : []
-          for count in systemPrefixCounts {
-            let prefixMessages = Array(structuredMessages.prefix(count))
-            resolveBoundary(messages: prefixMessages, tools: toolSpecs,
-              kind: "messages", label: nil, requested: false)
-          }
-          stableBoundaries = Array(Set(stableBoundaries)).sorted()
-        }
-        for descriptor in control.cache?.boundaries ?? [] {
-          guard !usesFallback else {
-            boundaryTelemetry.append(.init(tokenCount: nil, kind: descriptor.kind,
-              label: descriptor.label, requested: true, status: "skipped",
-              skipReason: "unsupported_template_boundary"))
-            continue
-          }
-          if descriptor.kind == "tools" {
-            // MLX's tokenizer bridge cannot render tools independently from
-            // messages or expose a tools-end offset. Rendering with a first
-            // message would incorrectly include message content, so fail the
-            // optimization closed without invoking an empty-message template.
-            boundaryTelemetry.append(.init(tokenCount: nil, kind: descriptor.kind,
-              label: descriptor.label, requested: true, status: "skipped",
-              skipReason: "unsupported_template_boundary"))
-          } else if descriptor.kind == "messages", let index = descriptor.through_message,
-                    index >= 0, index < structuredMessages.count {
-            resolveBoundary(messages: Array(structuredMessages.prefix(index + 1)), tools: toolSpecs,
-              kind: "messages", label: descriptor.label, requested: true)
-          }
-        }
-        let promptBoundary = promptTokens.count - 1
-        if promptBoundary >= 16 {
-          stableBoundaries.append(promptBoundary)
-          if stableBoundaryScopes[promptBoundary] == nil {
-            stableBoundaryScopes[promptBoundary] = cacheIdentity.scope
-          }
-          if resolvedBoundaries[promptBoundary] == nil {
-            resolvedBoundaries[promptBoundary] = .init(tokenCount: promptBoundary, kind: "prompt",
-              label: nil, requested: false, status: "resolved", skipReason: nil)
-          }
-          stableBoundaries = Array(Set(stableBoundaries)).sorted()
+        let boundaryTelemetry = prepared.structuralBoundaries.map { boundary in
+          ActiveRequest.BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
+            label: boundary.label, requested: boundary.requested, status: boundary.status,
+            skipReason: boundary.skipReason)
         }
         var coordinatorPlan: CachePlan? = nil
         var coordinatorPlanMs = 0.0
