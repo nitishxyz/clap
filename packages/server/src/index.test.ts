@@ -269,6 +269,91 @@ describe("clap server", () => {
     }
   });
 
+  test("remote cache intent requires authenticated identity without changing non-cache policy", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-cache-auth-test-"));
+    const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
+    const cacheRequest = {
+      model: "missing/cache-model",
+      messages: [{ role: "user", content: "hello" }],
+      cache: { namespace: "public-label" },
+    };
+    try {
+      process.env.CLAP_HOME = home;
+      process.env.CLAP_REQUIRE_API_KEY = "0";
+      const app = createServer();
+
+      const nonCache = await app.request("/v1/models", undefined, remote);
+      expect(nonCache.status).toBe(200);
+
+      const denied = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(cacheRequest),
+      }, remote);
+      expect(denied.status).toBe(401);
+      expect(await denied.json()).toMatchObject({
+        error: { type: "authentication_error", code: "cache_identity_required" },
+      });
+
+      const embedded = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(cacheRequest),
+      });
+      expect(embedded.status).not.toBe(401);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("valid credentials override local trust and survive internal delegation", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-delegated-auth-test-"));
+    try {
+      process.env.CLAP_HOME = home;
+      process.env.CLAP_REQUIRE_API_KEY = "0";
+      const app = createServer();
+      const created = await app.request("/clap/v1/keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "delegated" }),
+      });
+      const key = await created.json() as { key: string };
+
+      const invalidLocal = await app.request("/v1/models", {
+        headers: { authorization: "Bearer invalid-presented-key" },
+      });
+      expect(invalidLocal.status).toBe(401);
+
+      process.env.CLAP_REQUIRE_API_KEY = "1";
+      const delegated = await app.request("/v1/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${key.key}`,
+        },
+        body: JSON.stringify({
+          model: "missing/delegated-model",
+          input: "hello",
+          cache: { namespace: "delegated-cache" },
+        }),
+      });
+      expect(delegated.status).not.toBe(401);
+      const body = await delegated.json() as { error?: { code?: string } };
+      expect(body.error?.code).not.toBe("invalid_api_key");
+      expect(body.error?.code).not.toBe("cache_identity_required");
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("prometheus /metrics exposes counters, queue gauges, and histograms", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const dir = await mkdtemp(join(tmpdir(), "clap-prom-test-"));

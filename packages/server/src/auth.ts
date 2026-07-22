@@ -1,6 +1,7 @@
 import { clapHome } from "@clap/models";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { apiKeyPrincipal, trustedLocalPrincipal, type CachePrincipal } from "./cache-identity";
 
 export type ApiKeyRecord = {
   id: string;
@@ -126,4 +127,63 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 export function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   return LOOPBACK.has(address);
+}
+
+export type RequestIdentity = {
+  clientId: string;
+  cachePrincipal?: CachePrincipal;
+  loopback: boolean;
+  credentialPresented: boolean;
+  credentialValid: boolean;
+};
+
+export type RequestIdentityInput = {
+  authorization?: string;
+  apiKey?: string;
+  address?: string;
+  /** Missing transport metadata denotes trusted embedded use. */
+  embedded?: boolean;
+};
+
+/** Resolves credentials exactly once. A presented credential never falls back to local trust. */
+export function resolveRequestIdentity(
+  verifier: Pick<ApiKeyVerifier, "verify">,
+  input: RequestIdentityInput,
+): RequestIdentity {
+  const token = bearerToken(input.authorization) ?? input.apiKey;
+  const credentialPresented = input.authorization !== undefined || input.apiKey !== undefined;
+  const loopback = input.embedded === true || isLoopbackAddress(input.address);
+  if (credentialPresented) {
+    const record = token === undefined ? undefined : verifier.verify(token);
+    if (record) {
+      return {
+        clientId: record.id,
+        cachePrincipal: apiKeyPrincipal(record.id),
+        loopback,
+        credentialPresented: true,
+        credentialValid: true,
+      };
+    }
+    return {
+      clientId: loopback ? "local-invalid-credential" : `remote:${input.address ?? "unknown"}`,
+      loopback,
+      credentialPresented: true,
+      credentialValid: false,
+    };
+  }
+  if (loopback) {
+    return {
+      clientId: "local",
+      cachePrincipal: trustedLocalPrincipal(),
+      loopback: true,
+      credentialPresented: false,
+      credentialValid: false,
+    };
+  }
+  return {
+    clientId: `remote:${input.address ?? "unknown"}`,
+    loopback: false,
+    credentialPresented: false,
+    credentialValid: false,
+  };
 }

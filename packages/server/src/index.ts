@@ -30,12 +30,12 @@ import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModel
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
 import { listBackends, ModelLifecycleManager, ResidentWorkerRegistry, type ResidentChatResult } from "@clap/runtime-router";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { ApiKeyVerifier, bearerToken, createApiKey, isLoopbackAddress, listApiKeys, revokeApiKey } from "./auth";
+import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { CacheEventStore, type PersistedCacheDecision } from "./cache-event-store";
 import {
@@ -59,17 +59,40 @@ const activeDownloads = new Map<string, { id: string; controller: AbortControlle
 const defaultIdleTimeoutSeconds = 240;
 const maxBunIdleTimeoutSeconds = 255;
 
+async function requestCarriesCacheIntent(request: Request): Promise<boolean> {
+  if (request.method === "GET" || request.method === "HEAD") return false;
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("application/json")) return false;
+  try {
+    const body = await request.clone().json();
+    return typeof body === "object" && body !== null && !Array.isArray(body)
+      && "cache" in body && (body as { cache?: unknown }).cache !== undefined;
+  } catch {
+    // Let endpoint schema handling report malformed JSON.
+    return false;
+  }
+}
+
 export type ServerOptions = {
   port?: number;
   hostname?: string;
   idleTimeout?: number;
 };
 
+type ServerEnv = {
+  Bindings: {
+    requestIP?: (request: Request) => { address?: string } | null;
+  };
+  Variables: {
+    requestIdentity: RequestIdentity;
+  };
+};
+
 export function createServer(
   residents = new ResidentWorkerRegistry(),
   lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdown(entry.key)),
 ) {
-  const app = new Hono();
+  const app = new Hono<ServerEnv>();
   const { config, sources: configSources } = loadClapConfig();
   const cacheEvents = new CacheEventStore({
     directory: join(clapHome(), "telemetry"),
@@ -250,42 +273,46 @@ export function createServer(
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
-  // Fairness identity: API key id > remote address > "local".
-  const clientId = (c: { req: { header: (name: string) => string | undefined; raw: Request }; env?: unknown }): string => {
-    const token = bearerToken(c.req.header("authorization")) ?? c.req.header("x-api-key");
-    if (token) {
-      const record = apiKeys.verify(token);
-      if (record) return record.id;
-    }
-    try {
-      const env = c.env as { requestIP?: (request: Request) => { address?: string } | null } | undefined;
-      const address = env?.requestIP?.(c.req.raw)?.address;
-      if (address && !isLoopbackAddress(address)) return address;
-    } catch {
-      // fall through
-    }
-    return "local";
-  };
   app.use("*", async (c, next) => {
+    let address: string | undefined;
+    let embedded = true;
+    try {
+      address = c.env?.requestIP?.(c.req.raw)?.address;
+      embedded = address === undefined;
+    } catch {
+      // No transport info denotes embedded use.
+    }
+    const identity = resolveRequestIdentity(apiKeys, {
+      authorization: c.req.header("authorization"),
+      apiKey: c.req.header("x-api-key"),
+      address,
+      embedded,
+    });
+    c.set("requestIdentity", identity);
     if (c.req.path === "/clap/v1/health") return next();
+
+    if (identity.credentialPresented && !identity.credentialValid) return invalidApiKey(c);
+    if (!identity.cachePrincipal && await requestCarriesCacheIntent(c.req.raw)) {
+      return c.json(ErrorResponseSchema.parse({
+        error: {
+          message: "cache identity requires a valid API key for remote requests",
+          type: "authentication_error",
+          code: "cache_identity_required",
+        },
+      }), 401);
+    }
     const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1"
       || (process.env.CLAP_REQUIRE_API_KEY === undefined && config.auth.require_api_key === true);
-    let loopback = true;
-    try {
-      const env = c.env as { requestIP?: (request: Request) => { address?: string } | null } | undefined;
-      const address = env?.requestIP?.(c.req.raw)?.address;
-      if (address) loopback = isLoopbackAddress(address);
-    } catch {
-      // no transport info (tests, embedded fetch); treat as loopback
-    }
-    const required = requireAlways || (!loopback && apiKeys.hasActiveKeys());
-    if (!required) return next();
-    const token = bearerToken(c.req.header("authorization")) ?? c.req.header("x-api-key");
-    if (token && apiKeys.verify(token)) return next();
+    const required = requireAlways || (!identity.loopback && apiKeys.hasActiveKeys());
+    if (!required || identity.credentialValid) return next();
+    return invalidApiKey(c);
+  });
+
+  function invalidApiKey(c: Context<ServerEnv>) {
     return c.json(ErrorResponseSchema.parse({
       error: { message: "missing or invalid API key; pass Authorization: Bearer <key>", type: "invalid_request_error", code: "invalid_api_key" },
     }), 401);
-  });
+  }
 
   app.post("/clap/v1/keys", async (c) => {
     const body = z.object({ name: z.string().min(1) }).parse(await c.req.json());
@@ -809,7 +836,7 @@ export function createServer(
   ) {
     let release: () => void;
     try {
-      release = await limiter.acquire(clientId(c), c.req.raw.signal);
+      release = await limiter.acquire(c.get("requestIdentity").clientId, c.req.raw.signal);
     } catch (error) {
       if (error instanceof QueueFullError) {
         handle.finish({ status: "error", error: error.message, errorCode: "server_overloaded" });
