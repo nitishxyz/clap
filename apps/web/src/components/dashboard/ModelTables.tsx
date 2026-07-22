@@ -48,6 +48,7 @@ function DetailItem({ label, children }: { label: string; children: ReactNode })
 function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuCount, open, onToggle }: { entry: DashboardLoadedModel; now: number; actions: ActionState; platform?: string; systemMemoryBytes?: number; cpuCount?: number; open: boolean; onToggle: () => void }) {
   const unifiedMlx = isUnifiedMlx(entry.backend, platform);
   const concurrency = entry.worker.retention;
+  const residency = entry.worker.residency;
   const growthReserve = concurrency?.retainedGrowthReserveBytes
     ?? (typeof concurrency?.activePolicy.inputs.retained_growth_reserve_bytes === "number"
       ? concurrency.activePolicy.inputs.retained_growth_reserve_bytes : undefined);
@@ -62,7 +63,7 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
         <span className={`shrink-0 text-[0.66rem] text-muted transition-transform duration-200 ${open ? "rotate-90" : ""}`}>&#9656;</span>
         <span className="min-w-0 flex-1 truncate text-[0.78rem]" title={entry.localPath}>{entry.id}</span>
         <span className="hidden shrink-0 sm:inline"><Tag>{entry.backend}</Tag></span>
-        <span className="shrink-0">{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.state}</Tag>}</span>
+        <span className="shrink-0">{entry.state === "active" ? <Tag tone="ok">active</Tag> : <Tag>{entry.worker.loadState ?? entry.state}</Tag>}</span>
         <span className="shrink-0 tabular-nums" data-model-capacity="summary">
           <Tag tone={concurrency?.underPressure ? "warn" : undefined}>
             <span className="sm:hidden">{concurrency ? `${concurrency.active}/${concurrency.maxActive} · q${concurrency.queued ?? "?"}` : "n/a"}</span>
@@ -102,6 +103,23 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                 value={entry.usage ? fmtBytes(entry.usage.rssBytes) : undefined}
                 title={RSS_TITLE}
               />
+            </DetailItem>
+            <DetailItem label="load estimate">
+              {residency?.estimateBytes != null
+                ? `${fmtBytes(residency.estimateBytes)} estimated · ${residency.estimateSource?.replaceAll("_", " ") ?? "unknown source"}`
+                : "unavailable"}
+            </DetailItem>
+            <DetailItem label="observed rss">
+              {residency?.observedRssBytes != null && residency.observedRssSource
+                ? `${fmtBytes(residency.observedRssBytes)} measured · RSS`
+                : "not measured"}
+            </DetailItem>
+            <DetailItem label="reservation">{residency ? fmtBytes(residency.reservationBytes) : "unavailable"}</DetailItem>
+            <DetailItem label="admission">
+              {residency?.lastAdmissionReason?.replaceAll("_", " ") ?? "not admitted"}
+            </DetailItem>
+            <DetailItem label="eviction">
+              {residency?.lastEvictionReason?.replaceAll("_", " ") ?? "none"}
             </DetailItem>
             <DetailItem label="cpu">
               <TableBarCell

@@ -73,6 +73,32 @@ describe("worker resource presentation", () => {
     expect(html).toContain("unavailable");
   });
 
+  test("labels estimated load memory separately from measured RSS", () => {
+    const html = renderToStaticMarkup(<LoadedModels models={[{
+      ...worker,
+      worker: {
+        ...worker.worker,
+        loadState: "resident",
+        residency: {
+          estimateBytes: 2_000,
+          estimateSource: "model_artifacts",
+          observedRssBytes: 1_500,
+          observedRssSource: "resident_rss",
+          reservationBytes: 2_000,
+          lastAdmissionReason: "within_budget_after_eviction",
+          lastEvictionReason: "memory_admission",
+        },
+      },
+    } as never]} now={0} actions={{ busy: {}, run: async () => undefined } as never}
+      platform="darwin" systemMemoryBytes={10_000} cpuCount={8} />);
+    expect(html).toContain("load estimate");
+    expect(html).toContain("estimated · model artifacts");
+    expect(html).toContain("observed rss");
+    expect(html).toContain("measured · RSS");
+    expect(html).toContain("within budget after eviction");
+    expect(html).toContain("memory admission");
+  });
+
   test("keeps common loaded-model details ordered before backend memory", () => {
     const html = renderToStaticMarkup(
       <LoadedModels

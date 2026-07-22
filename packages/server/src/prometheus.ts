@@ -85,6 +85,14 @@ export type PromSnapshot = {
     queuedMs: Histogram;
     completionTokens: Histogram;
   };
+  residency: {
+    reservedBytes: number;
+    activeReservations: number;
+    outcomes: Map<string, number>;
+    evictions: Map<string, number>;
+    estimateObservedRatioSum: number;
+    estimateObservedRatioCount: number;
+  };
 };
 
 export function makeRequestHistograms(): PromSnapshot["histograms"] {
@@ -132,6 +140,21 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   gauge("clap_queue_inflight_limit", "Configured max_inflight", [["", snapshot.queue.maxInflight]]);
   gauge("clap_queue_depth_limit", "Configured queue_depth", [["", snapshot.queue.queueDepth]]);
   gauge("clap_uptime_seconds", "Server uptime", [["", Math.round(snapshot.uptimeMs / 1000)]]);
+  gauge("clap_residency_reserved_bytes", "Bytes held by active model-load reservations", [["", snapshot.residency.reservedBytes]]);
+  gauge("clap_residency_active_reservations", "Active model-load reservations", [["", snapshot.residency.activeReservations]]);
+  counter("clap_residency_load_outcomes_total", "Model-load admission outcomes by backend and reason",
+    [...snapshot.residency.outcomes].map(([key, value]) => {
+      const [backend, reason, outcome] = key.split("\0");
+      return [`{backend="${esc(backend!)}",reason="${esc(reason!)}",outcome="${esc(outcome!)}"}`, value];
+    }));
+  counter("clap_residency_evictions_total", "Models evicted for load admission by backend and reason",
+    [...snapshot.residency.evictions].map(([key, value]) => {
+      const [backend, reason] = key.split("\0");
+      return [`{backend="${esc(backend!)}",reason="${esc(reason!)}"}`, value];
+    }));
+  gauge("clap_residency_estimate_observed_ratio", "Mean estimated bytes divided by observed RSS",
+    [["", snapshot.residency.estimateObservedRatioCount > 0
+      ? snapshot.residency.estimateObservedRatioSum / snapshot.residency.estimateObservedRatioCount : 0]]);
 
   gauge("clap_model_loaded", "Loaded models (1 per loaded model)", snapshot.loadedModels.map(
     (model) => [`{model="${esc(model.id)}",state="${esc(model.state)}"}`, 1],

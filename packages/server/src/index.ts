@@ -217,6 +217,7 @@ export function createServer(
     onDecision: (decision, model) => metrics.event("load",
       `model admission ${decision.reason} requested=${decision.requested.bytes} available=${decision.available.bytes} evicted=${decision.evictedModelKeys.length}`,
       { model: model.modelId }),
+    onEvent: (event) => metrics.residencyEvent(event),
   });
   residents.workerEnv = (modelPath) => {
     let modelEnvironment: Record<string, string> = {};
@@ -443,6 +444,7 @@ export function createServer(
       })),
       uptimeMs: Date.now() - startedAt,
       histograms: metrics.histograms,
+      residency: metrics.residency,
     }), 200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
   });
 

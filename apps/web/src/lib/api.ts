@@ -216,10 +216,16 @@ export type DashboardRequest = {
 export type ServerEvent = {
   id: string;
   at: number;
-  type: "server" | "load" | "unload" | "expire" | "error" | "download";
+  type: "server" | "load" | "unload" | "expire" | "error" | "download"
+    | "model_load_reserved" | "model_load_started" | "model_load_committed" | "model_load_rolled_back"
+    | "model_evicted_for_load" | "model_load_rejected";
   message: string;
   model?: string;
   durationMs?: number;
+  backend?: string;
+  reason?: string;
+  reservationBytes?: number;
+  activeReservations?: number;
 };
 
 export type ModelTokenCapabilities = {
@@ -247,6 +253,16 @@ export type DashboardLoadedModel = {
   worker: {
     pid?: number;
     state: string;
+    loadState?: "not_started" | "starting" | "loading" | "resident" | "closing";
+    residency?: {
+      estimateBytes: number | null;
+      estimateSource: "prior_observation" | "model_artifacts" | "architecture_metadata" | "configured_cache" | "conservative_fallback" | null;
+      observedRssBytes: number | null;
+      observedRssSource: "resident_rss" | null;
+      reservationBytes: number;
+      lastAdmissionReason: "within_budget" | "within_budget_after_eviction" | "insufficient_available_memory" | "memory_state_unavailable" | "no_evictable_models" | null;
+      lastEvictionReason: "memory_admission" | null;
+    };
     memory?: { activeBytes: number; cacheBytes: number; peakActiveBytes: number };
     retention?: {
       maxActive: number;

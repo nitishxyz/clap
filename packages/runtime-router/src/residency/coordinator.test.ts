@@ -69,9 +69,11 @@ function coordinator(
   history = new ModelLoadEstimateHistory(),
 ) {
   const values = Array.isArray(snapshots) ? [...snapshots] : undefined;
+  const events: import("./coordinator").ResidencyCoordinatorEvent[] = [];
   return {
     lifecycle,
     history,
+    events,
     coordinator: new ResidencyCoordinator({
       lifecycle,
       history,
@@ -84,6 +86,7 @@ function coordinator(
       reservationId: (() => { let id = 0; return () => `reservation-${++id}`; })(),
       now: (() => { let now = 10; return () => ++now; })(),
       env: {},
+      onEvent: (event) => events.push(event),
     }),
   };
 }
@@ -151,6 +154,13 @@ describe("ResidencyCoordinator", () => {
     expect(result.reservation.state).toBe("committed");
     expect(result.decision.reason).toBe("within_budget");
     expect(setup.history.get(model)).toBe(800 * MIB);
+    expect(setup.events.map((event) => event.type)).toEqual([
+      "model_load_reserved", "model_load_started", "model_load_committed",
+    ]);
+    expect(setup.events.at(-1)).toMatchObject({
+      backend: "llama", reason: "within_budget", activeReservations: 0,
+      estimateBytes: 512 * MIB + 1_201, observedRssBytes: 800 * MIB,
+    });
   });
 
   test("rolls back reservation, loading state, and partial worker on load failures", async () => {
@@ -164,6 +174,7 @@ describe("ResidencyCoordinator", () => {
       expect(partialCalls).toEqual([undefined, failure]);
       expect(setup.coordinator.reservations()).toEqual([]);
       expect(setup.lifecycle.transitions.size).toBe(0);
+      expect(setup.events.map((event) => event.type)).toContain("model_load_rolled_back");
     }
   });
 
@@ -231,6 +242,7 @@ describe("ResidencyCoordinator", () => {
         details: { reason: "memory_state_unavailable", availableBytes: null },
       });
     expect(setup.coordinator.reservations()).toEqual([]);
+    expect(setup.events.map((event) => event.type)).toContain("model_load_rejected");
   });
 
   test("fails closed on estimated availability and accounts explicit environment headroom", async () => {

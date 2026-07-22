@@ -51,6 +51,20 @@ export interface ResidencyCoordinatorDependencies {
   readonly runtimeHeadroomBytes?: number;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly onDecision?: (decision: LoadAdmissionDecision, model: ResidencyModelDescriptor) => void;
+  readonly onEvent?: (event: ResidencyCoordinatorEvent) => void;
+}
+
+export type ResidencyCoordinatorEventType = "model_load_reserved" | "model_load_started" | "model_load_committed"
+  | "model_load_rolled_back" | "model_evicted_for_load" | "model_load_rejected";
+
+export interface ResidencyCoordinatorEvent {
+  readonly type: ResidencyCoordinatorEventType;
+  readonly backend: string;
+  readonly reason?: string;
+  readonly reservationBytes: number;
+  readonly activeReservations: number;
+  readonly estimateBytes?: number;
+  readonly observedRssBytes?: number;
 }
 
 export interface ResidencyLoadOperation<T> {
@@ -128,6 +142,7 @@ export class ResidencyCoordinator {
       expiresAtMs: saturatingAddMemoryBytes(startedAt, this.policy.reservationTtlMs),
     });
     this.activeReservations.set(reservationId, reservation);
+    this.emit("model_load_reserved", model, reservation.bytes, { estimateBytes: requested.bytes ?? undefined });
     let loaded: T | undefined;
     let loadStarted = false;
     const evictedModelKeys: string[] = [];
@@ -135,6 +150,7 @@ export class ResidencyCoordinator {
       let reason: LoadAdmissionDecision["reason"] = "within_budget";
       while (!this.fits(memory.available, reservation.bytes, reservationId)) {
         if (memory.available.kind !== "measured") {
+          this.emit("model_load_rejected", model, reservation.bytes, { reason: "memory_state_unavailable" });
           throw this.insufficient("memory_state_unavailable", requested, memory.available, reservationId, 0);
         }
         const snapshots = this.dependencies.lifecycle.snapshotForResidency();
@@ -143,11 +159,13 @@ export class ResidencyCoordinator {
           reservedKeys: new Set([...this.activeReservations.values()].map((entry) => entry.model.modelKey)),
         });
         if (victims.length === 0) {
+          this.emit("model_load_rejected", model, reservation.bytes, { reason: "no_evictable_models" });
           throw this.insufficient("no_evictable_models", requested, memory.available, reservationId, 0);
         }
         const result = await this.dependencies.lifecycle.tryEvictIdle(victims[0]!);
         if (result === "changed") continue;
         evictedModelKeys.push(victims[0]!.key);
+        this.emit("model_evicted_for_load", model, reservation.bytes, { reason: "memory_admission" });
         reason = "within_budget_after_eviction";
         memory = await this.dependencies.memorySnapshot();
       }
@@ -164,6 +182,7 @@ export class ResidencyCoordinator {
       });
       this.dependencies.onDecision?.(decision, model);
       this.dependencies.lifecycle.setResidencyTransition(model.modelKey, "loading");
+      this.emit("model_load_started", model, reservation.bytes);
       loadStarted = true;
       loaded = await operation.performLoad();
       await operation.stabilize?.(loaded);
@@ -171,8 +190,14 @@ export class ResidencyCoordinator {
       if (observed !== undefined) this.history.update(model, observed);
       reservation = Object.freeze({ ...reservation, state: "committed" });
       this.activeReservations.set(reservationId, reservation);
+      this.emit("model_load_committed", model, reservation.bytes, {
+        reason: decision.reason, estimateBytes: requested.bytes ?? undefined, observedRssBytes: observed,
+      });
       return { value: loaded, reservation, decision };
     } catch (error) {
+      if (!(error instanceof InsufficientModelMemoryError)) {
+        this.emit("model_load_rolled_back", model, reservation.bytes, { reason: "load_failure" });
+      }
       if (loadStarted) await operation.shutdownPartial?.(loaded, error);
       throw error;
     } finally {
@@ -212,6 +237,15 @@ export class ResidencyCoordinator {
     return saturatingAddMemoryBytes(...[...this.activeReservations.values()]
       .filter((reservation) => reservation.reservationId !== reservationId && reservation.state === "held")
       .map((reservation) => reservation.bytes));
+  }
+
+  private emit(type: ResidencyCoordinatorEventType, model: ResidencyModelDescriptor, reservationBytes: number,
+    extra: Partial<Omit<ResidencyCoordinatorEvent, "type" | "backend" | "reservationBytes" | "activeReservations">> = {}): void {
+    const terminal = type === "model_load_committed" || type === "model_load_rolled_back" || type === "model_load_rejected";
+    this.dependencies.onEvent?.(Object.freeze({
+      type, backend: model.backend, reservationBytes,
+      activeReservations: Math.max(0, this.activeReservations.size - (terminal ? 1 : 0)), ...extra,
+    }));
   }
 
   private totalHeadroomBytes(): number {

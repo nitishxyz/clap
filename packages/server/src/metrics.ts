@@ -103,7 +103,9 @@ export type RequestRecord = {
 export type ServerEvent = {
   id: string;
   at: number;
-  type: "server" | "load" | "unload" | "expire" | "error" | "download";
+  type: "server" | "load" | "unload" | "expire" | "error" | "download"
+    | "model_load_reserved" | "model_load_started" | "model_load_committed" | "model_load_rolled_back"
+    | "model_evicted_for_load" | "model_load_rejected";
   message: string;
   model?: string;
   durationMs?: number;
@@ -111,6 +113,19 @@ export type ServerEvent = {
   stderrLogPath?: string;
   launchMetadataPath?: string;
   crashClassification?: string;
+  backend?: string;
+  reason?: string;
+  reservationBytes?: number;
+  activeReservations?: number;
+};
+
+export type ResidencyMetrics = {
+  reservedBytes: number;
+  activeReservations: number;
+  outcomes: Map<string, number>;
+  evictions: Map<string, number>;
+  estimateObservedRatioSum: number;
+  estimateObservedRatioCount: number;
 };
 
 export type MetricsTotals = {
@@ -259,6 +274,10 @@ export class MetricsCollector {
   private eventSequence = 0;
   readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
+  readonly residency: ResidencyMetrics = {
+    reservedBytes: 0, activeReservations: 0, outcomes: new Map(), evictions: new Map(),
+    estimateObservedRatioSum: 0, estimateObservedRatioCount: 0,
+  };
 
   constructor(
     readonly cacheEvents?: CacheEventStore,
@@ -290,8 +309,37 @@ export class MetricsCollector {
       stderrLogPath: extra?.stderrLogPath,
       launchMetadataPath: extra?.launchMetadataPath,
       crashClassification: extra?.crashClassification,
+      backend: extra?.backend,
+      reason: extra?.reason,
+      reservationBytes: extra?.reservationBytes,
+      activeReservations: extra?.activeReservations,
     });
     if (this.eventLog.length > EVENT_LIMIT) this.eventLog.shift();
+  }
+
+  residencyEvent(event: import("@clap/runtime-router").ResidencyCoordinatorEvent): void {
+    this.residency.activeReservations = event.activeReservations;
+    this.residency.reservedBytes = event.type === "model_load_reserved"
+      ? this.residency.reservedBytes + event.reservationBytes
+      : event.type === "model_load_committed" || event.type === "model_load_rolled_back" || event.type === "model_load_rejected"
+        ? Math.max(0, this.residency.reservedBytes - event.reservationBytes)
+        : this.residency.reservedBytes;
+    if (event.type === "model_load_committed" || event.type === "model_load_rolled_back" || event.type === "model_load_rejected") {
+      const key = `${event.backend}\0${event.reason ?? "unknown"}\0${event.type}`;
+      this.residency.outcomes.set(key, (this.residency.outcomes.get(key) ?? 0) + 1);
+    }
+    if (event.type === "model_evicted_for_load") {
+      const key = `${event.backend}\0${event.reason ?? "memory_admission"}`;
+      this.residency.evictions.set(key, (this.residency.evictions.get(key) ?? 0) + 1);
+    }
+    if (event.type === "model_load_committed" && event.estimateBytes && event.observedRssBytes) {
+      this.residency.estimateObservedRatioSum += event.estimateBytes / event.observedRssBytes;
+      this.residency.estimateObservedRatioCount += 1;
+    }
+    this.event(event.type, `${event.backend} ${event.type}${event.reason ? ` (${event.reason})` : ""}`, {
+      backend: event.backend, reason: event.reason, reservationBytes: event.reservationBytes,
+      activeReservations: event.activeReservations,
+    });
   }
 
   events(limit = 50): ServerEvent[] {

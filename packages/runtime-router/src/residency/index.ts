@@ -52,6 +52,8 @@ export {
   ResidencyCoordinator,
   measuredResidencyMemory,
   type ResidencyCoordinatorDependencies,
+  type ResidencyCoordinatorEvent,
+  type ResidencyCoordinatorEventType,
   type ResidencyLifecycleAdapter,
   type ResidencyLoadOperation,
   type ResidencyLoadResult,

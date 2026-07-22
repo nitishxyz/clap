@@ -511,6 +511,18 @@ describe("clap server", () => {
       expect(body).toContain('clap_request_duration_ms_bucket{le="+Inf"} 1');
       expect(body).toContain('clap_tokens_total{kind="completion"}');
       expect(body).toContain("# TYPE clap_request_ttft_ms histogram");
+      expect(body).toContain("clap_residency_reserved_bytes 0");
+      expect(body).toContain("clap_residency_active_reservations 0");
+      expect(body).toContain('clap_residency_load_outcomes_total{backend="llama",reason="within_budget",outcome="model_load_committed"} 1');
+      expect(body).toContain("clap_residency_estimate_observed_ratio ");
+      expect(body.match(/clap_residency_[^\n]*model=/)).toBeNull();
+
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const events = (await dashboard.json()).events as Array<{ type: string; backend?: string; reservationBytes?: number }>;
+      expect(events.some((event) => event.type === "model_load_reserved" && event.backend === "llama"
+        && typeof event.reservationBytes === "number")).toBe(true);
+      expect(events.some((event) => event.type === "model_load_started")).toBe(true);
+      expect(events.some((event) => event.type === "model_load_committed")).toBe(true);
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       await rm(dir, { recursive: true, force: true });
