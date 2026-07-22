@@ -75,6 +75,14 @@ struct CacheAdmissionResult {
   const std::vector<clap_cache_candidate_evaluation_t> candidates;
 };
 
+struct CacheAnchorResult {
+  const bool materialized;
+  const bool no_op;
+  const uint32_t target_slot;
+  const uint64_t target_generation;
+  const std::vector<uint32_t> eviction_slots;
+};
+
 struct CacheSlotSnapshot {
   const uint32_t id;
   const uint64_t generation;
@@ -125,10 +133,20 @@ class CacheExecutor {
 
   CacheAdmissionResult preview(const CacheAdmissionRequest& request);
   CacheAdmissionResult admit(const CacheAdmissionRequest& request);
+  CacheAnchorResult create_anchor(const std::vector<int32_t>& tokens,
+                                  const clap::llama_cache::Identity& identity,
+                                  uint32_t source_slot, bool protect);
   CacheLease acquire(uint32_t slot);
   CacheSlotSnapshot slot(uint32_t slot) const;
   std::size_t slot_count() const noexcept { return slots_.size(); }
   uint64_t reset();
+  uint64_t reset_for_retry(uint32_t active_slot);
+  uint64_t invalidate_and_clear(uint32_t slot, uint64_t generation, bool keep_busy = false);
+  uint64_t advance(uint32_t slot, uint64_t generation, const int32_t* tokens,
+                   std::size_t count, uint32_t state, bool busy);
+  void release(uint32_t slot, uint64_t generation) noexcept;
+  clap_cache_telemetry_t telemetry() const;
+  clap_cache_retention_telemetry_t retention_telemetry() const;
   clap::llama_cache::Coordinator& coordinator() { return *coordinator_; }
   const clap::llama_cache::Coordinator& coordinator() const { return *coordinator_; }
   std::vector<Slot>& slots() noexcept { return slots_; }
@@ -140,8 +158,6 @@ class CacheExecutor {
 
  private:
   friend class CacheLease;
-  void release(uint32_t slot, uint64_t generation);
-
   std::unique_ptr<PhysicalCacheBackend> backend_;
   std::unique_ptr<clap::llama_cache::Coordinator> coordinator_;
   std::vector<Slot> slots_;

@@ -72,7 +72,7 @@ struct CacheBackpressure : std::runtime_error {
 };
 
 void unload(LoadedLlama& loaded) {
-  if (loaded.coordinator) loaded.coordinator->reset();
+  if (loaded.cache_executor) loaded.cache_executor->reset();
   loaded.coordinator = nullptr;
   loaded.cache_executor.reset();
   loaded.slots.clear();
@@ -127,9 +127,9 @@ json retention_telemetry(const LoadedLlama& loaded, std::size_t active, std::siz
   uint32_t retained_sessions = 0;
   uint32_t retained_anchors = 0;
   uint64_t evictions = 0;
-  if (loaded.coordinator) {
-    const auto retention = loaded.coordinator->retention_telemetry();
-    const auto telemetry = loaded.coordinator->telemetry();
+  if (loaded.cache_executor) {
+    const auto retention = loaded.cache_executor->retention_telemetry();
+    const auto telemetry = loaded.cache_executor->telemetry();
     retained_total = retention.active_slots;
     retained_sessions = retention.session_slots;
     retained_anchors = retention.anchor_slots;
@@ -205,6 +205,7 @@ struct ActiveRequest {
   llama_seq_id seq = 0;
   LoadedLlama::CacheSlot* slot = nullptr;
   clap::llama_cache::Coordinator* coordinator = nullptr;
+  clap::llama::CacheExecutor* cache_executor = nullptr;
   clap::llama_cache::Identity cache_identity;
 
   std::vector<llama_token> prompt_tokens;       // un-ingested remainder
@@ -435,6 +436,7 @@ bool prepare_with_coordinator(LoadedLlama& loaded, ActiveRequest& req,
     loaded.last_eviction_reason = "hard_ceiling";
   }
   req.coordinator = loaded.coordinator;
+  req.cache_executor = loaded.cache_executor.get();
   req.slot = &slot;
   req.seq = static_cast<llama_seq_id>(target);
   req.n_pos = static_cast<int32_t>(resident);
@@ -490,59 +492,26 @@ void maybe_create_anchor(LoadedLlama& loaded, ActiveRequest& req) {
   std::vector<llama_token> boundary(
       req.full_prompt_tokens.begin(),
       req.full_prompt_tokens.begin() + static_cast<std::ptrdiff_t>(count));
-  std::vector<uint8_t> slot_capabilities;
-  slot_capabilities.reserve(loaded.slots.size());
-  for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
-    const auto& slot = loaded.slots[index];
-    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
-    if (!slot.tokens.empty()) flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
-    slot_capabilities.push_back(flags);
-  }
   try {
     auto anchor_identity = req.cache_identity;
     const bool structural = std::find(req.structural_boundaries.begin(),
         req.structural_boundaries.end(), count) != req.structural_boundaries.end();
     anchor_identity.scope = structural ? CLAP_CACHE_SCOPE_HARNESS : CLAP_CACHE_SCOPE_PROJECT;
-    auto plan = req.coordinator->plan(boundary, anchor_identity,
-        CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
-            CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT,
-        0, CLAP_CACHE_SLOT_ANCHOR, slot_capabilities);
-    const auto view = plan.view();
-    if (view.operation == CLAP_CACHE_OPERATION_NOOP) {
-      plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
-      req.materialized_boundaries.push_back(count);
-      return;
+    auto result = loaded.cache_executor->create_anchor(
+        boundary, anchor_identity, static_cast<uint32_t>(req.seq), structural);
+    if (!result.materialized) return;
+    if (!result.no_op && result.target_slot < loaded.slots.size()) {
+      auto& anchor = loaded.slots[result.target_slot];
+      anchor.tokens = boundary;
+      anchor.is_anchor = true;
+      anchor.last_used = ++loaded.use_counter;
+      anchor.coordinator_generation = result.target_generation;
     }
-    if (view.target.slot >= loaded.slots.size()) {
-      plan.abort();
-      return;
-    }
-    llama_memory_t mem = llama_get_memory(loaded.runtime.context());
-    for (const auto& victim : plan.evictions()) {
-      if (victim.slot >= loaded.slots.size() || victim.slot == view.target.slot) continue;
-      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(victim.slot), -1, -1);
-      loaded.slots[victim.slot] = {};
+    for (const uint32_t victim : result.eviction_slots) {
+      if (victim != result.target_slot && victim < loaded.slots.size()) loaded.slots[victim] = {};
       loaded.last_eviction_reason = "hard_ceiling";
     }
-    llama_memory_seq_rm(mem, static_cast<llama_seq_id>(view.target.slot), -1, -1);
-    llama_memory_seq_cp(mem, req.seq, static_cast<llama_seq_id>(view.target.slot), -1, -1);
-    auto& anchor = loaded.slots[view.target.slot];
-    anchor.tokens = boundary;
-    anchor.is_anchor = true;
-    anchor.last_used = ++loaded.use_counter;
-    try {
-      plan.commit(count, CLAP_CACHE_SLOT_ANCHOR);
-      anchor.coordinator_generation = req.coordinator->slot(view.target.slot).generation;
-      if (structural) {
-        req.coordinator->set_anchor_protected(
-            {view.target.slot, 0, anchor.coordinator_generation}, true);
-      }
-      req.materialized_boundaries.push_back(count);
-    } catch (...) {
-      llama_memory_seq_rm(mem, static_cast<llama_seq_id>(view.target.slot), -1, -1);
-      anchor = {};
-      throw;
-    }
+    req.materialized_boundaries.push_back(count);
   } catch (const std::exception& error) {
     fprintf(stderr, "clap-llama: coordinated anchor skipped: %s\n", error.what());
   }
@@ -555,13 +524,9 @@ void finalize(ActiveRequest& req) {
   }
   if (req.slot) {
     req.slot->busy = false;
-    if (req.coordinator && req.slot->coordinator_generation != 0) {
-      try {
-        req.coordinator->set_busy(
-            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, false);
-      } catch (const std::exception& error) {
-        fprintf(stderr, "clap-llama: cache finalize metadata failed: %s\n", error.what());
-      }
+    if (req.cache_executor && req.slot->coordinator_generation != 0) {
+      req.cache_executor->release(
+          static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
     }
   }
   req.done = true;
@@ -629,16 +594,15 @@ void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& me
   if (req.slot) {
     req.slot->busy = false;
     req.slot->tokens.clear();
-    if (req.coordinator && req.slot->coordinator_generation != 0) {
+    if (req.cache_executor && req.slot->coordinator_generation != 0) {
       try {
-        req.slot->coordinator_generation = req.coordinator->invalidate(
-            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+        req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
+            static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
       } catch (const std::exception& error) {
         fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n", error.what());
       }
     }
   }
-  llama_memory_seq_rm(llama_get_memory(loaded.runtime.context()), req.seq, -1, -1);
   req.done = true;
   emit_error(req.id, message);
 }
@@ -694,14 +658,14 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
         req.prompt_tokens.begin() + static_cast<std::ptrdiff_t>(req.ingested + chunk));
       if (req.coordinator && req.slot->coordinator_generation != 0) {
         try {
-          req.slot->coordinator_generation = req.coordinator->advance(
-              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation},
+          req.slot->coordinator_generation = req.cache_executor->advance(
+              static_cast<uint32_t>(req.seq), req.slot->coordinator_generation,
               req.prompt_tokens.data() + chunk_start, chunk, CLAP_CACHE_SLOT_SESSION, true);
         } catch (const std::exception& error) {
           req.cache_fallback = "coordinator_advance_failed";
           try {
-            req.slot->coordinator_generation = req.coordinator->invalidate(
-                {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
+            req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
+                static_cast<uint32_t>(req.seq), req.slot->coordinator_generation);
           } catch (...) {
             req.slot->coordinator_generation = 0;
           }
@@ -737,17 +701,12 @@ void post_decode(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* voc
     req.slot->tokens.push_back(req.pending_token);
     if (req.coordinator && req.slot->coordinator_generation != 0) {
       try {
-        req.slot->coordinator_generation = req.coordinator->advance(
-            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation},
+        req.slot->coordinator_generation = req.cache_executor->advance(
+            static_cast<uint32_t>(req.seq), req.slot->coordinator_generation,
             &req.pending_token, 1, CLAP_CACHE_SLOT_SESSION, true);
       } catch (const std::exception& error) {
         req.cache_fallback = "coordinator_advance_failed";
-        try {
-          req.slot->coordinator_generation = req.coordinator->invalidate(
-              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
-        } catch (...) {
-          req.slot->coordinator_generation = 0;
-        }
+        req.slot->coordinator_generation = 0;
         emit(req.id, json{{"error", "cache coordinator advance failed closed"},
                           {"code", "cache_coordinator_error"}});
         req.done = true;
@@ -770,23 +729,16 @@ void handle_decode_failure(LoadedLlama& loaded, ActiveRequest& req, bool sole_ac
         s.tokens.clear();
         s.is_anchor = false;
       }
-      llama_memory_clear(llama_get_memory(loaded.runtime.context()), true);
-      if (req.coordinator) {
-        req.coordinator->reset();
-        req.slot->coordinator_generation = req.coordinator->slot(
-            static_cast<uint32_t>(req.seq)).generation;
-        req.coordinator->set_busy(
-            {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, true);
+      if (req.cache_executor) {
+        req.slot->coordinator_generation = req.cache_executor->reset_for_retry(
+            static_cast<uint32_t>(req.seq));
       }
     } else {
-      llama_memory_seq_rm(llama_get_memory(loaded.runtime.context()), req.seq, -1, -1);
       if (req.slot) {
         req.slot->tokens.clear();
-        if (req.coordinator && req.slot->coordinator_generation != 0) {
-          req.slot->coordinator_generation = req.coordinator->invalidate(
-              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation});
-          req.coordinator->set_busy(
-              {static_cast<uint32_t>(req.seq), 0, req.slot->coordinator_generation}, true);
+        if (req.cache_executor && req.slot->coordinator_generation != 0) {
+          req.slot->coordinator_generation = req.cache_executor->invalidate_and_clear(
+              static_cast<uint32_t>(req.seq), req.slot->coordinator_generation, true);
         }
       }
     }
@@ -982,8 +934,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
       s.tokens.clear();
       s.is_anchor = false;
     }
-    llama_memory_clear(llama_get_memory(loaded.runtime.context()), true);
-    if (loaded.coordinator) loaded.coordinator->reset();
+    if (loaded.cache_executor) loaded.cache_executor->reset();
     llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
     if (llama_encode(loaded.runtime.context(), batch)) throw std::runtime_error("llama_encode failed");
     llama_token decoder_start = llama_model_decoder_start_token(loaded.runtime.model());
@@ -992,6 +943,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     req->full_prompt_tokens = req->prompt_tokens;
     req->seq = 0;
     req->slot = &loaded.slots[0];
+    req->cache_executor = loaded.cache_executor.get();
     req->slot->busy = true;
     req->slot->last_used = ++loaded.use_counter;
     req->sampler = make_sampler(req->params);
@@ -1008,7 +960,6 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   // The only policy fallback is coordinator-unavailable no-cache mode. It may
   // choose an idle execution sequence, but it never inspects tokens, reuses a
   // donor, creates an anchor, or performs policy eviction.
-  llama_memory_t mem = llama_get_memory(loaded.runtime.context());
   std::size_t target = SIZE_MAX;
   for (std::size_t index = 0; index < loaded.slots.size(); ++index) {
     if (!loaded.slots[index].busy) {
@@ -1017,12 +968,14 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
     }
   }
   if (target == SIZE_MAX) throw std::runtime_error("no idle KV slot available");
-  llama_memory_seq_rm(mem, static_cast<llama_seq_id>(target), -1, -1);
+  if (loaded.cache_executor) loaded.cache_executor->remove_sequence(
+      static_cast<int32_t>(target), -1, -1);
   loaded.slots[target] = {};
   auto* slot = &loaded.slots[target];
   slot->last_used = ++loaded.use_counter;
   slot->busy = true;
   req->slot = slot;
+  req->cache_executor = loaded.cache_executor.get();
   req->seq = static_cast<llama_seq_id>(target);
   req->n_pos = 0;
   req->cache_fallback = "coordinator_unavailable_no_cache";

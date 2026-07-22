@@ -24,6 +24,7 @@ class RecordingBackend final : public clap::llama::PhysicalCacheBackend {
 
   void copy(int32_t source, int32_t target, int32_t begin, int32_t end) override {
     operations.push_back({"copy", {source, target, begin, end}});
+    if (fail_copy) throw std::runtime_error("copy failed");
   }
 
   void clear(bool data) override {
@@ -33,6 +34,7 @@ class RecordingBackend final : public clap::llama::PhysicalCacheBackend {
   std::vector<Operation> operations;
   bool remove_result = true;
   bool fail_remove = false;
+  bool fail_copy = false;
 };
 
 clap::llama::CacheExecutorConfig config() {
@@ -183,4 +185,59 @@ int main() {
     assert(clears == 1);
   }
   assert(reconciled_victim);
+
+  transactional.release(successful.target_slot, successful.target_generation);
+  transactional.release(successful.target_slot, successful.target_generation);
+  assert(!transactional.slot(successful.target_slot).busy);
+
+  const int32_t appended[] = {9, 9, 9};
+  try {
+    transactional.advance(successful.target_slot, successful.target_generation + 99,
+        appended, 3, CLAP_CACHE_SLOT_SESSION, true);
+    assert(false);
+  } catch (const clap::llama_cache::Error&) {
+  }
+  assert(!transactional.slot(successful.target_slot).busy);
+  assert(transactional.slot(successful.target_slot).resident_tokens == 0);
+
+  const uint64_t reset_epoch = transactional.reset();
+  assert(reset_epoch > 0);
+  assert(transactional_recording->operations.back().name == "clear");
+
+  auto anchor_backend = std::make_unique<RecordingBackend>();
+  RecordingBackend* anchor_recording = anchor_backend.get();
+  clap::llama::CacheExecutor anchors(config(), std::move(anchor_backend));
+  clap::llama_cache::Identity anchor_identity;
+  anchor_identity.name_space = clap::llama_cache::fingerprint("anchor-test");
+  anchor_identity.tenant = clap::llama_cache::hash("anchor-test");
+  anchor_identity.scope = CLAP_CACHE_SCOPE_PROJECT;
+  const std::vector<int32_t> anchor_tokens(20, 42);
+  const auto source = anchors.admit({anchor_tokens, anchor_identity,
+      CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH, 1, CLAP_CACHE_SLOT_SESSION,
+      {}, {}, false, {}});
+  anchors.advance(source.target_slot, source.target_generation, anchor_tokens.data(),
+      anchor_tokens.size(), CLAP_CACHE_SLOT_SESSION, true);
+  const auto anchor = anchors.create_anchor(
+      anchor_tokens, anchor_identity, source.target_slot, false);
+  assert(anchor.materialized && !anchor.no_op);
+  anchor_recording->operations.clear();
+  const auto no_op_anchor = anchors.create_anchor(
+      anchor_tokens, anchor_identity, source.target_slot, false);
+  assert(no_op_anchor.materialized && no_op_anchor.no_op);
+  for (const auto& operation : anchor_recording->operations) {
+    assert(operation.name != "copy");
+  }
+  auto failed_identity = anchor_identity;
+  failed_identity.name_space = clap::llama_cache::fingerprint("failed-anchor");
+  failed_identity.tenant = clap::llama_cache::hash("failed-anchor");
+  anchor_recording->operations.clear();
+  anchor_recording->fail_copy = true;
+  try {
+    anchors.create_anchor(anchor_tokens, failed_identity, source.target_slot, false);
+    assert(false);
+  } catch (const std::runtime_error& error) {
+    assert(std::string(error.what()) == "copy failed");
+  }
+  anchor_recording->fail_copy = false;
+  assert(anchor_recording->operations.back().name == "remove");
 }

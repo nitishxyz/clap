@@ -88,6 +88,60 @@ CacheAdmissionResult CacheExecutor::preview(const CacheAdmissionRequest& request
   return result;
 }
 
+CacheAnchorResult CacheExecutor::create_anchor(
+    const std::vector<int32_t>& tokens, const clap::llama_cache::Identity& identity,
+    uint32_t source_slot, bool protect) {
+  if (source_slot >= slots_.size()) throw std::out_of_range("cache source slot is out of range");
+  std::vector<uint8_t> capabilities;
+  capabilities.reserve(slots_.size());
+  for (const auto& slot : slots_) {
+    uint8_t flags = slot.busy ? 0 : CLAP_CACHE_SLOT_WRITABLE;
+    if (!slot.tokens.empty()) flags |= CLAP_CACHE_SLOT_MATERIALIZED | CLAP_CACHE_SLOT_COPY;
+    capabilities.push_back(flags);
+  }
+  auto plan = coordinator_->plan(tokens, identity,
+      CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
+          CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT,
+      0, CLAP_CACHE_SLOT_ANCHOR, capabilities);
+  const auto view = plan.view();
+  if (view.operation == CLAP_CACHE_OPERATION_NOOP) {
+    plan.commit(tokens.size(), CLAP_CACHE_SLOT_ANCHOR);
+    return {true, true, view.target.slot, view.target.generation, {}};
+  }
+  if (view.target.slot >= slots_.size()) {
+    plan.abort();
+    return {false, false, view.target.slot, 0, {}};
+  }
+  const uint32_t target = view.target.slot;
+  try {
+    backend_->remove(target, -1, -1);
+    backend_->copy(source_slot, target, -1, -1);
+    plan.commit(tokens.size(), CLAP_CACHE_SLOT_ANCHOR);
+    const auto info = coordinator_->slot(target);
+    slots_[target].tokens = tokens;
+    slots_[target].is_anchor = true;
+    slots_[target].generation = info.generation;
+    if (protect) coordinator_->set_anchor_protected({target, 0, info.generation}, true);
+    std::vector<uint32_t> evictions;
+    for (const auto& victim : plan.evictions()) {
+      if (victim.slot >= slots_.size()) continue;
+      if (victim.slot != target) {
+        backend_->remove(victim.slot, -1, -1);
+        slots_[victim.slot] = {};
+        slots_[victim.slot].generation = coordinator_->slot(victim.slot).generation;
+      }
+      evictions.push_back(victim.slot);
+    }
+    return {true, false, target, info.generation, std::move(evictions)};
+  } catch (...) {
+    try { plan.abort(); } catch (...) {}
+    try { backend_->remove(target, -1, -1); } catch (...) {}
+    slots_[target] = {};
+    try { slots_[target].generation = coordinator_->slot(target).generation; } catch (...) {}
+    throw;
+  }
+}
+
 CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) {
   std::vector<uint8_t> capabilities;
   capabilities.reserve(slots_.size());
@@ -207,12 +261,56 @@ CacheSlotSnapshot CacheExecutor::slot(uint32_t slot_id) const {
   return {slot_id, slot.generation, slot.busy, slot.is_anchor, slot.tokens.size()};
 }
 
-void CacheExecutor::release(uint32_t slot_id, uint64_t generation) {
+void CacheExecutor::release(uint32_t slot_id, uint64_t generation) noexcept {
   if (slot_id >= slots_.size()) return;
   auto& slot = slots_[slot_id];
   if (!slot.busy || slot.generation != generation) return;
-  coordinator_->set_busy({slot_id, 0, generation}, false);
+  try { coordinator_->set_busy({slot_id, 0, generation}, false); } catch (...) { return; }
   slot.busy = false;
+}
+
+uint64_t CacheExecutor::advance(uint32_t slot_id, uint64_t generation,
+                                const int32_t* tokens, std::size_t count,
+                                uint32_t state, bool busy) {
+  try {
+    const uint64_t next = coordinator_->advance(
+        {slot_id, 0, generation}, tokens, count, state, busy);
+    slots_[slot_id].generation = next;
+    slots_[slot_id].busy = busy;
+    slots_[slot_id].tokens.insert(slots_[slot_id].tokens.end(), tokens, tokens + count);
+    return next;
+  } catch (...) {
+    invalidate_and_clear(slot_id, generation);
+    throw;
+  }
+}
+
+uint64_t CacheExecutor::invalidate_and_clear(uint32_t slot_id, uint64_t generation,
+                                             bool keep_busy) {
+  if (slot_id >= slots_.size()) return 0;
+  try { backend_->remove(slot_id, -1, -1); } catch (...) {}
+  uint64_t next = coordinator_->invalidate({slot_id, 0, generation});
+  slots_[slot_id] = {};
+  slots_[slot_id].generation = next;
+  if (keep_busy) {
+    coordinator_->set_busy({slot_id, 0, next}, true);
+    slots_[slot_id].busy = true;
+  }
+  return next;
+}
+
+uint64_t CacheExecutor::reset_for_retry(uint32_t active_slot) {
+  const uint64_t epoch = reset();
+  const auto info = coordinator_->slot(active_slot);
+  slots_[active_slot].generation = info.generation;
+  coordinator_->set_busy({active_slot, 0, info.generation}, true);
+  slots_[active_slot].busy = true;
+  return info.generation;
+}
+
+clap_cache_telemetry_t CacheExecutor::telemetry() const { return coordinator_->telemetry(); }
+clap_cache_retention_telemetry_t CacheExecutor::retention_telemetry() const {
+  return coordinator_->retention_telemetry();
 }
 
 uint64_t CacheExecutor::reset() {
