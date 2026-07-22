@@ -32,8 +32,12 @@ public enum ModelLoader {
   }
 
   static func load(from directory: URL) async throws -> LoadedModelComponents {
-    let container = try await loadModelContainer(
-      from: directory, using: #huggingFaceTokenizerLoader())
+    let container = try await ModelDirectoryCompatibility.withCompatibleDirectory(
+      for: directory
+    ) { compatibleDirectory in
+      try await loadModelContainer(
+        from: compatibleDirectory, using: #huggingFaceTokenizerLoader())
+    }
     let box = await container.perform { context in
       UncheckedBox(value: (context.model, context.tokenizer,
         context.configuration.extraEOSTokens))
