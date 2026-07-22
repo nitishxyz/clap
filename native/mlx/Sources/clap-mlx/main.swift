@@ -5,6 +5,7 @@ import ClapCachePolicy
 import ClapMLXCache
 import ClapMLXGeneration
 import ClapMLXModel
+import ClapMLXWorkerCore
 import MLX
 import MLXLLM
 import MLXLMCommon
@@ -163,7 +164,7 @@ func main() async {
     var pendingChats: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
     var controlBacklog: [String] = []
     var allocatorNeedsIdleClear = false
-    var nextAdmissionOrder: UInt64 = 0
+    let schedulerCore = WorkerScheduler<ControlRequest, ActiveRequest>()
 
     func finalize(_ req: ActiveRequest) {
       let result = req.finalize(using: GenerationFinalizer { slotIndex, slot, caches,
@@ -263,8 +264,7 @@ func main() async {
 
     func prepareRequest(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64) async -> ActiveRequest? {
       do {
-        nextAdmissionOrder &+= 1
-        let admissionOrder = nextAdmissionOrder
+        let admissionOrder = schedulerCore.reserveAdmissionOrder()
         let admittedNs = DispatchTime.now().uptimeNanoseconds
         let receivedToAdmittedMs = Double(admittedNs - receivedNs) / 1_000_000
         let templateStartNs = admittedNs

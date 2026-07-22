@@ -8,6 +8,7 @@ let package = Package(
     .library(name: "ClapMLXCache", targets: ["ClapMLXCache"]),
     .library(name: "ClapMLXGeneration", targets: ["ClapMLXGeneration"]),
     .library(name: "ClapMLXModel", targets: ["ClapMLXModel"]),
+    .library(name: "ClapMLXWorkerCore", targets: ["ClapMLXWorkerCore"]),
     .executable(name: "clap-mlx", targets: ["clap-mlx"]),
   ],
   dependencies: [
@@ -39,6 +40,10 @@ let package = Package(
       dependencies: ["ClapCachePolicy", "ClapMLXCache"]
     ),
     .target(
+      name: "ClapMLXWorkerCore",
+      dependencies: ["ClapCachePolicy"]
+    ),
+    .target(
       name: "ClapMLXModel",
       dependencies: [
         "ClapCachePolicy",
@@ -57,6 +62,7 @@ let package = Package(
         "ClapMLXCache",
         "ClapMLXGeneration",
         "ClapMLXModel",
+        "ClapMLXWorkerCore",
         .product(name: "MLXLLM", package: "mlx-swift-lm"),
         .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
         .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
@@ -83,6 +89,10 @@ let package = Package(
     .testTarget(
       name: "ClapMLXGenerationTests",
       dependencies: ["ClapMLXGeneration", "ClapMLXCache"]
+    ),
+    .testTarget(
+      name: "ClapMLXWorkerCoreTests",
+      dependencies: ["ClapMLXWorkerCore"]
     ),
   ]
 )
