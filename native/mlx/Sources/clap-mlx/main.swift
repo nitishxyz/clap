@@ -3,33 +3,13 @@ import Darwin
 import ClapCacheBridge
 import ClapCachePolicy
 import ClapMLXModel
-import HuggingFace
 import MLX
-import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
 func debugLog(_ message: String) {
   FileHandle.standardError.write(Data("[clap-mlx] \(message)\n".utf8))
-}
-
-func validateModelDirectory(_ path: String) throws -> URL {
-  let url = URL(fileURLWithPath: path)
-  var isDirectory: ObjCBool = false
-  guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-    throw WorkerError.invalidModelDirectory("MLX model directory not found: \(path)")
-  }
-  guard FileManager.default.fileExists(atPath: url.appendingPathComponent("config.json").path) else {
-    throw WorkerError.invalidModelDirectory("MLX model directory is missing config.json: \(path)")
-  }
-  return url
-}
-
-// ModelContext members (model, tokenizer) are not Sendable but are only used
-// from this single-threaded main loop; ChatSession uses the same pattern.
-struct UncheckedBox<T>: @unchecked Sendable {
-  let value: T
 }
 
 func main() async {
@@ -42,12 +22,7 @@ func main() async {
     exit(2)
     #endif
 
-    var loadedModel: String?
-    var loadedDirectory: URL?
-    var languageModel: (any LanguageModel)?
-    var tokenizer: (any MLXLMCommon.Tokenizer)?
-    var eosTokenIds: Set<Int> = []
-    var tokenCapabilities = ModelTokenCapabilities.empty
+    let modelRuntime = ModelRuntime()
 
     let configuration = WorkerConfiguration.current()
     let physicalMemoryBytes = configuration.physicalMemoryBytes
@@ -148,35 +123,17 @@ func main() async {
         coordinatedGrowthReserveBytes: coordinatedGrowthReserveBytes,
         globalResidentMemoryBytes: globalResidentMemoryBytes, pressureState: pressureState,
         modelActiveBytes: activePolicyModelBytes,
-        hybridOrRecurrent: tokenCapabilities.hybridOrRecurrent,
+        hybridOrRecurrent: modelRuntime.tokenCapabilities.hybridOrRecurrent,
         activeCount: retainedRegistry.activeCount, lastEvictionReason: lastEvictionReason))
     }
 
     func loadModel(_ model: String, directory: URL) async throws {
       invalidateKVCache()
-      let container = try await loadModelContainer(from: directory, using: #huggingFaceTokenizerLoader())
-      let box = await container.perform { context in
-        UncheckedBox(value: (context.model, context.tokenizer, context.configuration.extraEOSTokens))
-      }
-      languageModel = box.value.0
-      tokenizer = box.value.1
-      loadedModel = model
-      loadedDirectory = directory
-      eosTokenIds = []
-      if let eos = box.value.1.eosTokenId { eosTokenIds.insert(eos) }
-      for extra in box.value.2 {
-        if let id = box.value.1.convertTokenToId(extra) { eosTokenIds.insert(id) }
-      }
-      // HF checkpoints declare turn-ending tokens (e.g. gemma's <turn|>) in
-      // config.json / generation_config.json eos_token_id, not the tokenizer.
-      for file in ["generation_config.json", "config.json"] {
-        eosTokenIds.formUnion(declaredEosTokenIds(directory.appendingPathComponent(file)))
-      }
-      let metadata = DeclaredModelMetadata.load(from: directory)
-      tokenCapabilities = ModelTokenCapabilities.derive(metadata: metadata,
+      try await modelRuntime.load(identifier: model, directory: directory,
         contextOverride: contextOverride, sessionCap: sessionCap,
         outputOverride: configuration.outputOverride)
-      cacheDomain = "\(model)|mlx|ctx=\(tokenCapabilities.effectiveContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
+      let metadata = modelRuntime.metadata!
+      cacheDomain = "\(model)|mlx|ctx=\(modelRuntime.tokenCapabilities.effectiveContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
       Memory.clearCache()
       let memory = memorySnapshot()
       activePolicyModelBytes = memory.active_bytes > 0 ? UInt64(memory.active_bytes) : nil
@@ -190,7 +147,7 @@ func main() async {
         retainedGrowthReservePercent: retainedGrowthReservePercent,
         retainedCeiling: retentionConfig.hardCeiling,
         processorCount: configuration.processorCount,
-        isHybridOrRecurrent: tokenCapabilities.hybridOrRecurrent))
+        isHybridOrRecurrent: modelRuntime.tokenCapabilities.hybridOrRecurrent))
       maxActive = activePolicy.selectedMax
       retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
         hardCeiling: retentionConfig.hardCeiling)
@@ -207,9 +164,9 @@ func main() async {
         debugLog("cache coordinator unavailable; cache admission fails closed: \(error)")
       }
       if kvBits != nil { debugLog("kv cache quantization enabled: \(kvBits!)-bit") }
-      debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(tokenCapabilities.contextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(tokenCapabilities.maxOutputTokensSource ?? "unknown")")
-      debugLog("context length: \(tokenCapabilities.effectiveContextLength > 0 ? String(tokenCapabilities.effectiveContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
-      debugLog("model loaded; eos token ids: \(eosTokenIds.sorted())")
+      debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(modelRuntime.tokenCapabilities.contextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(modelRuntime.tokenCapabilities.maxOutputTokensSource ?? "unknown")")
+      debugLog("context length: \(modelRuntime.tokenCapabilities.effectiveContextLength > 0 ? String(modelRuntime.tokenCapabilities.effectiveContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
+      debugLog("model loaded; eos token ids: \(modelRuntime.eosTokenIds.sorted())")
       debugLog("active concurrency: mode=\(activePolicy.mode) selected=\(activePolicy.selectedMax) reason=\(activePolicy.reason) memory_ceiling=\(activePolicy.memoryCeiling)")
       debugLog("mlx memory after load: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
     }
@@ -513,11 +470,11 @@ func main() async {
           emit(id: id, error: "chat.model is required")
           return nil
         }
-        let modelDirectory = try validateModelDirectory(model)
-        if loadedModel != model || languageModel == nil {
+        let modelDirectory = try ModelLoader.validateDirectory(model)
+        if modelRuntime.modelIdentifier != model || !modelRuntime.isLoaded {
           try await loadModel(model, directory: modelDirectory)
         }
-        guard let lm = languageModel, let tok = tokenizer else {
+        guard let lm = modelRuntime.languageModel, let tok = modelRuntime.tokenizer else {
           emit(id: id, error: "model is not loaded")
           return nil
         }
@@ -544,7 +501,7 @@ func main() async {
         }
         let structuredMessages = structuredTemplateMessages(control.messages ?? [])
 
-        let usesFallback = usesGemma4FallbackPrompt(loadedDirectory ?? modelDirectory)
+        let usesFallback = usesGemma4FallbackPrompt(modelRuntime.directory ?? modelDirectory)
         var promptTokens: [Int]
         if usesFallback {
           promptTokens = tok.encode(text: gemma4Prompt(entries: entries), addSpecialTokens: false)
@@ -555,10 +512,10 @@ func main() async {
             if toolSpecs != nil {
               let compatible = (toolSpecs ?? []).map { templateCompatibleToolSpec($0) }
               if let tokens = try? tok.applyChatTemplate(messages: structuredMessages, tools: compatible) {
-                debugLog("chat template for \(loadedModel ?? model) required a nullable-preserving compatibility view of all \(compatible.count) caller-provided tools")
+                debugLog("chat template for \(modelRuntime.modelIdentifier ?? model) required a nullable-preserving compatibility view of all \(compatible.count) caller-provided tools")
                 promptTokens = tokens
               } else {
-                debugLog("chat template for \(loadedModel ?? model) failed with all \(toolSpecs?.count ?? 0) caller-provided tools (\(error)); retrying with JSON tool instructions")
+                debugLog("chat template for \(modelRuntime.modelIdentifier ?? model) failed with all \(toolSpecs?.count ?? 0) caller-provided tools (\(error)); retrying with JSON tool instructions")
                 let patched = toolInstructionPatchedEntries(entries, tools: toolSpecs ?? [])
                 let retryMessages = templateMessages(patched)
                 if let tokens = try? tok.applyChatTemplate(messages: retryMessages, tools: nil) {
@@ -583,7 +540,7 @@ func main() async {
         // prompts before any prefill with a structured code the server maps
         // to an OpenAI-style 400.
         let maxTokens: Int
-        switch tokenCapabilities.resolveOutputTokens(
+        switch modelRuntime.tokenCapabilities.resolveOutputTokens(
           promptTokens: promptTokens.count, requestedMaxTokens: requestedMaxTokens) {
         case .success(let resolved):
           maxTokens = resolved
@@ -1122,7 +1079,8 @@ func main() async {
     }
 
     func step(_ req: ActiveRequest, prefillQuantum: Int) {
-      guard !req.cancelled, !req.completed, !req.failed, let lm = languageModel else { return }
+      guard !req.cancelled, !req.completed, !req.failed,
+            let lm = modelRuntime.languageModel else { return }
       let stepStartedNs = DispatchTime.now().uptimeNanoseconds
       req.schedulerWaitMs += Double(stepStartedNs - req.lastStepFinishedNs) / 1_000_000
       defer { req.lastStepFinishedNs = DispatchTime.now().uptimeNanoseconds }
@@ -1204,9 +1162,9 @@ func main() async {
           }
           steps += 1
           req.sampledTokens.append(token)
-          if eosTokenIds.contains(token) {
+          if modelRuntime.eosTokenIds.contains(token) {
             if configuration.debugPrompt {
-              debugLog("eos token \(token) (\(tokenizer?.convertIdToToken(token) ?? "?")) after \(req.generatedCount) tokens; eos set: \(eosTokenIds)")
+              debugLog("eos token \(token) (\(modelRuntime.tokenizer?.convertIdToToken(token) ?? "?")) after \(req.generatedCount) tokens; eos set: \(modelRuntime.eosTokenIds)")
             }
             req.finishReason = "stop"
             req.completed = true
@@ -1338,10 +1296,7 @@ func main() async {
         }
         if type == "unload" {
           invalidateKVCache()
-          languageModel = nil
-          tokenizer = nil
-          loadedDirectory = nil
-          loadedModel = nil
+          modelRuntime.unload()
           emit(id: id, unloaded: true, done: true)
           return false
         }
@@ -1350,13 +1305,14 @@ func main() async {
           return false
         }
         do {
-          let modelDirectory = try validateModelDirectory(model)
-          if loadedModel != model || languageModel == nil {
+          let modelDirectory = try ModelLoader.validateDirectory(model)
+          if modelRuntime.modelIdentifier != model || !modelRuntime.isLoaded {
             try await loadModel(model, directory: modelDirectory)
           }
           emit(id: id, loaded: true, done: true, memory: memorySnapshot(),
             retention: retentionSnapshot(),
-            tokenCapabilities: tokenCapabilities.workerEvent(contextOverride: contextOverride))
+            tokenCapabilities: modelRuntime.tokenCapabilities.workerEvent(
+              contextOverride: contextOverride))
         } catch {
           emit(id: id, error: String(describing: error))
         }
@@ -1390,7 +1346,8 @@ func main() async {
       while active.count < maxActive, !pendingChats.isEmpty {
         if retainedRegistry.count >= retentionConfig.hardCeiling && kvSlots.allSatisfy(\.busy) { break }
         let candidate = pendingChats[0]
-        let needsLoad = loadedModel != candidate.control.model || languageModel == nil
+        let needsLoad = modelRuntime.modelIdentifier != candidate.control.model
+          || !modelRuntime.isLoaded
         if needsLoad && !active.isEmpty { break }
         pendingChats.removeFirst()
         emit(id: candidate.id, started: true)
