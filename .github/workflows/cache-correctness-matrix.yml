@@ -1,0 +1,78 @@
+name: Cache correctness architecture matrix
+
+on:
+  schedule:
+    - cron: "23 6 * * 2"
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "Optional reviewed matrix case id"
+        required: false
+        type: string
+      backend:
+        description: "Optional backend filter (gguf or mlx)"
+        required: false
+        type: choice
+        options: ["", gguf, mlx]
+      scenario:
+        description: "Optional scenario filter"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-correctness-tier-c-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tier-c:
+    name: Tier C preprovisioned architecture matrix
+    runs-on: [self-hosted, macOS, cache-correctness]
+    timeout-minutes: 120
+    env:
+      CLAP_CACHE_TEST_ASSET_ROOT: ${{ secrets.CLAP_CACHE_TEST_ASSET_ROOT }}
+      CLAP_CACHE_TEST_GGUF_MODEL: ${{ secrets.CLAP_CACHE_TEST_GGUF_MODEL }}
+      CLAP_CACHE_TEST_MLX_MODEL: ${{ secrets.CLAP_CACHE_TEST_MLX_MODEL }}
+      CLAP_CACHE_TEST_REQUIRE_ASSETS: "1"
+      CLAP_CACHE_TEST_REPORT: ${{ github.workspace }}/build/cache-correctness/tier-c-report.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Validate preprovisioned reviewed assets
+        run: bun run scripts/validate-cache-test-assets.ts
+      - name: Run Tier C matrix
+        shell: bash
+        env:
+          MATRIX_CASE: ${{ inputs.case }}
+          MATRIX_BACKEND: ${{ inputs.backend }}
+          MATRIX_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set +e
+          args=(--tier c)
+          [[ -n "${MATRIX_CASE:-}" ]] && args+=(--case "$MATRIX_CASE")
+          [[ -n "${MATRIX_BACKEND:-}" ]] && args+=(--backend "$MATRIX_BACKEND")
+          [[ -n "${MATRIX_SCENARIO:-}" ]] && args+=(--scenario "$MATRIX_SCENARIO")
+          mkdir -p build/cache-correctness
+          bun run scripts/run-cache-correctness-matrix.ts "${args[@]}" \
+            > build/cache-correctness/tier-c.raw.log 2>&1
+          status=$?
+          bun run scripts/sanitize-cache-correctness-log.ts \
+            build/cache-correctness/tier-c.raw.log build/cache-correctness/tier-c.log
+          rm -f build/cache-correctness/tier-c.raw.log
+          cat build/cache-correctness/tier-c.log
+          exit "$status"
+      - name: Upload sanitized matrix results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-correctness-tier-c-${{ github.run_id }}
+          path: |
+            build/cache-correctness/tier-c-report.json
+            build/cache-correctness/tier-c.log
+          if-no-files-found: error
+          retention-days: 14

@@ -90,20 +90,25 @@ struct ModelProbeTests {
       evaluate("cancellation", operation: 1, reused: split, prepare: copiedPrefix),
       evaluate("checkpoint", operation: 3, reused: split, prepare: copiedPrefix),
     ]
-    for observation in scenarios {
+    let requested = ProcessInfo.processInfo.environment["CLAP_CACHE_TEST_SCENARIOS"]
+      .map { Set($0.split(separator: ",").map(String.init)) }
+    let selected = scenarios.filter { requested?.contains($0.scenario) ?? true }
+    for observation in selected {
       #expect(observation.selectedNextToken == cold.selectedNextToken)
       #expect(observation.top16QuantizedLogitSHA256 == cold.top16QuantizedLogitSHA256)
       #expect(observation.physicalStateSHA256 == cold.physicalStateSHA256)
     }
     if let encoded = ProcessInfo.processInfo.environment["CLAP_CACHE_TEST_EXPECTED_PROBE"] {
       let expected = try JSONDecoder().decode(ExpectedProbe.self, from: Data(encoded.utf8))
-      #expect(expected.scenarios == ([cold] + scenarios).map(\.scenario))
+      let expectedObservations = expected.scenarios.contains("cold") ? [cold] + selected : selected
+      #expect(expected.scenarios == expectedObservations.map(\.scenario))
       #expect(expected.logicalTokenSha256 == cold.logicalTokenSHA256)
       #expect(expected.physicalStateSha256 == cold.physicalStateSHA256)
       #expect(expected.selectedNextToken == cold.selectedNextToken)
       #expect(expected.top16QuantizedLogitSha256 == cold.top16QuantizedLogitSHA256)
     }
-    print(try ([cold] + scenarios).map { try $0.canonicalJSON() }.joined(separator: "\n"))
+    let output = requested?.contains("cold") == false ? selected : [cold] + selected
+    print(try output.map { try $0.canonicalJSON() }.joined(separator: "\n"))
   }
 }
 

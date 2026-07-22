@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "description": "Reviewed Tier C architecture cases. Assets are preprovisioned on private runners; this matrix never downloads model bytes.",
+  "cases": [
+    {
+      "id": "gguf-standard",
+      "tier": "c",
+      "backend": "gguf",
+      "architecture": "standard-transformer",
+      "asset": "gguf",
+      "provisioning": "unprovisioned",
+      "skipReason": "no_reviewed_standard_gguf_asset",
+      "scenarios": ["cold", "continuation", "branch", "anchor", "namespace", "reset", "cancellation", "checkpoint"],
+      "timeoutMs": 900000,
+      "maxResidentBytes": 8589934592
+    },
+    {
+      "id": "mlx-full",
+      "tier": "c",
+      "backend": "mlx",
+      "architecture": "full-attention-transformer",
+      "asset": "mlx-full",
+      "provisioning": "unprovisioned",
+      "skipReason": "no_reviewed_mlx_full_asset",
+      "scenarios": ["cold", "continuation", "branch", "anchor", "namespace", "reset", "cancellation", "checkpoint"],
+      "timeoutMs": 900000,
+      "maxResidentBytes": 8589934592
+    },
+    {
+      "id": "mlx-sliding",
+      "tier": "c",
+      "backend": "mlx",
+      "architecture": "sliding-window-transformer",
+      "asset": "mlx-sliding",
+      "provisioning": "unprovisioned",
+      "skipReason": "no_reviewed_mlx_sliding_asset",
+      "scenarios": ["cold", "continuation", "branch", "namespace", "reset", "cancellation"],
+      "timeoutMs": 900000,
+      "maxResidentBytes": 8589934592
+    },
+    {
+      "id": "mlx-recurrent",
+      "tier": "c",
+      "backend": "mlx",
+      "architecture": "recurrent-state",
+      "asset": "mlx-recurrent",
+      "provisioning": "unprovisioned",
+      "skipReason": "no_reviewed_mlx_recurrent_asset",
+      "scenarios": ["cold", "anchor", "namespace", "reset", "cancellation"],
+      "timeoutMs": 900000,
+      "maxResidentBytes": 8589934592
+    },
+    {
+      "id": "mlx-hybrid-antares",
+      "tier": "c",
+      "backend": "mlx",
+      "architecture": "GraniteMoeHybridForCausalLM",
+      "asset": "mlx",
+      "provisioning": "pinned",
+      "scenarios": ["cold", "continuation", "branch", "anchor", "namespace", "reset", "cancellation", "checkpoint"],
+      "timeoutMs": 1800000,
+      "maxResidentBytes": 8589934592
+    }
+  ]
+}

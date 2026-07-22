@@ -30,6 +30,7 @@ export type ValidatedAsset = {
   path: string;
   architecture: string;
   revision: string;
+  maxBytes: number;
   expectedProbe?: AssetPin["expectedProbe"];
 };
 export type ValidationResult = {
@@ -136,6 +137,7 @@ export async function validateCacheTestAssets(options: {
     }
     assets.push({ backend: entry.backend, path: canonical,
       architecture: pin.architecture, revision: pin.revision,
+      maxBytes: pin.maxBytes,
       expectedProbe: pin.expectedProbe });
   }
   return { status: "ready", assets, skipped };
