@@ -4,10 +4,13 @@
 #include <deque>
 #include <istream>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -49,6 +52,52 @@ void emit_error(const std::string& id, const std::string& message, const std::st
 struct RequestError : std::runtime_error {
   std::string code;
   RequestError(std::string error_code, const std::string& message);
+};
+
+enum class ProtocolMode { Legacy, V1 };
+
+ProtocolMode protocol_mode_from_environment();
+
+struct V1Request {
+  std::string type;
+  std::string request_id;
+  std::string target_request_id;
+  nlohmann::json body;
+};
+
+struct V1DecodeError : std::runtime_error {
+  std::string code;
+  std::string request_id;
+  V1DecodeError(std::string error_code, std::string recoverable_request_id,
+                const std::string& message);
+};
+
+V1Request decode_v1_request(const std::string& line);
+
+class ProtocolWriter {
+ public:
+  explicit ProtocolWriter(std::ostream& output) : output_(output) {}
+
+  void ready(nlohmann::json worker_capabilities, nlohmann::json model_capabilities);
+  bool accepted(const std::string& request_id);
+  bool started(const std::string& request_id);
+  bool token(const std::string& request_id, const std::string& text);
+  bool content(const std::string& request_id, nlohmann::json value);
+  bool prefill_progress(const std::string& request_id, uint64_t completed, uint64_t total);
+  bool completed(const std::string& request_id, nlohmann::json result);
+  bool failed(const std::string& request_id, const std::string& code,
+              const std::string& message, bool retryable = false, bool fatal = false,
+              nlohmann::json details = nullptr);
+  void telemetry(nlohmann::json value);
+  bool terminal(const std::string& request_id) const;
+
+ private:
+  bool scoped(const std::string& request_id, const char* type, nlohmann::json fields,
+              bool terminal);
+
+  std::ostream& output_;
+  std::unordered_map<std::string, uint64_t> sequences_;
+  std::unordered_set<std::string> terminals_;
 };
 
 }  // namespace clap::llama

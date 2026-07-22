@@ -33,7 +33,14 @@ SchedulerState scheduler_state(WorkerState& state) {
 Worker::Worker() : Worker(std::cin, std::cout) {}
 
 Worker::Worker(std::istream& input, std::ostream& output)
-    : output_(output), state_(), scheduler_(scheduler_state(state_)), reader_(input) {}
+    : Worker(input, output, protocol_mode_from_environment()) {}
+
+Worker::Worker(std::istream& input, std::ostream& output, ProtocolMode mode)
+    : output_(output), mode_(mode),
+      v1_(mode == ProtocolMode::V1 ? std::make_unique<ProtocolWriter>(output) : nullptr),
+      state_(), scheduler_(scheduler_state(state_)), reader_(input) {
+  if (v1_) v1_->ready({{"backend", "llama"}, {"streaming", true}}, nlohmann::json::object());
+}
 
 void Worker::send(const std::string& id, nlohmann::json fields) {
   emit(id, std::move(fields), output_);
@@ -98,6 +105,10 @@ void Worker::send_failure(const RequestFailure& failure) {
 }
 
 void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {
+  if (v1_) {
+    send_v1_scheduler_events(events);
+    return;
+  }
   for (const auto& event : events) {
     switch (event.type) {
       case SchedulerEvent::Type::Started:
@@ -140,8 +151,149 @@ void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {
   }
 }
 
+void Worker::send_v1_completion(const RequestCompletion& completion) {
+  nlohmann::json result{{"kind", completion.cancelled ? "cancelled" : "generated"}};
+  if (!completion.cancelled) {
+    if (!completion.visible_tail.empty()) {
+      v1_->token(completion.id, completion.visible_tail);
+      generated_content_[completion.id] += completion.visible_tail;
+    }
+    result["content"] = generated_content_[completion.id];
+    result["finish_reason"] = completion.finish_reason;
+    result["usage"] = {{"prompt_tokens", completion.usage.prompt_tokens},
+                       {"completion_tokens", completion.usage.completion_tokens}};
+  }
+  v1_->completed(completion.id, std::move(result));
+  generated_content_.erase(completion.id);
+}
+
+void Worker::send_v1_scheduler_events(const std::vector<SchedulerEvent>& events) {
+  for (const auto& event : events) {
+    switch (event.type) {
+      case SchedulerEvent::Type::Started:
+        v1_->started(event.id);
+        break;
+      case SchedulerEvent::Type::QueuedCancelled:
+        v1_->completed(event.id, {{"kind", "cancelled"}});
+        generated_content_.erase(event.id);
+        break;
+      case SchedulerEvent::Type::Error:
+        v1_->failed(event.id, event.code.empty() ? "worker_error" : event.code,
+                    event.message, false, false);
+        break;
+      case SchedulerEvent::Type::Completion:
+        if (event.completion) send_v1_completion(*event.completion);
+        break;
+      case SchedulerEvent::Type::Topology:
+        v1_->telemetry(state_.retention(event.active, event.queued));
+        break;
+      case SchedulerEvent::Type::Generation:
+        if (!event.generation) break;
+        switch (event.generation->type) {
+          case GenerationEvent::Type::Token:
+            generated_content_[event.id] += event.generation->text;
+            v1_->token(event.id, event.generation->text);
+            break;
+          case GenerationEvent::Type::Prefill:
+            v1_->prefill_progress(event.id, event.generation->done, event.generation->total);
+            break;
+          case GenerationEvent::Type::Complete:
+            if (event.generation->completion) send_v1_completion(*event.generation->completion);
+            break;
+          case GenerationEvent::Type::Failure:
+            if (event.generation->failure) {
+              const auto& failure = *event.generation->failure;
+              v1_->failed(failure.id, failure.code.empty() ? "generation_failed" : failure.code,
+                          failure.message, true, false);
+              generated_content_.erase(failure.id);
+            }
+            break;
+          default:
+            break;
+        }
+        break;
+    }
+  }
+}
+
+bool Worker::dispatch_v1(const std::string& line) {
+  V1Request request;
+  try {
+    request = decode_v1_request(line);
+  } catch (const V1DecodeError& error) {
+    if (!error.request_id.empty()) {
+      v1_->accepted(error.request_id);
+      v1_->failed(error.request_id, error.code, error.what(), false, false);
+    } else {
+      emit("", {{"protocol", 1}, {"type", "diagnostic"}, {"level", "error"},
+                 {"message", error.what()}}, output_);
+    }
+    return true;
+  }
+
+  if (!v1_->accepted(request.request_id)) return true;
+  try {
+    if (request.type == "shutdown") {
+      v1_->completed(request.request_id, {{"kind", "shutdown"}});
+      return false;
+    }
+    if (request.type == "cancel") {
+      send_v1_scheduler_events(scheduler_.cancel(request.target_request_id));
+      v1_->completed(request.request_id, {{"kind", "cancelled"}});
+      return true;
+    }
+    if (request.type == "set_max_active") {
+      const int selected = state_.set_max_active({request.body["max_active"].get<int>()});
+      v1_->completed(request.request_id,
+          {{"kind", "max_active_updated"}, {"max_active", selected}});
+      return true;
+    }
+    if (request.type == "unload") {
+      if (scheduler_.has_active()) throw std::runtime_error("cannot unload while requests are active");
+      state_.unload();
+      v1_->completed(request.request_id, {{"kind", "unloaded"}});
+      return true;
+    }
+    if (request.type == "load") {
+      const std::string model = request.body["model"].get<std::string>();
+      if (scheduler_.has_active() && state_.loaded() && !state_.same_path(model)) {
+        throw std::runtime_error("cannot switch models while requests are active");
+      }
+      state_.load(model);
+      const int32_t effective = state_.effective_context_window();
+      v1_->completed(request.request_id, {{"kind", "loaded"}, {"model", model},
+        {"token_capabilities", {{"model_context_window", state_.model_context_window() > 0
+              ? nlohmann::json(state_.model_context_window()) : nlohmann::json(nullptr)},
+          {"effective_context_window", effective}, {"max_input_tokens", std::max(0, effective - 1)},
+          {"max_output_tokens", state_.max_output_tokens() > 0
+              ? nlohmann::json(state_.max_output_tokens()) : nlohmann::json(nullptr)},
+          {"backend_allocation_cap", effective},
+          {"user_configured_override", state_.context_override() > 0
+              ? nlohmann::json(state_.context_override()) : nlohmann::json(nullptr)}}}});
+      return true;
+    }
+
+    nlohmann::json body = request.body.contains("request") && request.body["request"].is_object()
+        ? request.body["request"] : request.body;
+    body.erase("protocol");
+    body.erase("request_id");
+    body.erase("request");
+    body["id"] = request.request_id;
+    body["type"] = "generate";
+    scheduler_.enqueue(request.request_id, std::move(body));
+    v1_->telemetry(state_.retention(scheduler_.active_count(), scheduler_.queued_count()));
+    return true;
+  } catch (const RequestError& error) {
+    v1_->failed(request.request_id, error.code, error.what(), false, false);
+  } catch (const std::exception& error) {
+    v1_->failed(request.request_id, "worker_error", error.what(), false, false);
+  }
+  return true;
+}
+
 bool Worker::dispatch(const std::string& line) {
   if (line.empty()) return true;
+  if (v1_) return dispatch_v1(line);
   std::string id;
   try {
     const nlohmann::json message = nlohmann::json::parse(line);
@@ -222,7 +374,7 @@ int Worker::run() {
       if (!running) break;
       send_scheduler_events(scheduler_.tick());
     }
-    send_scheduler_events(scheduler_.cancel_all());
+    send_scheduler_events(scheduler_.cancel_all(v1_ != nullptr));
     state_.unload();
     return 0;
   } catch (const std::exception& error) {

@@ -49,7 +49,7 @@ class Scheduler {
   void enqueue(std::string id, nlohmann::json request);
   std::vector<SchedulerEvent> cancel(const std::string& target);
   std::vector<SchedulerEvent> tick();
-  std::vector<SchedulerEvent> cancel_all();
+  std::vector<SchedulerEvent> cancel_all(bool include_waiting = false);
 
   bool idle() const noexcept { return active_.empty() && waiting_.empty(); }
   bool has_active() const noexcept { return !active_.empty(); }

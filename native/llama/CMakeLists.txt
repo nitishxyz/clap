@@ -245,6 +245,8 @@ if(BUILD_TESTING)
   )
   target_compile_definitions(clap-llama-protocol PRIVATE
     CLAP_LLAMA_PROTOCOL_FIXTURE="${CLAP_ROOT}/packages/runtime-router/fixtures/legacy-worker-protocol/llama-events.jsonl"
+    CLAP_LLAMA_PROTOCOL_V1_REQUEST_FIXTURE="${CLAP_ROOT}/packages/worker-protocol/fixtures/v1/requests/all.jsonl"
+    CLAP_LLAMA_PROTOCOL_V1_EVENT_FIXTURE="${CLAP_ROOT}/packages/worker-protocol/fixtures/v1/events/all.jsonl"
   )
   add_test(NAME clap-llama-protocol COMMAND clap-llama-protocol)
 

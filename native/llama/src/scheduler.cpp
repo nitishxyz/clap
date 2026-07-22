@@ -160,7 +160,7 @@ std::vector<SchedulerEvent> Scheduler::tick() {
   return events;
 }
 
-std::vector<SchedulerEvent> Scheduler::cancel_all() {
+std::vector<SchedulerEvent> Scheduler::cancel_all(bool include_waiting) {
   std::vector<SchedulerEvent> events;
   for (auto& request : active_) {
     if (request->done) continue;
@@ -176,6 +176,15 @@ std::vector<SchedulerEvent> Scheduler::cancel_all() {
     }
   }
   active_.clear();
+  if (include_waiting) {
+    while (!waiting_.empty()) {
+      SchedulerEvent event;
+      event.type = SchedulerEvent::Type::QueuedCancelled;
+      event.id = waiting_.front().first;
+      events.push_back(std::move(event));
+      waiting_.pop_front();
+    }
+  }
   return events;
 }
 
