@@ -31,19 +31,6 @@ struct UncheckedBox<T>: @unchecked Sendable {
   let value: T
 }
 
-func declaredEosTokenIds(_ url: URL) -> Set<Int> {
-  guard let data = try? Data(contentsOf: url),
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
-  var ids: Set<Int> = []
-  func collect(_ value: Any?) {
-    if let id = value as? Int { ids.insert(id) }
-    if let list = value as? [Any] { for item in list { collect(item) } }
-  }
-  collect(json["eos_token_id"])
-  if let textConfig = json["text_config"] as? [String: Any] { collect(textConfig["eos_token_id"]) }
-  return ids
-}
-
 func main() async {
     guard #available(macOS 14.0, *) else {
       emit(error: "clap-mlx requires macOS 14 or newer on Apple Silicon")
@@ -59,11 +46,7 @@ func main() async {
     var languageModel: (any LanguageModel)?
     var tokenizer: (any MLXLMCommon.Tokenizer)?
     var eosTokenIds: Set<Int> = []
-    var declaredModelContextLength = 0
-    var modelContextLength = 0
-    var modelMaxOutputTokens = 0
-    var modelContextLengthSource: String?
-    var modelMaxOutputTokensSource: String?
+    var tokenCapabilities = ModelTokenCapabilities.empty
 
     let configuration = WorkerConfiguration.current()
     let physicalMemoryBytes = configuration.physicalMemoryBytes
@@ -124,7 +107,6 @@ func main() async {
     var globalResidentMemoryBytes: UInt64?
     var pressureState: String?
     var activePolicyModelBytes: UInt64?
-    var activePolicyHybrid = false
     func invalidateKVCache() {
       try? cacheCoordinator?.reset()
       cacheCoordinator = nil
@@ -164,7 +146,8 @@ func main() async {
         lastAdjustmentReason: lastAdjustmentReason, lastAdjustmentAt: lastAdjustmentAt,
         coordinatedGrowthReserveBytes: coordinatedGrowthReserveBytes,
         globalResidentMemoryBytes: globalResidentMemoryBytes, pressureState: pressureState,
-        modelActiveBytes: activePolicyModelBytes, hybridOrRecurrent: activePolicyHybrid,
+        modelActiveBytes: activePolicyModelBytes,
+        hybridOrRecurrent: tokenCapabilities.hybridOrRecurrent,
         activeCount: retainedRegistry.activeCount, lastEvictionReason: lastEvictionReason))
     }
 
@@ -189,27 +172,13 @@ func main() async {
         eosTokenIds.formUnion(declaredEosTokenIds(directory.appendingPathComponent(file)))
       }
       let metadata = DeclaredModelMetadata.load(from: directory)
-      declaredModelContextLength = metadata.context?.value ?? 0
-      modelContextLengthSource = metadata.context?.source
-      let knownContextCaps = [declaredModelContextLength, contextOverride, sessionCap].filter { $0 > 0 }
-      modelContextLength = knownContextCaps.min() ?? 0
-      modelMaxOutputTokens = metadata.maxOutputTokens?.value ?? 0
-      modelMaxOutputTokensSource = metadata.maxOutputTokens?.source
-      let outputOverride = configuration.outputOverride
-      if outputOverride > 0 {
-        if modelMaxOutputTokens == 0 || outputOverride < modelMaxOutputTokens {
-          modelMaxOutputTokens = outputOverride
-          modelMaxOutputTokensSource = "environment:CLAP_MLX_MAX_OUTPUT"
-        }
-      }
-      cacheDomain = "\(model)|mlx|ctx=\(modelContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
+      tokenCapabilities = ModelTokenCapabilities.derive(metadata: metadata,
+        contextOverride: contextOverride, sessionCap: sessionCap,
+        outputOverride: configuration.outputOverride)
+      cacheDomain = "\(model)|mlx|ctx=\(tokenCapabilities.effectiveContextLength)|kv=\(kvBits.map(String.init) ?? "f16")|layout=1"
       Memory.clearCache()
       let memory = memorySnapshot()
       activePolicyModelBytes = memory.active_bytes > 0 ? UInt64(memory.active_bytes) : nil
-      let capabilityText = [metadata.architecture, metadata.modelType]
-        .compactMap { $0?.lowercased() }.joined(separator: " ")
-      activePolicyHybrid = ["hybrid", "recurrent", "mamba", "deltanet", "ssm"]
-        .contains { capabilityText.contains($0) }
       activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
         explicitMax: configuration.explicitMaxActive,
         physicalMemoryBytes: physicalMemoryBytes,
@@ -220,7 +189,7 @@ func main() async {
         retainedGrowthReservePercent: retainedGrowthReservePercent,
         retainedCeiling: retentionConfig.hardCeiling,
         processorCount: configuration.processorCount,
-        isHybridOrRecurrent: activePolicyHybrid))
+        isHybridOrRecurrent: tokenCapabilities.hybridOrRecurrent))
       maxActive = activePolicy.selectedMax
       retainedRegistry = RetainedRegistry<KVSlot>(maxActive: maxActive,
         hardCeiling: retentionConfig.hardCeiling)
@@ -237,8 +206,8 @@ func main() async {
         debugLog("cache coordinator unavailable; cache admission fails closed: \(error)")
       }
       if kvBits != nil { debugLog("kv cache quantization enabled: \(kvBits!)-bit") }
-      debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(modelContextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(modelMaxOutputTokensSource ?? "unknown")")
-      debugLog("context length: \(modelContextLength > 0 ? String(modelContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
+      debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(tokenCapabilities.contextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(tokenCapabilities.maxOutputTokensSource ?? "unknown")")
+      debugLog("context length: \(tokenCapabilities.effectiveContextLength > 0 ? String(tokenCapabilities.effectiveContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
       debugLog("model loaded; eos token ids: \(eosTokenIds.sorted())")
       debugLog("active concurrency: mode=\(activePolicy.mode) selected=\(activePolicy.selectedMax) reason=\(activePolicy.reason) memory_ceiling=\(activePolicy.memoryCeiling)")
       debugLog("mlx memory after load: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
@@ -612,23 +581,26 @@ func main() async {
         // Admission control (parity with the llama worker): reject oversized
         // prompts before any prefill with a structured code the server maps
         // to an OpenAI-style 400.
-        if modelContextLength > 0 && promptTokens.count >= modelContextLength {
-          emit(id: id, error: "prompt is too long for the loaded model; prompt_tokens=\(promptTokens.count), max_input_tokens=\(modelContextLength - 1), effective_context_window=\(modelContextLength).", code: "context_length_exceeded")
+        if tokenCapabilities.effectiveContextLength > 0 && promptTokens.count >= tokenCapabilities.effectiveContextLength {
+          emit(id: id, error: "prompt is too long for the loaded model; prompt_tokens=\(promptTokens.count), max_input_tokens=\(tokenCapabilities.effectiveContextLength - 1), effective_context_window=\(tokenCapabilities.effectiveContextLength).", code: "context_length_exceeded")
           return nil
         }
-        if let requestedMaxTokens, modelMaxOutputTokens > 0, requestedMaxTokens > modelMaxOutputTokens {
-          emit(id: id, error: "requested max_tokens=\(requestedMaxTokens) exceeds the loaded model maximum output tokens=\(modelMaxOutputTokens).", code: "max_output_tokens_exceeded")
+        if let requestedMaxTokens, tokenCapabilities.maxOutputTokens > 0, requestedMaxTokens > tokenCapabilities.maxOutputTokens {
+          emit(id: id, error: "requested max_tokens=\(requestedMaxTokens) exceeds the loaded model maximum output tokens=\(tokenCapabilities.maxOutputTokens).", code: "max_output_tokens_exceeded")
           return nil
         }
-        if requestedMaxTokens == nil && modelContextLength == 0 && modelMaxOutputTokens == 0 {
+        if requestedMaxTokens == nil && tokenCapabilities.effectiveContextLength == 0 && tokenCapabilities.maxOutputTokens == 0 {
           emit(id: id, error: "max_tokens is required because this model does not declare token limits.", code: "token_capability_unknown")
           return nil
         }
-        let availableOutput = modelContextLength > 0 ? modelContextLength - promptTokens.count : modelMaxOutputTokens
+        let availableOutput = tokenCapabilities.effectiveContextLength > 0
+          ? tokenCapabilities.effectiveContextLength - promptTokens.count
+          : tokenCapabilities.maxOutputTokens
         let maxTokens = requestedMaxTokens
-          ?? (modelMaxOutputTokens > 0 ? min(modelMaxOutputTokens, availableOutput) : availableOutput)
-        if modelContextLength > 0 && promptTokens.count + maxTokens > modelContextLength {
-          emit(id: id, error: "prompt plus requested output exceeds the loaded model context; prompt_tokens=\(promptTokens.count), requested_output_tokens=\(maxTokens), effective_context_window=\(modelContextLength).", code: "context_length_exceeded")
+          ?? (tokenCapabilities.maxOutputTokens > 0
+            ? min(tokenCapabilities.maxOutputTokens, availableOutput) : availableOutput)
+        if tokenCapabilities.effectiveContextLength > 0 && promptTokens.count + maxTokens > tokenCapabilities.effectiveContextLength {
+          emit(id: id, error: "prompt plus requested output exceeds the loaded model context; prompt_tokens=\(promptTokens.count), requested_output_tokens=\(maxTokens), effective_context_window=\(tokenCapabilities.effectiveContextLength).", code: "context_length_exceeded")
           return nil
         }
         let generateParameters = GenerateParameters(
@@ -1395,16 +1367,8 @@ func main() async {
             try await loadModel(model, directory: modelDirectory)
           }
           emit(id: id, loaded: true, done: true, memory: memorySnapshot(),
-            retention: retentionSnapshot(), tokenCapabilities: WorkerTokenCapabilities(
-            model_context_window: declaredModelContextLength > 0 ? declaredModelContextLength : nil,
-            effective_context_window: modelContextLength > 0 ? modelContextLength : nil,
-            max_input_tokens: modelContextLength > 0 ? modelContextLength - 1 : nil,
-            max_output_tokens: modelMaxOutputTokens > 0 ? modelMaxOutputTokens : nil,
-            model_context_window_source: modelContextLengthSource,
-            max_output_tokens_source: modelMaxOutputTokensSource,
-            backend_allocation_cap: contextOverride > 0 ? contextOverride : (declaredModelContextLength > 0 ? declaredModelContextLength : nil),
-            user_configured_override: contextOverride > 0 ? contextOverride : nil
-          ))
+            retention: retentionSnapshot(),
+            tokenCapabilities: tokenCapabilities.workerEvent(contextOverride: contextOverride))
         } catch {
           emit(id: id, error: String(describing: error))
         }
