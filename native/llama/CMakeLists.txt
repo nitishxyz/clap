@@ -220,6 +220,19 @@ if(BUILD_TESTING)
   target_link_libraries(clap-llama-cache-executor PRIVATE llama clap-cache-ffi)
   add_test(NAME clap-llama-cache-executor COMMAND clap-llama-cache-executor)
 
+  add_executable(clap-llama-cache-transaction
+    tests/cache-transaction.test.cpp
+    src/cache-executor.cpp
+  )
+  add_dependencies(clap-llama-cache-transaction clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-transaction PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-transaction PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-transaction COMMAND clap-llama-cache-transaction)
+
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)
 
@@ -342,6 +355,7 @@ if(BUILD_TESTING)
     clap-llama-cache-adapter
     clap-llama-cache-identity
     clap-llama-cache-executor
+    clap-llama-cache-transaction
     clap-llama-characterization
     clap-llama-environment
     clap-llama-generation-stepper
