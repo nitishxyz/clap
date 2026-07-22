@@ -46,154 +46,8 @@ func memorySnapshot() -> WorkerMemory {
   return WorkerMemory(active_bytes: snapshot.activeMemory, cache_bytes: snapshot.cacheMemory, peak_active_bytes: snapshot.peakMemory)
 }
 
-struct ToolsEnvelope: Decodable {
-  let tools: [JSONValue]?
-}
-
-struct EmittedToolCall: Encodable {
-  let name: String
-  let arguments: [String: JSONValue]
-}
-
-struct EmittedToolCalls: Encodable {
-  let tool_calls: [EmittedToolCall]
-}
-
-// Canonical text form for an assistant message that carried structured
-// tool_calls so chat templates see the call the model originally made.
-func encodeIncomingToolCalls(_ calls: [IncomingToolCall]) -> String? {
-  let converted = calls.map { call -> EmittedToolCall in
-    var arguments: [String: JSONValue] = [:]
-    if let raw = call.function.arguments, let data = raw.data(using: .utf8),
-       let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
-      arguments = decoded
-    }
-    return EmittedToolCall(name: call.function.name, arguments: arguments)
-  }
-  let encoder = JSONEncoder()
-  encoder.outputFormatting = [.sortedKeys]
-  guard let data = try? encoder.encode(EmittedToolCalls(tool_calls: converted)) else { return nil }
-  return String(data: data, encoding: .utf8)
-}
-
-func messageText(_ message: ChatMessage) -> String? {
-  if let content = message.content, !content.isEmpty { return content }
-  if let calls = message.tool_calls, !calls.isEmpty { return encodeIncomingToolCalls(calls) }
-  return nil
-}
-
-func sendableValue(_ value: JSONValue) -> any Sendable {
-  switch value {
-  case .null: return NSNull()
-  case .bool(let v): return v
-  case .int(let v): return v
-  case .double(let v): return v
-  case .string(let v): return v
-  case .array(let items): return items.map { sendableValue($0) }
-  case .object(let entries): return entries.mapValues { sendableValue($0) }
-  }
-}
-
-// Structured template message for an assistant turn that carried tool_calls:
-// letting the chat template render the model's trained tool-call format keeps
-// the continuation prompt byte-identical to what the model generated, which
-// preserves KV cache extension even for non-rewindable (sliding-window) caches.
-func structuredToolCallMessage(_ message: ChatMessage) -> [String: any Sendable]? {
-  guard let calls = message.tool_calls, !calls.isEmpty else { return nil }
-  let rendered: [[String: any Sendable]] = calls.map { call in
-    var arguments: [String: any Sendable] = [:]
-    if let raw = call.function.arguments, let data = raw.data(using: .utf8),
-       let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
-      arguments = decoded.mapValues { sendableValue($0) }
-    }
-    let function: [String: any Sendable] = ["name": call.function.name, "arguments": arguments]
-    return ["type": "function", "function": function, "name": call.function.name, "arguments": arguments]
-  }
-  var result: [String: any Sendable] = ["role": "assistant", "tool_calls": rendered]
-  if let content = message.content, !content.isEmpty { result["content"] = content }
-  else { result["content"] = "" }
-  return result
-}
-
-// Some model templates expect a flattened tool and apply string filters to
-// JSON-Schema `type`. Try the caller's exact OpenAI tool objects first; this
-// compatibility view is only a second render attempt. Nullable single-type
-// unions retain their semantics through the sibling `nullable` field used by
-// those templates. Multi-type unions remain unchanged rather than being
-// silently narrowed.
-func templateCompatibleSchemaValue(_ value: any Sendable) -> any Sendable {
-  if let dict = value as? [String: any Sendable] {
-    var result: [String: any Sendable] = [:]
-    var nullableUnion = false
-    for (key, entry) in dict {
-      if key == "type", let list = entry as? [any Sendable] {
-        let types = list.compactMap { $0 as? String }
-        let nonNull = types.filter { $0 != "null" }
-        if types.count == list.count, types.contains("null"), nonNull.count == 1 {
-          result[key] = nonNull[0]
-          nullableUnion = true
-          continue
-        }
-      }
-      result[key] = templateCompatibleSchemaValue(entry)
-    }
-    if nullableUnion { result["nullable"] = true }
-    return result
-  }
-  if let list = value as? [any Sendable] {
-    return list.map { templateCompatibleSchemaValue($0) }
-  }
-  return value
-}
-
-func templateCompatibleToolSpec(_ spec: ToolSpec) -> ToolSpec {
-  var result = spec
-  if let function = spec["function"] as? [String: any Sendable] {
-    for key in ["name", "description", "parameters"] where result[key] == nil {
-      result[key] = function[key]
-    }
-  }
-  return templateCompatibleSchemaValue(result) as? ToolSpec ?? result
-}
-
-// Compact JSON for tool specs used by the in-worker instruction fallback.
-func toolSpecJson(_ specs: [ToolSpec]) -> String {
-  let trimmed = specs.map { spec -> [String: any Sendable] in
-    let source = spec["function"] as? [String: any Sendable] ?? spec
-    var entry: [String: any Sendable] = [:]
-    for key in ["name", "description", "parameters"] {
-      if let value = source[key] { entry[key] = value }
-    }
-    return entry
-  }
-  guard JSONSerialization.isValidJSONObject(trimmed),
-        let data = try? JSONSerialization.data(withJSONObject: trimmed, options: [.sortedKeys]),
-        let text = String(data: data, encoding: .utf8) else { return "[]" }
-  return text
-}
-
 func debugLog(_ message: String) {
   FileHandle.standardError.write(Data("[clap-mlx] \(message)\n".utf8))
-}
-
-func usesGemma4FallbackPrompt(_ modelDirectory: URL) -> Bool {
-  let configURL = modelDirectory.appendingPathComponent("config.json")
-  let tokenizerConfigURL = modelDirectory.appendingPathComponent("tokenizer_config.json")
-  let jinjaURL = modelDirectory.appendingPathComponent("chat_template.jinja")
-  if FileManager.default.fileExists(atPath: jinjaURL.path) { return false }
-  guard let config = try? String(contentsOf: configURL, encoding: .utf8) else { return false }
-  let tokenizerConfig = (try? String(contentsOf: tokenizerConfigURL, encoding: .utf8)) ?? ""
-  return config.contains("\"model_type\": \"gemma4\"") && !tokenizerConfig.contains("\"chat_template\"")
-}
-
-func gemma4Prompt(entries: [(role: String, content: String)]) -> String {
-  var parts = ["<bos>"]
-  for entry in entries {
-    let role = entry.role == "assistant" ? "assistant" : "user"
-    parts.append("<|turn>\(role)\n\(entry.content)")
-  }
-  parts.append("<|turn>assistant\n")
-  return parts.joined()
 }
 
 func validateModelDirectory(_ path: String) throws -> URL {
@@ -786,27 +640,12 @@ func main() async {
             return nil
           }
         }
-        let entries = (control.messages ?? []).compactMap { message -> (role: String, content: String)? in
-          guard let content = messageText(message) else { return nil }
-          if message.role == "tool" {
-            return ("user", "Tool result:\n\(content)")
-          }
-          return (message.role, content)
-        }
+        let entries = normalizedMessageEntries(control.messages ?? [])
         guard !entries.isEmpty else {
           emit(id: id, error: "chat request contains no messages")
           return nil
         }
-        let structuredMessages: [[String: any Sendable]] = (control.messages ?? []).compactMap { message in
-          if message.role == "assistant", let structured = structuredToolCallMessage(message) {
-            return structured
-          }
-          guard let content = messageText(message) else { return nil }
-          if message.role == "tool" {
-            return ["role": "user", "content": "Tool result:\n\(content)"]
-          }
-          return ["role": message.role, "content": content]
-        }
+        let structuredMessages = structuredTemplateMessages(control.messages ?? [])
 
         let usesFallback = usesGemma4FallbackPrompt(loadedDirectory ?? modelDirectory)
         var promptTokens: [Int]
@@ -823,33 +662,18 @@ func main() async {
                 promptTokens = tokens
               } else {
                 debugLog("chat template for \(loadedModel ?? model) failed with all \(toolSpecs?.count ?? 0) caller-provided tools (\(error)); retrying with JSON tool instructions")
-                let toolJson = toolSpecJson(toolSpecs ?? [])
-                let instructions = [
-                  "You may call tools by responding with JSON only.",
-                  "Use this exact shape when calling tools:",
-                  "{\"tool_calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}",
-                  "Do not include natural language when calling tools.",
-                  "Available tools: \(toolJson)",
-                ].joined(separator: "\n")
-                var patched = entries
-                if let index = patched.firstIndex(where: { $0.role == "system" }) {
-                  patched[index] = ("system", instructions + "\n\n" + patched[index].content)
-                } else {
-                  patched.insert(("system", instructions), at: 0)
-                }
-                let retryMessages: [[String: any Sendable]] = patched.map { ["role": $0.role, "content": $0.content] }
+                let patched = toolInstructionPatchedEntries(entries, tools: toolSpecs ?? [])
+                let retryMessages = templateMessages(patched)
                 if let tokens = try? tok.applyChatTemplate(messages: retryMessages, tools: nil) {
                   promptTokens = tokens
                 } else {
                   debugLog("template retry without tools failed; using plain transcript")
-                  let transcript = patched.map { "\($0.role): \($0.content)" }.joined(separator: "\n\n") + "\n\nassistant:"
-                  promptTokens = tok.encode(text: transcript)
+                  promptTokens = tok.encode(text: plainTranscript(patched))
                 }
               }
             } else {
               debugLog("chat template failed (\(error)); using plain transcript")
-              let transcript = entries.map { "\($0.role): \($0.content)" }.joined(separator: "\n\n") + "\n\nassistant:"
-              promptTokens = tok.encode(text: transcript)
+              promptTokens = tok.encode(text: plainTranscript(entries))
             }
           }
         }
