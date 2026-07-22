@@ -12,6 +12,9 @@ struct ActiveRequestTests {
     #expect(prepared.reusedTokens == 2)
     #expect(prepared.cacheEvictions == [3])
     #expect(prepared.holdback == 5)
+    #expect(prepared.parameters.value == 42)
+    #expect(prepared.anchorPlantAt == [3])
+    #expect(prepared.resolvedBoundaries[3]?.kind == "message")
   }
 
   @Test("active state initializes counters cache and timing")
@@ -52,15 +55,13 @@ struct ActiveRequestTests {
     #expect(!request.cancelled)
   }
 
-  @Test("mutable counters boundaries and snapshots remain request-local")
+  @Test("mutable counters and snapshots remain request-local")
   func countersAndSnapshots() {
     let first = makeRequest()
     let second = makeRequest()
     first.prefillTokens = 3
     first.prefillChunks = 2
     first.anchorPlanted.insert(3)
-    first.resolvedBoundaries[3] = BoundaryInfo(tokenCount: 3, kind: "message",
-      label: "m", requested: true, status: "materialized", skipReason: nil)
     first.cacheSnapshots.continuationBoundary = 2
     first.cacheSnapshots.continuation = [TestCache(11)]
     #expect(first.prefillTokens == 3)
@@ -71,22 +72,26 @@ struct ActiveRequestTests {
     #expect(second.cacheSnapshots.continuation == nil)
   }
 
-  private func makePrepared(stops: [String] = ["end"]) -> PreparedRequest {
+  private func makePrepared(stops: [String] = ["end"]) -> PreparedRequest<TestParameters> {
     PreparedRequest(id: "request", admissionOrder: 5, admittedNs: 100,
       receivedToAdmittedMs: 1, templateTokenizeMs: 2, coordinatorPlanMs: 3,
       coordinatorApplyMs: 4, cacheMaterializeMs: 4, streaming: true,
       maxTokens: 10, promptTokens: [1, 2, 3], reusedTokens: 2,
       reuseKind: "continue", reuseScope: "session", cacheIdentity: identity(),
       cacheDecision: nil, cacheCandidates: [], cacheEvictions: [3],
-      cacheFallback: nil, stops: stops)
+      cacheFallback: nil, parameters: TestParameters(value: 42), stops: stops,
+      anchorPlantAt: [3], anchorPlantScopes: [3: 1],
+      resolvedBoundaries: [3: BoundaryInfo(tokenCount: 3, kind: "message",
+        label: "m", requested: true, status: "materialized", skipReason: nil)],
+      boundaryTelemetry: [], automaticCheckpointProposed: 1,
+      automaticCheckpointDeduped: 0)
   }
 
   private func makeRequest() -> ActiveRequest<TestCache, TestIterator, TestDetokenizer, TestParameters> {
     let slot = CacheSlot<TestCache>(caches: [TestCache(7)], tokens: [1, 2])
     return ActiveRequest(prepared: makePrepared(),
       cache: GenerationCacheContext(slotIndex: 1, slot: slot, caches: slot.caches),
-      fedTokens: [1, 2], suffix: [3], detokenizer: TestDetokenizer(),
-      parameters: TestParameters())
+      fedTokens: [1, 2], suffix: [3], detokenizer: TestDetokenizer())
   }
 
   private func identity() -> CacheIdentity {
@@ -102,4 +107,6 @@ private final class TestCache {
 }
 private struct TestIterator {}
 private struct TestDetokenizer {}
-private struct TestParameters {}
+private struct TestParameters {
+  let value: Int
+}

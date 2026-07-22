@@ -19,7 +19,7 @@ public struct BoundaryInfo: Equatable, Sendable {
   }
 }
 
-public struct PreparedRequest {
+public struct PreparedRequest<Parameters> {
   public let id: String?
   public let admissionOrder: UInt64
   public let admittedNs: UInt64
@@ -39,8 +39,15 @@ public struct PreparedRequest {
   public let cacheCandidates: [CacheCandidateEvaluation]
   public let cacheEvictions: [Int]
   public let cacheFallback: String?
+  public let parameters: Parameters
   public let stops: [String]
   public let holdback: Int
+  public let anchorPlantAt: [Int]
+  public let anchorPlantScopes: [Int: UInt32]
+  public let resolvedBoundaries: [Int: BoundaryInfo]
+  public let boundaryTelemetry: [BoundaryInfo]
+  public let automaticCheckpointProposed: Int
+  public let automaticCheckpointDeduped: Int
 
   public init(id: String?, admissionOrder: UInt64, admittedNs: UInt64,
               receivedToAdmittedMs: Double, templateTokenizeMs: Double,
@@ -49,7 +56,13 @@ public struct PreparedRequest {
               promptTokens: [Int], reusedTokens: Int, reuseKind: String?,
               reuseScope: String?, cacheIdentity: CacheIdentity,
               cacheDecision: CacheDecision?, cacheCandidates: [CacheCandidateEvaluation],
-              cacheEvictions: [Int], cacheFallback: String?, stops: [String]) {
+              cacheEvictions: [Int], cacheFallback: String?, parameters: Parameters,
+              stops: [String], anchorPlantAt: [Int] = [],
+              anchorPlantScopes: [Int: UInt32] = [:],
+              resolvedBoundaries: [Int: BoundaryInfo] = [:],
+              boundaryTelemetry: [BoundaryInfo] = [],
+              automaticCheckpointProposed: Int = 0,
+              automaticCheckpointDeduped: Int = 0) {
     self.id = id
     self.admissionOrder = admissionOrder
     self.admittedNs = admittedNs
@@ -69,7 +82,14 @@ public struct PreparedRequest {
     self.cacheCandidates = cacheCandidates
     self.cacheEvictions = cacheEvictions
     self.cacheFallback = cacheFallback
+    self.parameters = parameters
     self.stops = stops
     self.holdback = stops.map(\.count).max().map { $0 - 1 } ?? 0
+    self.anchorPlantAt = anchorPlantAt
+    self.anchorPlantScopes = anchorPlantScopes
+    self.resolvedBoundaries = resolvedBoundaries
+    self.boundaryTelemetry = boundaryTelemetry
+    self.automaticCheckpointProposed = automaticCheckpointProposed
+    self.automaticCheckpointDeduped = automaticCheckpointDeduped
   }
 }

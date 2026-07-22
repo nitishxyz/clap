@@ -409,57 +409,33 @@ func main() async {
           lastEvictionReason = retentionConfig.physicalByteBudget > 0
             ? "byte_pressure" : "retained_capacity"
         }
-        let caches = admission.caches
-        let fedTokens = admission.fedTokens
-        let suffix = admission.suffix
-        let reusedTokens = admission.reusedTokens
-        let reuseKind = admission.reuseKind
-        let reuseScope = admission.reuseScope
-        let cacheDecision: CacheDecision? = admission.decision
-        let slotIndex = admission.slotIndex
-        let slot = admission.slot
-        let cacheFallback: String? = nil
         for checkpoint in admission.anchorBoundaries where resolvedBoundaries[checkpoint] == nil {
           resolvedBoundaries[checkpoint] = .init(tokenCount: checkpoint, kind: "automatic_token",
             label: nil, requested: false, status: "authorized", skipReason: nil)
         }
-        let request = ActiveRequest(
-          id: id,
-          admissionOrder: admissionOrder,
-          admittedNs: admittedNs,
-          receivedToAdmittedMs: receivedToAdmittedMs,
+        let preparedRequest = PreparedRequest(id: id, admissionOrder: admissionOrder,
+          admittedNs: admittedNs, receivedToAdmittedMs: receivedToAdmittedMs,
           templateTokenizeMs: templateTokenizeMs,
           coordinatorPlanMs: admission.coordinatorPlanMs,
           coordinatorApplyMs: admission.coordinatorApplyMs,
           cacheMaterializeMs: admission.cacheMaterializeMs,
-          streaming: control.stream ?? true,
-          maxTokens: maxTokens,
-          promptTokens: promptTokens,
-          reusedTokens: reusedTokens,
-          reuseKind: reuseKind,
-          reuseScope: reuseScope,
-          cacheIdentity: cacheIdentity,
-          cacheDecision: cacheDecision,
-          cacheCandidates: admission.candidates,
-          cacheEvictions: admission.evictions,
-          cacheFallback: cacheFallback,
-          slotIndex: slotIndex,
-          slot: slot,
-          caches: caches,
-          fedTokens: fedTokens,
-          suffix: suffix,
-          detokenizer: NaiveStreamingDetokenizer(tokenizer: tok),
-          parameters: generateParameters,
-          stops: control.stop?.values ?? []
-        )
-        request.anchorPlantAt = admission.anchorBoundaries
-        request.anchorPlantScopes = stableBoundaryScopes
-        request.resolvedBoundaries = resolvedBoundaries
-        request.automaticCheckpointProposed = automaticProposals.count
-        request.automaticCheckpointDeduped = automaticDeduped
-        request.boundaryTelemetry = boundaryTelemetry + resolvedBoundaries.values
-          .filter { !$0.requested }.sorted { ($0.tokenCount ?? 0) < ($1.tokenCount ?? 0) }
-        return request
+          streaming: control.stream ?? true, maxTokens: maxTokens,
+          promptTokens: promptTokens, reusedTokens: admission.reusedTokens,
+          reuseKind: admission.reuseKind, reuseScope: admission.reuseScope,
+          cacheIdentity: cacheIdentity, cacheDecision: admission.decision,
+          cacheCandidates: admission.candidates, cacheEvictions: admission.evictions,
+          cacheFallback: nil, parameters: generateParameters,
+          stops: control.stop?.values ?? [], anchorPlantAt: admission.anchorBoundaries,
+          anchorPlantScopes: stableBoundaryScopes, resolvedBoundaries: resolvedBoundaries,
+          boundaryTelemetry: boundaryTelemetry + resolvedBoundaries.values
+            .filter { !$0.requested }.sorted { ($0.tokenCount ?? 0) < ($1.tokenCount ?? 0) },
+          automaticCheckpointProposed: automaticProposals.count,
+          automaticCheckpointDeduped: automaticDeduped)
+        return ActiveRequest(prepared: preparedRequest,
+          cache: GenerationCacheContext(slotIndex: admission.slotIndex,
+            slot: admission.slot, caches: admission.caches),
+          fedTokens: admission.fedTokens, suffix: admission.suffix,
+          detokenizer: NaiveStreamingDetokenizer(tokenizer: tok))
       } catch {
         emit(id: id, error: String(describing: error))
         return nil

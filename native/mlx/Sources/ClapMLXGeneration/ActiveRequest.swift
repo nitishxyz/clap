@@ -14,7 +14,7 @@ public final class GenerationCacheContext<Cache> {
 }
 
 public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
-  public let prepared: PreparedRequest
+  public let prepared: PreparedRequest<Parameters>
   public let cache: GenerationCacheContext<Cache>
   public var continuationBoundary: Int?
   public var fedTokens: [Int]
@@ -28,14 +28,8 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
   public var generatedCount = 0
   public var finishReason = "stop"
   public private(set) var status: RequestStatus = .active
-  public var anchorPlantAt: [Int] = []
-  public var anchorPlantScopes: [Int: UInt32] = [:]
-  public var resolvedBoundaries: [Int: BoundaryInfo] = [:]
-  public var boundaryTelemetry: [BoundaryInfo] = []
   public var anchorPlanted: Set<Int> = []
   public var materializedAnchors: Set<Int> = []
-  public var automaticCheckpointProposed = 0
-  public var automaticCheckpointDeduped = 0
   public var schedulerWaitMs = 0.0
   public var cacheMaterializeMs: Double
   public var prefillMs = 0.0
@@ -44,45 +38,16 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
   public var firstDecodeMs = 0.0
   public var firstEmitMs = 0.0
   public var lastStepFinishedNs: UInt64
-  public let parameters: Parameters
 
-  public init(prepared: PreparedRequest, cache: GenerationCacheContext<Cache>,
-              fedTokens: [Int], suffix: [Int], detokenizer: Detokenizer,
-              parameters: Parameters) {
+  public init(prepared: PreparedRequest<Parameters>, cache: GenerationCacheContext<Cache>,
+              fedTokens: [Int], suffix: [Int], detokenizer: Detokenizer) {
     self.prepared = prepared
     self.cache = cache
     self.fedTokens = fedTokens
     self.suffix = suffix
     self.detokenizer = detokenizer
-    self.parameters = parameters
     cacheMaterializeMs = prepared.initialCacheMaterializeMs
     lastStepFinishedNs = prepared.admittedNs
-  }
-
-  public convenience init(id: String?, admissionOrder: UInt64, admittedNs: UInt64,
-                          receivedToAdmittedMs: Double, templateTokenizeMs: Double,
-                          coordinatorPlanMs: Double, coordinatorApplyMs: Double,
-                          cacheMaterializeMs: Double, streaming: Bool, maxTokens: Int,
-                          promptTokens: [Int], reusedTokens: Int, reuseKind: String?,
-                          reuseScope: String?, cacheIdentity: CacheIdentity,
-                          cacheDecision: CacheDecision?,
-                          cacheCandidates: [CacheCandidateEvaluation], cacheEvictions: [Int],
-                          cacheFallback: String?, slotIndex: Int, slot: CacheSlot<Cache>,
-                          caches: [Cache], fedTokens: [Int], suffix: [Int],
-                          detokenizer: Detokenizer, parameters: Parameters, stops: [String]) {
-    let prepared = PreparedRequest(id: id, admissionOrder: admissionOrder,
-      admittedNs: admittedNs, receivedToAdmittedMs: receivedToAdmittedMs,
-      templateTokenizeMs: templateTokenizeMs, coordinatorPlanMs: coordinatorPlanMs,
-      coordinatorApplyMs: coordinatorApplyMs, cacheMaterializeMs: cacheMaterializeMs,
-      streaming: streaming, maxTokens: maxTokens, promptTokens: promptTokens,
-      reusedTokens: reusedTokens, reuseKind: reuseKind, reuseScope: reuseScope,
-      cacheIdentity: cacheIdentity, cacheDecision: cacheDecision,
-      cacheCandidates: cacheCandidates, cacheEvictions: cacheEvictions,
-      cacheFallback: cacheFallback, stops: stops)
-    self.init(prepared: prepared,
-      cache: GenerationCacheContext(slotIndex: slotIndex, slot: slot, caches: caches),
-      fedTokens: fedTokens, suffix: suffix, detokenizer: detokenizer,
-      parameters: parameters)
   }
 
   @discardableResult
@@ -123,8 +88,15 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
   public var cacheCandidates: [CacheCandidateEvaluation] { prepared.cacheCandidates }
   public var cacheEvictions: [Int] { prepared.cacheEvictions }
   public var cacheFallback: String? { prepared.cacheFallback }
+  public var parameters: Parameters { prepared.parameters }
   public var stops: [String] { prepared.stops }
   public var holdback: Int { prepared.holdback }
+  public var anchorPlantAt: [Int] { prepared.anchorPlantAt }
+  public var anchorPlantScopes: [Int: UInt32] { prepared.anchorPlantScopes }
+  public var resolvedBoundaries: [Int: BoundaryInfo] { prepared.resolvedBoundaries }
+  public var boundaryTelemetry: [BoundaryInfo] { prepared.boundaryTelemetry }
+  public var automaticCheckpointProposed: Int { prepared.automaticCheckpointProposed }
+  public var automaticCheckpointDeduped: Int { prepared.automaticCheckpointDeduped }
   public var slotIndex: Int { cache.slotIndex }
   public var slot: CacheSlot<Cache> { cache.slot }
   public var caches: [Cache] {
