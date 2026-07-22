@@ -3,6 +3,7 @@ import Darwin
 import ClapCacheBridge
 import ClapCachePolicy
 import ClapMLXCache
+import ClapMLXGeneration
 import ClapMLXModel
 import MLX
 import MLXLLM
@@ -156,104 +157,8 @@ func main() async {
 
     let decodeStepsPerPass = 6
 
-    final class ActiveRequest {
-      struct BoundaryInfo {
-        let tokenCount: Int?
-        let kind: String
-        let label: String?
-        let requested: Bool
-        let status: String
-        let skipReason: String?
-      }
-      let id: String?
-      let admissionOrder: UInt64
-      let streaming: Bool
-      let maxTokens: Int
-      let promptTokens: [Int]
-      let reusedTokens: Int
-      let reuseKind: String?
-      let reuseScope: String?
-      let cacheIdentity: CacheIdentity
-      let cacheDecision: CacheDecision?
-      let cacheCandidates: [CacheCandidateEvaluation]
-      let cacheEvictions: [Int]
-      let cacheFallback: String?
-      let slotIndex: Int
-      let slot: KVSlot
-      var caches: [KVCache]
-      var continuationBoundary: Int? = nil
-      let cacheSnapshots = CacheSnapshots<KVCache>()
-      var fedTokens: [Int]
-      var suffix: [Int]
-      var pos = 0
-      var iterator: TokenIterator?
-      var detokenizer: NaiveStreamingDetokenizer
-      var sampledTokens: [Int] = []
-      var collected = ""
-      var emitted = 0  // chars of `collected` already streamed (stop holdback)
-      var generatedCount = 0
-      var finishReason = "stop"
-      var cancelled = false
-      var completed = false
-      var failed = false
-      // Exact prompt indices authorized by Rust for physical snapshotting.
-      var anchorPlantAt: [Int] = []
-      var anchorPlantScopes: [Int: UInt32] = [:]
-      var resolvedBoundaries: [Int: BoundaryInfo] = [:]
-      var boundaryTelemetry: [BoundaryInfo] = []
-      var anchorPlanted: Set<Int> = []
-      var materializedAnchors: Set<Int> = []
-      var automaticCheckpointProposed = 0
-      var automaticCheckpointDeduped = 0
-      let admittedNs: UInt64
-      let receivedToAdmittedMs: Double
-      let templateTokenizeMs: Double
-      let coordinatorPlanMs: Double
-      let coordinatorApplyMs: Double
-      var schedulerWaitMs = 0.0
-      var cacheMaterializeMs = 0.0
-      var prefillMs = 0.0
-      var prefillTokens = 0
-      var prefillChunks = 0
-      var firstDecodeMs = 0.0
-      var firstEmitMs = 0.0
-      var lastStepFinishedNs: UInt64
-      let parameters: GenerateParameters
-      let stops: [String]
-      let holdback: Int
-
-      init(id: String?, admissionOrder: UInt64, admittedNs: UInt64, receivedToAdmittedMs: Double, templateTokenizeMs: Double, coordinatorPlanMs: Double, coordinatorApplyMs: Double, cacheMaterializeMs: Double, streaming: Bool, maxTokens: Int, promptTokens: [Int], reusedTokens: Int, reuseKind: String?, reuseScope: String?, cacheIdentity: CacheIdentity, cacheDecision: CacheDecision?, cacheCandidates: [CacheCandidateEvaluation], cacheEvictions: [Int], cacheFallback: String?, slotIndex: Int, slot: KVSlot, caches: [KVCache], fedTokens: [Int], suffix: [Int], detokenizer: NaiveStreamingDetokenizer, parameters: GenerateParameters, stops: [String]) {
-        self.id = id
-        self.admissionOrder = admissionOrder
-        self.admittedNs = admittedNs
-        self.receivedToAdmittedMs = receivedToAdmittedMs
-        self.templateTokenizeMs = templateTokenizeMs
-        self.coordinatorPlanMs = coordinatorPlanMs
-        self.coordinatorApplyMs = coordinatorApplyMs
-        self.cacheMaterializeMs = cacheMaterializeMs
-        self.lastStepFinishedNs = admittedNs
-        self.streaming = streaming
-        self.maxTokens = maxTokens
-        self.promptTokens = promptTokens
-        self.reusedTokens = reusedTokens
-        self.reuseKind = reuseKind
-        self.reuseScope = reuseScope
-        self.cacheIdentity = cacheIdentity
-        self.cacheDecision = cacheDecision
-        self.cacheCandidates = cacheCandidates
-        self.cacheEvictions = cacheEvictions
-        self.cacheFallback = cacheFallback
-        self.slotIndex = slotIndex
-        self.slot = slot
-        self.caches = caches
-        self.fedTokens = fedTokens
-        self.suffix = suffix
-        self.detokenizer = detokenizer
-        self.parameters = parameters
-        self.stops = stops
-        self.holdback = stops.map { $0.count }.max().map { $0 - 1 } ?? 0
-      }
-    }
+    typealias ActiveRequest = ClapMLXGeneration.ActiveRequest<KVCache, TokenIterator,
+      NaiveStreamingDetokenizer, GenerateParameters>
 
     var active: [ActiveRequest] = []
     var pendingChats: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
@@ -466,12 +371,12 @@ func main() async {
         let stableBoundaryScopes = Dictionary(uniqueKeysWithValues:
           stableBoundaries.map { ($0, cacheIdentity.scope) })
         var resolvedBoundaries = prepared.resolvedBoundaries.mapValues { boundary in
-          ActiveRequest.BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
+          BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
             label: boundary.label, requested: boundary.requested, status: boundary.status,
             skipReason: boundary.skipReason)
         }
         let boundaryTelemetry = prepared.structuralBoundaries.map { boundary in
-          ActiveRequest.BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
+          BoundaryInfo(tokenCount: boundary.tokenCount, kind: boundary.kind,
             label: boundary.label, requested: boundary.requested, status: boundary.status,
             skipReason: boundary.skipReason)
         }
