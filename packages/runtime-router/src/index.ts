@@ -17,6 +17,9 @@ export { DEFAULT_MAX_BYTES_PER_BACKEND, DEFAULT_MAX_LAUNCHES_PER_MODEL, LaunchLo
   writeLaunchMetadataAtomic } from "./process/launch-log-store";
 export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type WorkerLaunchIdentity,
   type WorkerLaunchMetadata, type WorkerLaunchPaths } from "./process/types";
+export { classifyWorkerExit, classifyWorkerExitPhase, type WorkerExitClassification,
+  type WorkerExitPhase } from "./process/crash-classification";
+export { mapWorkerResultPayload, mapWorkerTelemetryPayload } from "./process/result-mapper";
 
 export function listBackends() {
   return [llamaBackendStatus(), mlxBackendStatus()];
