@@ -91,6 +91,15 @@ let package = Package(
       dependencies: ["ClapMLXGeneration", "ClapMLXCache"]
     ),
     .testTarget(
+      name: "ClapMLXPhysicalIntegrationTests",
+      dependencies: [
+        "ClapMLXCache",
+        "ClapMLXGeneration",
+        "ClapMLXModel",
+        .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+      ]
+    ),
+    .testTarget(
       name: "ClapMLXWorkerCoreTests",
       dependencies: ["ClapMLXWorkerCore"]
     ),

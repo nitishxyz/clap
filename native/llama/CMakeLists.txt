@@ -267,6 +267,25 @@ if(BUILD_TESTING)
   add_test(NAME clap-llama-cache-request-lifecycle COMMAND clap-llama-cache-request-lifecycle)
   set_tests_properties(clap-llama-cache-request-lifecycle PROPERTIES LABELS "tier-a;cache")
 
+  add_executable(clap-llama-cache-model-probe
+    tests/cache-model-probe.test.cpp
+    src/cache-executor.cpp
+    src/environment.cpp
+    src/generation-stepper.cpp
+    src/model-runtime.cpp
+    src/request-state.cpp
+    src/stop-buffer.cpp
+  )
+  add_dependencies(clap-llama-cache-model-probe clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-model-probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-model-probe PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-model-probe COMMAND clap-llama-cache-model-probe)
+  set_tests_properties(clap-llama-cache-model-probe PROPERTIES LABELS "tier-a;cache;probe")
+
   add_executable(clap-llama-characterization native-characterization.test.cpp)
   add_test(NAME clap-llama-characterization COMMAND clap-llama-characterization)
 
@@ -389,6 +408,7 @@ if(BUILD_TESTING)
     clap-llama-cache-adapter
     clap-llama-cache-checkpoint
     clap-llama-cache-identity
+    clap-llama-cache-model-probe
     clap-llama-cache-executor
     clap-llama-cache-request-lifecycle
     clap-llama-cache-transaction
