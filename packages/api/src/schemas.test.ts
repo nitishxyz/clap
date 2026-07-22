@@ -25,6 +25,17 @@ describe("loaded model retention schema", () => {
     };
     expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, retention } }).worker.retention).toEqual(retention);
   });
+
+  test("preserves exact worker launch diagnostics", () => {
+    const launch = {
+      launchId: "launch-123",
+      stderrLogPath: "/clap/logs/workers/mlx/hash/launch-123.stderr.log",
+      launchMetadataPath: "/clap/logs/workers/mlx/hash/launch-123.json",
+      crashClassification: "decode",
+    };
+    expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, ...launch } }).worker)
+      .toMatchObject(launch);
+  });
 });
 
 describe("cache intent schema", () => {

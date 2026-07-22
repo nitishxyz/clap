@@ -203,6 +203,10 @@ export const LoadedModelSchema = z.object({
   always: z.boolean(),
   worker: z.object({
     pid: z.number().int().positive().optional(),
+    launchId: z.string().min(1).optional(),
+    stderrLogPath: z.string().min(1).optional(),
+    launchMetadataPath: z.string().min(1).optional(),
+    crashClassification: z.string().min(1).optional(),
     state: z.enum(["not_started", "one_shot", "resident", "exited"]),
     limitation: z.string().optional(),
     crashes: z.number().int().nonnegative().optional(),

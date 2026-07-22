@@ -45,6 +45,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private retention?: ResidentMlxRetention;
   private tokenCapabilities?: ModelTokenCapabilities;
   private workerLaunchId?: string;
+  private lastLaunchPaths?: WorkerLaunchPaths;
+  private crashClassification?: string;
 
   constructor(
     public readonly key: string,
@@ -62,6 +64,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     return {
       pid: this.active?.proc.pid,
       launchId: this.active?.context.paths.launchId ?? this.workerLaunchId,
+      stderrLogPath: this.active?.context.paths.stderrPath ?? this.lastLaunchPaths?.stderrPath,
+      launchMetadataPath: this.active?.context.paths.metadataPath ?? this.lastLaunchPaths?.metadataPath,
+      crashClassification: this.crashClassification,
       state: this.active ? "resident" : "not_started",
       crashes: this.crashes,
       lastCrashAt: this.lastCrashAt ? new Date(this.lastCrashAt).toISOString() : undefined,
@@ -182,6 +187,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     };
     this.active = launch;
     this.workerLaunchId = context.paths.launchId;
+    this.lastLaunchPaths = context.paths;
+    this.crashClassification = undefined;
     await this.launchLogs.markSpawned(context, proc.pid);
     launch.handshakeTimer = setTimeout(() => {
       if (this.active === launch && launch.resolveHandshake) this.protocolUnhealthy(launch,
@@ -221,6 +228,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     const phase = classifyWorkerExitPhase(Boolean(launch.resolveHandshake), launchPending);
     const classification = classifyWorkerCrash({ protocolFault: launch.context.protocolFault,
       expectedExit: launch.expectedExit, exitCode, phase: launch.context.phase });
+    if (current) this.crashClassification = classification;
     const diagnostic = launch.lastDiagnostic ? `. Last worker diagnostic: ${launch.lastDiagnostic}` : "";
     const exitMessage = `${this.backend} resident worker exited ${phase} with code ${exitCode}${diagnostic}`;
     if (launch.resolveHandshake) {
@@ -323,6 +331,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private protocolUnhealthy(launch: ActiveLaunch, cause: Error): void {
     launch.context.protocolFault = true;
+    if (this.active === launch) this.crashClassification = "protocol_fault";
     const diagnostic = launch.lastDiagnostic ? `. Last worker diagnostic: ${launch.lastDiagnostic}` : "";
     const detail = cause instanceof WorkerProtocolFault
       ? `worker protocol ${cause.code}: ${cause.message}${diagnostic}`

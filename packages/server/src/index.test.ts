@@ -2392,11 +2392,27 @@ describe("clap server", () => {
       expect(loadBody.model.expiresAt).toBeString();
       expect(loadBody.model.worker.state).toBe("resident");
       expect(loadBody.model.worker.pid).toBeNumber();
+      expect(loadBody.model.worker.launchId).toBeString();
+      expect(loadBody.model.worker.stderrLogPath).toContain(loadBody.model.worker.launchId);
+      expect(loadBody.model.worker.launchMetadataPath).toContain(loadBody.model.worker.launchId);
 
       const active = await app.request("/clap/v1/runtime/models");
       const activeBody = await active.json();
       expect(activeBody.models.map((entry: { id: string }) => entry.id)).toContain("acme/lifecycle-gguf");
       expect(activeBody.models[0].worker.pid).toBe(loadBody.model.worker.pid);
+      expect(activeBody.models[0].worker).toMatchObject({
+        launchId: loadBody.model.worker.launchId,
+        stderrLogPath: loadBody.model.worker.stderrLogPath,
+        launchMetadataPath: loadBody.model.worker.launchMetadataPath,
+      });
+
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const dashboardBody = await dashboard.json();
+      expect(dashboardBody.loaded[0].worker).toMatchObject({
+        launchId: loadBody.model.worker.launchId,
+        stderrLogPath: loadBody.model.worker.stderrLogPath,
+        launchMetadataPath: loadBody.model.worker.launchMetadataPath,
+      });
 
       const unload = await app.request("/clap/v1/models/unload", {
         method: "POST",
@@ -2584,6 +2600,19 @@ describe("clap server", () => {
       const entry = (await loaded.json()).models.find((m: { id: string }) => m.id === modelPath);
       expect(entry.worker.crashes).toBe(1);
       expect(entry.worker.lastCrashAt).toBeString();
+      expect(entry.worker.crashClassification).toBe("prefill");
+      expect(entry.worker.stderrLogPath).toContain(entry.worker.launchId);
+      expect(entry.worker.launchMetadataPath).toContain(entry.worker.launchId);
+
+      const crashDashboard = await app.request("/clap/v1/dashboard");
+      const crashEvent = (await crashDashboard.json()).events.find((event: { crashClassification?: string }) =>
+        event.crashClassification === "prefill");
+      expect(crashEvent).toMatchObject({
+        launchId: entry.worker.launchId,
+        stderrLogPath: entry.worker.stderrLogPath,
+        launchMetadataPath: entry.worker.launchMetadataPath,
+        crashClassification: "prefill",
+      });
 
       // Worker no longer crashes; the next request must recover automatically
       // after the backoff window without any manual restart.

@@ -78,6 +78,8 @@ describe.serial("resident worker per-launch logs", () => {
     const second = registry.getOrCreate("second-key", "llama", secondModel, { modelId: "owner/second", revision: "r2" });
     await Promise.all([first.load(), second.load()]);
     expect(first.info().launchId).not.toBe(second.info().launchId);
+    expect(first.info().stderrLogPath).not.toBe(second.info().stderrLogPath);
+    expect(first.info().launchMetadataPath).not.toBe(second.info().launchMetadataPath);
     await Promise.all([first.unload(), second.unload()]);
     const initial = await waitForFinalized(home, 2);
     expect(new Set(initial.map((item) => item.modelId))).toEqual(new Set(["owner/first", "owner/second"]));
@@ -112,6 +114,7 @@ describe.serial("resident worker per-launch logs", () => {
     }
     expect(firstError?.message).toContain(".stderr.log");
     const firstLaunchId = worker.info().launchId;
+    expect(worker.info()).toMatchObject({ crashClassification: "decode" });
     await worker.load();
     expect(worker.info().launchId).not.toBe(firstLaunchId);
     expect(firstError?.message).toContain(firstLaunchId!);

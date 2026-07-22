@@ -7,12 +7,12 @@ import type { ResidentCacheInfo } from "./process/types";
 
 export { ResidentWorkerProcess } from "./process/resident-worker-process";
 export type { ResidentCacheInfo } from "./process/types";
-
 export type ResidentBackend = LoadedModel["backend"];
 
 export type ResidentWorkerInfo = {
   pid?: number;
   launchId?: string;
+  stderrLogPath?: string; launchMetadataPath?: string; crashClassification?: string;
   state: LoadedModel["worker"]["state"];
   limitation?: string;
   crashes?: number;
@@ -103,7 +103,6 @@ export type ResidentChatResult = {
 };
 
 export type ResidentProgress = (done: number, total: number) => void;
-
 export type ResidentWorkerHandle = {
   key: string;
   backend: ResidentBackend;

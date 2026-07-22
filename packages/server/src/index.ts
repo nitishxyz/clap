@@ -182,7 +182,8 @@ export function createServer(
     if (reason === "cleanup") return;
     metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
   };
-  residents.onCrash = ({ key, backend, exitCode, consecutiveCrashes }) => {
+  residents.onCrash = ({ key, backend, exitCode, consecutiveCrashes, launchId, logPath,
+    metadataPath, classification }) => {
     // Worker keys are JSON tuples ([model, backend, path]); report the model id.
     let model = key;
     try {
@@ -191,7 +192,10 @@ export function createServer(
     } catch {
       // plain key
     }
-    metrics.event("error", `${model} ${backend} worker crashed (exit ${exitCode}, ${consecutiveCrashes} consecutive); auto-restarting with backoff`, { model });
+    metrics.event("error", `${model} ${backend} worker crashed (exit ${exitCode}, ${consecutiveCrashes} consecutive, ${classification ?? "unknown"}); auto-restarting with backoff`, {
+      model, launchId, stderrLogPath: logPath, launchMetadataPath: metadataPath,
+      crashClassification: classification,
+    });
   };
 
   app.onError((error, c) => {

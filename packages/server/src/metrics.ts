@@ -107,6 +107,10 @@ export type ServerEvent = {
   message: string;
   model?: string;
   durationMs?: number;
+  launchId?: string;
+  stderrLogPath?: string;
+  launchMetadataPath?: string;
+  crashClassification?: string;
 };
 
 export type MetricsTotals = {
@@ -273,7 +277,7 @@ export class MetricsCollector {
     reusedTokens: 0,
   };
 
-  event(type: ServerEvent["type"], message: string, extra?: { model?: string; durationMs?: number }): void {
+  event(type: ServerEvent["type"], message: string, extra?: Omit<ServerEvent, "id" | "at" | "type" | "message">): void {
     this.eventSequence += 1;
     this.eventLog.push({
       id: `e${this.eventSequence}`,
@@ -282,6 +286,10 @@ export class MetricsCollector {
       message,
       model: extra?.model,
       durationMs: extra?.durationMs,
+      launchId: extra?.launchId,
+      stderrLogPath: extra?.stderrLogPath,
+      launchMetadataPath: extra?.launchMetadataPath,
+      crashClassification: extra?.crashClassification,
     });
     if (this.eventLog.length > EVENT_LIMIT) this.eventLog.shift();
   }
