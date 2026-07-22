@@ -44,3 +44,16 @@ export {
   selectIdleEvictionVictims,
   type IdleEvictionSelectionOptions,
 } from "./eviction";
+export {
+  DEFAULT_OS_HEADROOM_BYTES,
+  DEFAULT_RUNTIME_HEADROOM_BYTES,
+  OS_HEADROOM_BYTES_ENV,
+  RUNTIME_HEADROOM_BYTES_ENV,
+  ResidencyCoordinator,
+  measuredResidencyMemory,
+  type ResidencyCoordinatorDependencies,
+  type ResidencyLifecycleAdapter,
+  type ResidencyLoadOperation,
+  type ResidencyLoadResult,
+  type ResidencyMemorySnapshot,
+} from "./coordinator";
