@@ -51,11 +51,13 @@ set(CLAP_LLAMA_SOURCES
   clap-llama.cpp
   src/environment.cpp
   src/protocol.cpp
+  src/stop-buffer.cpp
 )
 
 set(CLAP_LLAMA_HEADERS
   include/clap/llama/environment.h
   include/clap/llama/protocol.h
+  include/clap/llama/stop-buffer.h
 )
 
 add_executable(clap-llama ${CLAP_LLAMA_SOURCES} ${CLAP_LLAMA_HEADERS})
@@ -95,9 +97,17 @@ if(BUILD_TESTING)
   )
   add_test(NAME clap-llama-protocol COMMAND clap-llama-protocol)
 
+  add_executable(clap-llama-stop-buffer
+    tests/stop-buffer.test.cpp
+    src/stop-buffer.cpp
+  )
+  target_include_directories(clap-llama-stop-buffer PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
+  add_test(NAME clap-llama-stop-buffer COMMAND clap-llama-stop-buffer)
+
   add_custom_target(clap-llama-tests DEPENDS
     clap-llama-characterization
     clap-llama-environment
     clap-llama-protocol
+    clap-llama-stop-buffer
   )
 endif()

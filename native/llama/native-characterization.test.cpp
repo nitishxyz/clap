@@ -8,17 +8,6 @@ using clap::llama_native::SchedulePhase;
 using clap::llama_native::ScheduleRequest;
 
 int main() {
-  const std::string euro = "\xE2\x82\xAC";
-  assert(clap::llama_native::utf8_incomplete_suffix(euro.substr(0, 1)) == 1);
-  assert(clap::llama_native::utf8_incomplete_suffix(euro.substr(0, 2)) == 2);
-  assert(clap::llama_native::utf8_incomplete_suffix(euro) == 0);
-  assert(clap::llama_native::utf8_incomplete_suffix("plain") == 0);
-
-  const std::vector<std::string> stops = {"</stop>", "stop"};
-  assert(clap::llama_native::partial_stop_suffix("answer</st", stops) == 4);
-  assert(clap::llama_native::find_stop("answer</stop>tail", stops) == 6);
-  assert(clap::llama_native::find_stop("no match", stops) == std::string::npos);
-
   const std::vector<std::string> ids = {"same", "prefill", "same", "done"};
   const auto order = clap::llama_native::decode_first_order({
       {SchedulePhase::Prefill, true},

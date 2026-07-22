@@ -3,6 +3,7 @@
 #include "cache-adapter.h"
 #include "clap/llama/environment.h"
 #include "clap/llama/protocol.h"
+#include "clap/llama/stop-buffer.h"
 #include "native-characterization.h"
 #include "stable-boundary.h"
 
@@ -490,7 +491,7 @@ struct ActiveRequest {
   enum class Phase { Prefill, Decode };
   Phase phase = Phase::Prefill;
   llama_token pending_token = 0;  // sampled but not yet decoded
-  std::string held;               // tail held for stop/UTF-8 boundaries
+  clap::llama::StopBuffer stop_buffer;
   int completion_tokens = 0;
   std::string finish_reason = "stop";
   bool cancelled = false;
@@ -949,56 +950,21 @@ void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& me
   emit_error(req.id, message);
 }
 
-void flush_held(ActiveRequest& req) {
-  req.held.resize(req.held.size() - clap::llama_native::utf8_incomplete_suffix(req.held));
-  if (!req.held.empty()) emit(req.id, json{{"token", req.held}});
-  req.held.clear();
-}
-
-// Emits the visible portion of req.held, holding back partial stop sequences
-// and incomplete UTF-8 tails. Returns true when a stop sequence completed.
-bool emit_visible(ActiveRequest& req) {
-  if (!req.params.stops.empty()) {
-    const std::size_t stop_index = clap::llama_native::find_stop(req.held, req.params.stops);
-    if (stop_index != std::string::npos) {
-      std::string visible = req.held.substr(0, stop_index);
-      visible.resize(visible.size() - clap::llama_native::utf8_incomplete_suffix(visible));
-      if (!visible.empty()) emit(req.id, json{{"token", visible}});
-      req.held.clear();
-      return true;
-    }
-    const std::size_t stop_hold = clap::llama_native::partial_stop_suffix(req.held, req.params.stops);
-    const std::size_t utf8_hold = clap::llama_native::utf8_incomplete_suffix(req.held);
-    const std::size_t hold = std::max(stop_hold, utf8_hold);
-    const std::string visible = req.held.substr(0, req.held.size() - hold);
-    if (!visible.empty()) {
-      emit(req.id, json{{"token", visible}});
-      req.held = req.held.substr(visible.size());
-    }
-  } else {
-    const std::size_t hold = clap::llama_native::utf8_incomplete_suffix(req.held);
-    const std::string visible = req.held.substr(0, req.held.size() - hold);
-    if (!visible.empty()) {
-      emit(req.id, json{{"token", visible}});
-      req.held = req.held.substr(visible.size());
-    }
-  }
-  return false;
-}
-
 // Handles one sampled token: EOS, stop sequences, budget checks, streaming
 // emission. Finalizes the request when generation ends.
 void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab* vocab, llama_token token) {
   if (llama_vocab_is_eog(vocab, token)) {
-    flush_held(req);
+    const std::string visible = req.stop_buffer.finish();
+    if (!visible.empty()) emit(req.id, json{{"token", visible}});
     finalize(req);
     return;
   }
   req.completion_tokens += 1;
   const std::string piece = token_to_piece(vocab, token);
   if (!piece.empty()) {
-    req.held += piece;
-    if (emit_visible(req)) {
+    const auto result = req.stop_buffer.append(piece);
+    if (!result.visible.empty()) emit(req.id, json{{"token", result.visible}});
+    if (result.stop_complete) {
       req.finish_reason = "stop";
       finalize(req);
       return;
@@ -1006,14 +972,16 @@ void process_sampled(LoadedLlama& loaded, ActiveRequest& req, const llama_vocab*
   }
   if (req.completion_tokens >= req.params.max_tokens) {
     req.finish_reason = "length";
-    flush_held(req);
+    const std::string visible = req.stop_buffer.finish();
+    if (!visible.empty()) emit(req.id, json{{"token", visible}});
     finalize(req);
     return;
   }
   const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(loaded.ctx));
   if (req.n_pos + 1 >= n_ctx) {
     req.finish_reason = "length";
-    flush_held(req);
+    const std::string visible = req.stop_buffer.finish();
+    if (!visible.empty()) emit(req.id, json{{"token", visible}});
     finalize(req);
     return;
   }
@@ -1261,6 +1229,7 @@ std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::s
   auto req = std::make_unique<ActiveRequest>();
   req->id = id;
   req->params = sampling_from_request(request);
+  req->stop_buffer.reset(req->params.stops);
   req->cache_identity = cache_identity(loaded, id, request);
   req->cache_side_request = req->cache_identity.side_request;
   if (!loaded.coordinator) req->cache_fallback = "coordinator_unavailable";
