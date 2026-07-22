@@ -119,6 +119,10 @@ V1Request decode_v1_request(const std::string& line) {
     if (!value.contains("prompt") || !value["prompt"].is_string()) {
       throw V1DecodeError("invalid_request", id, "prompt must be a string");
     }
+    if (!value.contains("cache_identity") || !value["cache_identity"].is_object()) {
+      throw V1DecodeError("cache_identity_required", id,
+          "cache_identity is required for generate requests");
+    }
   } else if (type == "cancel") {
     require_string(value, "target_request_id", id);
   } else if (type == "set_max_active") {

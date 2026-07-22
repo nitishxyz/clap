@@ -20,6 +20,20 @@ std::vector<nlohmann::json> lines(const std::string& output) {
   return result;
 }
 
+nlohmann::json identity() {
+  return {{"version", 1}, {"generation", "sec_fixture"},
+    {"tenant_root", std::string(64, 'a')}, {"scope", "tenant"},
+    {"scope_fingerprint", std::string(64, 'a')},
+    {"namespace_fingerprint", std::string(64, 'b')},
+    {"namespace_id", "13527612320720337851"}, {"priority", "interactive"},
+    {"side_request", false}, {"display", nlohmann::json::object()},
+    {"physical", {{"fingerprint", std::string(64, 'c')}, {"backend", "llama"},
+      {"resolved_revision", "local:fixture"},
+      {"model_artifact_fingerprint", std::string(64, 'd')},
+      {"tokenizer_fingerprint", std::string(64, 'd')}, {"context_allocation", 4096},
+      {"kv_format", "f16"}, {"unified_kv", true}, {"layout_version", 1}}}};
+}
+
 }  // namespace
 
 int main() {
@@ -58,8 +72,9 @@ int main() {
     std::istringstream input;
     std::ostringstream output;
     clap::llama::Worker worker(input, output);
-    worker.dispatch(
-        R"({"protocol":1,"type":"generate","request_id":"target","prompt":"Hello","model":"missing.gguf"})");
+    worker.dispatch(nlohmann::json{{"protocol", 1}, {"type", "generate"},
+        {"request_id", "target"}, {"prompt", "Hello"}, {"model", "missing.gguf"},
+        {"cache_identity", identity()}}.dump());
     worker.dispatch(
         R"({"protocol":1,"type":"cancel","request_id":"cancel","target_request_id":"target"})");
     const auto events = lines(output.str());
@@ -77,9 +92,11 @@ int main() {
   }
 
   {
-    std::istringstream input(
-        R"({"protocol":1,"type":"generate","request_id":"waiting","prompt":"x","model":"missing.gguf"})" "\n"
-        R"({"protocol":1,"type":"shutdown","request_id":"shutdown"})" "\n");
+    const std::string commands = nlohmann::json{{"protocol", 1}, {"type", "generate"},
+        {"request_id", "waiting"}, {"prompt", "x"}, {"model", "missing.gguf"},
+        {"cache_identity", identity()}}.dump() + "\n" +
+        R"({"protocol":1,"type":"shutdown","request_id":"shutdown"})" + "\n";
+    std::istringstream input(commands);
     std::ostringstream output;
     clap::llama::Worker worker(input, output);
     assert(worker.run() == 0);

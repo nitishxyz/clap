@@ -37,19 +37,16 @@ class RequestPreparer {
   using Fingerprint = std::function<std::string(const std::vector<llama_token>&, std::size_t)>;
 
   RequestPreparer(ModelRuntime& runtime, CacheExecutor* cache_executor,
-                  std::vector<RequestSlotState> slots, std::string identity_key,
-                  Fingerprint fingerprint);
+                  std::vector<RequestSlotState> slots, Fingerprint fingerprint);
 
   PreparedRequest prepare(const std::string& id, const nlohmann::json& request);
 
  private:
-  clap::llama_cache::Identity cache_identity(const nlohmann::json& request) const;
   uint64_t capabilities() const;
 
   ModelRuntime& runtime_;
   CacheExecutor* cache_executor_;
   std::vector<RequestSlotState> slots_;
-  std::string identity_key_;
   Fingerprint fingerprint_;
 };
 

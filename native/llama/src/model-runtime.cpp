@@ -42,6 +42,8 @@ void ModelRuntime::reset() noexcept {
   hybrid_ = false;
   has_encoder_ = false;
   cache_domain_.clear();
+  kv_format_.clear();
+  unified_kv_ = true;
 }
 
 bool ModelRuntime::load(const std::string& model_path) {
@@ -112,8 +114,10 @@ bool ModelRuntime::load(const std::string& model_path) {
   hybrid_ = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
   has_encoder_ = llama_model_has_encoder(model_);
   const char* kv_type = std::getenv("CLAP_LLAMA_KV_TYPE");
+  kv_format_ = kv_type && *kv_type ? kv_type : "f16";
+  unified_kv_ = context_params.kv_unified;
   cache_domain_ = model_path + "|llama|ctx=" + std::to_string(backend_allocation_cap_) +
-      "|kv=" + (kv_type && *kv_type ? kv_type : "f16") +
+      "|kv=" + kv_format_ +
       "|unified=" + (context_params.kv_unified ? "1" : "0") +
       "|layout=1";
   return true;

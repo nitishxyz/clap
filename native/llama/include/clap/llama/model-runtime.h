@@ -36,6 +36,8 @@ class ModelRuntime {
   bool hybrid() const noexcept { return hybrid_; }
   bool has_encoder() const noexcept { return has_encoder_; }
   const std::string& cache_domain() const noexcept { return cache_domain_; }
+  const std::string& kv_format() const noexcept { return kv_format_; }
+  bool unified_kv() const noexcept { return unified_kv_; }
 
  private:
   llama_model* model_ = nullptr;
@@ -51,6 +53,8 @@ class ModelRuntime {
   bool hybrid_ = false;
   bool has_encoder_ = false;
   std::string cache_domain_;
+  std::string kv_format_;
+  bool unified_kv_ = true;
 };
 
 }  // namespace clap::llama

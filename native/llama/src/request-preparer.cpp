@@ -1,5 +1,6 @@
 #include "clap/llama/request-preparer.h"
 
+#include "clap/llama/cache-identity.h"
 #include "clap/llama/environment.h"
 #include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
@@ -9,11 +10,6 @@
 
 namespace clap::llama {
 namespace {
-
-std::string cache_string(const nlohmann::json& cache, const char* key) {
-  if (!cache.is_object() || !cache.contains(key) || !cache[key].is_string()) return "";
-  return cache[key].get<std::string>();
-}
 
 const char* scope_name(uint32_t scope) {
   switch (scope) {
@@ -96,37 +92,9 @@ RequestBudget validate_request_budget(int prompt_count, int context_size,
 
 RequestPreparer::RequestPreparer(ModelRuntime& runtime, CacheExecutor* cache_executor,
                                  std::vector<RequestSlotState> slots,
-                                 std::string identity_key, Fingerprint fingerprint)
+                                 Fingerprint fingerprint)
     : runtime_(runtime), cache_executor_(cache_executor), slots_(std::move(slots)),
-      identity_key_(std::move(identity_key)), fingerprint_(std::move(fingerprint)) {}
-
-clap::llama_cache::Identity RequestPreparer::cache_identity(
-    const nlohmann::json& request) const {
-  const auto cache = request.contains("cache") && request["cache"].is_object()
-      ? request["cache"] : nlohmann::json::object();
-  const std::string requested_namespace = cache_string(cache, "namespace");
-  const std::string tenant = requested_namespace.empty()
-      ? cache_string(cache, "tenant") : requested_namespace;
-  const std::string keyed = identity_key_ + "|";
-  clap::llama_cache::Identity identity;
-  identity.name_space = clap::llama_cache::fingerprint(
-      keyed + runtime_.cache_domain() + "|tenant=" + (tenant.empty() ? "local" : tenant));
-  identity.tenant = clap::llama_cache::hash(keyed + (tenant.empty() ? "local" : tenant));
-  identity.project = clap::llama_cache::hash(keyed + cache_string(cache, "project"));
-  identity.harness = clap::llama_cache::hash(keyed + cache_string(cache, "harness"));
-  identity.agent = clap::llama_cache::hash(keyed + cache_string(cache, "agent"));
-  const std::string session = cache_string(cache, "session");
-  identity.session = session.empty() ? 0 : clap::llama_cache::hash(keyed + session);
-  identity.side_request = cache.value("side_request", false);
-  identity.priority = cache_string(cache, "priority") == "background"
-      ? CLAP_CACHE_PRIORITY_BACKGROUND : CLAP_CACHE_PRIORITY_INTERACTIVE;
-  if (!session.empty()) identity.scope = CLAP_CACHE_SCOPE_SESSION;
-  else if (!cache_string(cache, "agent").empty()) identity.scope = CLAP_CACHE_SCOPE_AGENT;
-  else if (!cache_string(cache, "project").empty()) identity.scope = CLAP_CACHE_SCOPE_PROJECT;
-  else if (!cache_string(cache, "harness").empty()) identity.scope = CLAP_CACHE_SCOPE_HARNESS;
-  else identity.scope = CLAP_CACHE_SCOPE_TENANT;
-  return identity;
-}
+      fingerprint_(std::move(fingerprint)) {}
 
 uint64_t RequestPreparer::capabilities() const {
   uint64_t value = CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
@@ -143,12 +111,19 @@ PreparedRequest RequestPreparer::prepare(const std::string& id, const nlohmann::
   PreparedRequest prepared;
   prepared.id = id;
   prepared.params = sampling_from_request(request);
-  prepared.cache_identity = cache_identity(request);
+  if (!request.contains("cache_identity")) {
+    throw RequestError("cache_identity_required", "cache_identity is required");
+  }
+  ParsedCacheIdentity parsed_identity;
+  try {
+    parsed_identity = parse_cache_identity(request["cache_identity"], runtime_);
+  } catch (const CacheIdentityError& error) {
+    throw RequestError("invalid_cache_identity", error.what());
+  }
+  prepared.cache_identity = parsed_identity.authority;
   prepared.cache_side_request = prepared.cache_identity.side_request;
   if (!cache_executor_) prepared.cache_fallback = "coordinator_unavailable";
-  if (request.contains("cache") && request["cache"].is_object()) {
-    prepared.cache_namespace = cache_string(request["cache"], "namespace");
-  }
+  prepared.cache_namespace = parsed_identity.display.name_space;
   prepared.structural_boundaries = std::move(prompt.structural_boundaries);
   prepared.resolved_boundaries = std::move(prompt.resolved_boundaries);
   auto tokens = std::move(prompt.tokens);

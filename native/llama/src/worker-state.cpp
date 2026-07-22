@@ -131,8 +131,7 @@ std::unique_ptr<ActiveRequest> WorkerState::prepare(
   for (const auto& slot : slots_) {
     slots.push_back({slot.tokens, slot.coordinator_generation, slot.busy, slot.is_anchor});
   }
-  RequestPreparer preparer(runtime_, cache_executor_.get(), std::move(slots),
-      telemetry_key(), fingerprint);
+  RequestPreparer preparer(runtime_, cache_executor_.get(), std::move(slots), fingerprint);
   auto prepared = preparer.prepare(id, request);
   const std::size_t target = static_cast<std::size_t>(prepared.sequence);
   if (runtime_.has_encoder()) {

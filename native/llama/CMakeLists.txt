@@ -48,6 +48,7 @@ set_target_properties(clap-cache-ffi PROPERTIES
 # This is the sole explicit production source manifest. Add extracted worker
 # translation units here as the native worker is decomposed.
 set(CLAP_LLAMA_SOURCES
+  src/cache-identity.cpp
   src/cache-executor.cpp
   src/environment.cpp
   src/generation-stepper.cpp
@@ -66,6 +67,7 @@ set(CLAP_LLAMA_SOURCES
 )
 
 set(CLAP_LLAMA_HEADERS
+  include/clap/llama/cache-identity.h
   include/clap/llama/cache-executor.h
   include/clap/llama/environment.h
   include/clap/llama/generation-stepper.h
@@ -97,8 +99,22 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-cache-identity
+    tests/cache-identity.test.cpp
+    src/cache-identity.cpp
+  )
+  add_dependencies(clap-llama-cache-identity clap-cache-ffi-build)
+  target_include_directories(clap-llama-cache-identity PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-cache-identity PRIVATE llama clap-cache-ffi)
+  add_test(NAME clap-llama-cache-identity COMMAND clap-llama-cache-identity)
+
   add_executable(clap-llama-worker
     tests/worker.test.cpp
+    src/cache-identity.cpp
     src/cache-executor.cpp
     src/environment.cpp
     src/generation-stepper.cpp
@@ -142,6 +158,7 @@ if(BUILD_TESTING)
 
   add_executable(clap-llama-worker-state
     tests/worker-state.test.cpp
+    src/cache-identity.cpp
     src/cache-executor.cpp
     src/environment.cpp
     src/generation-stepper.cpp
@@ -267,6 +284,7 @@ if(BUILD_TESTING)
 
   add_executable(clap-llama-request-preparer
     tests/request-preparer.test.cpp
+    src/cache-identity.cpp
     src/cache-executor.cpp
     src/environment.cpp
     src/model-runtime.cpp
@@ -319,6 +337,7 @@ if(BUILD_TESTING)
 
   add_custom_target(clap-llama-tests DEPENDS
     clap-llama-cache-adapter
+    clap-llama-cache-identity
     clap-llama-cache-executor
     clap-llama-characterization
     clap-llama-environment

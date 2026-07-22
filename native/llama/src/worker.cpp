@@ -170,6 +170,7 @@ bool Worker::dispatch(const std::string& line) {
     body.erase("protocol");
     body.erase("request_id");
     body.erase("request");
+    body["cache_identity"] = request.body["cache_identity"];
     body["id"] = request.request_id;
     body["type"] = "generate";
     scheduler_.enqueue(request.request_id, std::move(body));
