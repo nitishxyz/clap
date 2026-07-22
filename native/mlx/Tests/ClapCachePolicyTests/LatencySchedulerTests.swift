@@ -66,4 +66,14 @@ final class LatencySchedulerTests: XCTestCase {
     XCTAssertEqual(round.map(\.id), ["first-decode", "decode", "long"])
     XCTAssertEqual(Set(round.map(\.id)).count, 3)
   }
+
+  func testDuplicateAndMixedIDsRemainAttachedToTheirRequestState() {
+    let round = LatencyScheduler.round([
+      request("same", 3, residual: 8_000),
+      request("other", 2, residual: 0, decoding: true, emitted: true),
+      request("same", 1, residual: 25),
+    ])
+    XCTAssertEqual(round.map(\.id), ["same", "other", "same"])
+    XCTAssertEqual(round.map(\.turns), [3, 1, 1])
+  }
 }

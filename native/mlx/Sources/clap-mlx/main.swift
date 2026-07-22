@@ -1878,21 +1878,11 @@ func main() async {
             // finish. While streaming, hold back enough of the tail that a
             // stop split across tokens is never emitted.
             if !req.stops.isEmpty {
-              // Only the tail can contain a new match: the window covers the
-              // fresh chunk plus a full stop length of earlier context.
-              let windowStart = req.collected.index(
-                req.collected.endIndex,
-                offsetBy: -min(req.collected.count, chunk.count + req.holdback),
-              )
-              var earliest: Range<String.Index>? = nil
-              for stop in req.stops {
-                if let found = req.collected.range(of: stop, range: windowStart..<req.collected.endIndex),
-                   earliest == nil || found.lowerBound < earliest!.lowerBound {
-                  earliest = found
-                }
-              }
-              if let match = earliest {
-                req.collected = String(req.collected[..<match.lowerBound])
+              let scan = StopSequencePolicy.scan(
+                collected: req.collected, appendedCount: chunk.count,
+                stops: req.stops, emittedCount: req.emitted, holdback: req.holdback)
+              if let matchOffset = scan.matchOffset {
+                req.collected = String(req.collected.prefix(matchOffset))
                 if req.streaming && req.emitted < req.collected.count {
                   emit(id: req.id, token: String(req.collected.dropFirst(req.emitted)))
                   req.emitted = req.collected.count
@@ -1910,7 +1900,9 @@ func main() async {
                 emit(id: req.id, token: chunk)
                 req.emitted = req.collected.count
               } else {
-                let safe = max(req.emitted, req.collected.count - req.holdback)
+                let safe = StopSequencePolicy.scan(
+                  collected: req.collected, appendedCount: chunk.count,
+                  stops: req.stops, emittedCount: req.emitted, holdback: req.holdback).safeCount
                 if safe > req.emitted {
                   if req.firstEmitMs == 0 {
                     req.firstEmitMs = Double(DispatchTime.now().uptimeNanoseconds - req.admittedNs) / 1_000_000
@@ -1959,13 +1951,13 @@ func main() async {
 
       if type == "cancel" {
         let target = control.id
-        let matchesAll = target == nil || target?.isEmpty == true
-        for req in active where matchesAll || req.id == target {
+        for req in active where RequestCancellationPolicy.matches(
+          target: target, requestID: req.id) {
           req.cancelled = true
         }
         var remaining: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
         for pending in pendingChats {
-          if matchesAll || pending.id == target {
+          if RequestCancellationPolicy.matches(target: target, requestID: pending.id) {
             emit(id: pending.id, done: true, cancelled: true, finishReason: "cancel", usage: nil, cache: nil)
           } else {
             remaining.append(pending)

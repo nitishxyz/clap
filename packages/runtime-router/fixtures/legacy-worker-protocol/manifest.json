@@ -1,0 +1,43 @@
+{
+  "protocol": "legacy-worker-protocol",
+  "status": "characterization-only",
+  "framing": "newline-delimited JSON objects",
+  "requestFixture": "requests.jsonl",
+  "backendEventFixtures": {
+    "llama": "llama-events.jsonl",
+    "mlx": "mlx-events.jsonl"
+  },
+  "requestVariants": [
+    "load",
+    "unload",
+    "chat",
+    "default-chat-without-type",
+    "cancel",
+    "set_max_active",
+    "shutdown"
+  ],
+  "eventVariants": [
+    "load-ack",
+    "unload-ack",
+    "started",
+    "token",
+    "content",
+    "prefill",
+    "coded-error",
+    "uncoded-error",
+    "normal-completion",
+    "queued-cancellation",
+    "active-cancellation",
+    "idless-retention",
+    "memory",
+    "timing"
+  ],
+  "cacheOutcomes": [
+    "miss",
+    "slot-hit",
+    "branch-hit",
+    "anchor-hit",
+    "fallback",
+    "eviction"
+  ]
+}

@@ -6,12 +6,10 @@ import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const llamaDir = join(root, "vendor", "llama.cpp");
-const buildDir = join(llamaDir, "build");
+const sourceDir = join(root, "native", "llama");
+const buildDir = join(root, "build", "llama");
 const libexec = join(root, "libexec");
-const wrapperSource = join(root, "native", "llama", "clap-llama.cpp");
 const wrapperOutput = join(libexec, "clap-llama");
-const cacheDir = join(root, "native", "cache");
-const cacheLibDir = join(cacheDir, "target", "release");
 
 if (!existsSync(llamaDir)) {
   console.error("llama.cpp is not vendored. Run: bun run runtime:llama:vendor");
@@ -20,13 +18,9 @@ if (!existsSync(llamaDir)) {
 
 const configure = [
   "cmake",
-  "-S", llamaDir,
+  "-S", sourceDir,
   "-B", buildDir,
   "-DCMAKE_BUILD_TYPE=Release",
-  "-DBUILD_SHARED_LIBS=OFF",
-  "-DLLAMA_BUILD_TESTS=OFF",
-  "-DLLAMA_BUILD_EXAMPLES=OFF",
-  "-DLLAMA_CURL=OFF",
   "-DGGML_NATIVE=ON",
 ];
 
@@ -52,66 +46,13 @@ if (wantCuda) {
 
 await run(configure);
 const buildJobs = process.env.CLAP_BUILD_JOBS ?? String(availableParallelism());
-await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "llama", "-j", buildJobs]);
-await run(["cargo", "build", "--release", "-p", "clap-cache-ffi"], cacheDir);
+await run(["cmake", "--build", buildDir, "--config", "Release", "--target", "clap-llama", "-j", buildJobs]);
 
 await mkdir(libexec, { recursive: true });
-
-const cxx = process.env.CXX ?? "c++";
-const compile = [
-  cxx,
-  "-std=c++17",
-  "-O2",
-  wrapperSource,
-  "-I", join(llamaDir, "include"),
-  "-I", join(llamaDir, "ggml", "include"),
-  "-I", join(llamaDir, "ggml", "src"),
-  "-I", join(llamaDir, "vendor"),
-  "-I", join(cacheDir, "include"),
-  "-L", join(buildDir, "src"),
-  "-L", join(buildDir, "ggml", "src"),
-  "-L", join(buildDir, "ggml", "src", "ggml-cpu"),
-  join(cacheLibDir, process.platform === "win32" ? "clap_cache_ffi.lib" : "libclap_cache_ffi.a"),
-  "-lllama",
-  "-lggml",
-  "-lggml-base",
-  "-lggml-cpu",
-];
-
-if (process.platform === "darwin") {
-  compile.push(
-    "-L", join(buildDir, "ggml", "src", "ggml-metal"),
-    "-L", join(buildDir, "ggml", "src", "ggml-blas"),
-    "-lggml-metal",
-    "-lggml-blas",
-    "-framework", "Foundation",
-    "-framework", "Metal",
-    "-framework", "MetalKit",
-    "-framework", "Accelerate",
-  );
-}
-
-if (process.platform === "linux") {
-  if (wantCuda) {
-    compile.push(
-      "-L", join(buildDir, "ggml", "src", "ggml-cuda"),
-      "-lggml-cuda",
-      "-L", join(cudaHome, "lib64"),
-      "-L", join(cudaHome, "lib64", "stubs"),
-      "-lcudart", "-lcublas", "-lcublasLt", "-lcuda",
-      `-Wl,-rpath,${join(cudaHome, "lib64")}`,
-    );
-    // llama.cpp auto-enables NCCL when the library is installed (common on
-    // GPU cloud images); link it so ggml-cuda's references resolve.
-    const ldconfig = Bun.spawnSync(["ldconfig", "-p"]);
-    if (ldconfig.success && ldconfig.stdout.toString().includes("libnccl.so")) {
-      compile.push("-lnccl");
-    }
-  }
-  compile.push("-lpthread", "-ldl", "-lm", "-fopenmp");
-}
-
-await run([...compile, "-o", wrapperOutput]);
+await run([
+  "cmake", "--install", buildDir, "--config", "Release",
+  "--component", "runtime", "--prefix", libexec,
+]);
 await chmod(wrapperOutput, 0o755);
 
 console.log(`built ${wrapperOutput}`);

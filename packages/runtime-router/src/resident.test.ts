@@ -277,6 +277,62 @@ describe("resident worker registry", () => {
     }
   });
 
+  test("characterizes legacy event correlation and first-pending fallback", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const dir = await mkdtemp(join(tmpdir(), "clap-resident-protocol-test-"));
+    try {
+      const { command, log } = await fakeProtocolWorker(dir);
+      process.env.CLAP_LLAMA_WORKER = command;
+      const registry = new ResidentWorkerRegistry();
+      const worker = registry.getOrCreate("key", "llama", join(dir, "model.gguf"));
+      await writeFile(join(dir, "model.gguf"), "gguf");
+      await worker.load();
+
+      const firstTokens: string[] = [];
+      const secondTokens: string[] = [];
+      const thirdTokens: string[] = [];
+      const progress: Array<[number, number]> = [];
+      const controller = new AbortController();
+      const first = worker.chat(
+        { model: join(dir, "model.gguf"), messages: [{ role: "user", content: "first" }], stream: true },
+        (token) => firstTokens.push(token), undefined, (done, total) => progress.push([done, total]),
+      );
+      const second = worker.chat(
+        { model: join(dir, "model.gguf"), messages: [{ role: "user", content: "second" }], stream: true },
+        (token) => secondTokens.push(token), controller.signal, undefined, () => controller.abort(),
+      );
+      const third = worker.chat(
+        { model: join(dir, "model.gguf"), messages: [{ role: "user", content: "third" }], stream: true },
+        (token) => thirdTokens.push(token),
+      );
+
+      await expect(third).rejects.toMatchObject({ code: "characterized_failure" });
+      await expect(first).resolves.toMatchObject({
+        content: "first-known|numeric-fallback|text-fallback|",
+        finishReason: "stop",
+        usage: { promptTokens: 5, completionTokens: 3 },
+      });
+      await expect(second).resolves.toMatchObject({ content: "second-known|", finishReason: "cancel" });
+      expect(firstTokens).toEqual(["first-known|", "numeric-fallback|", "text-fallback|"]);
+      expect(secondTokens).toEqual(["second-known|"]);
+      expect(thirdTokens).toEqual(["third-known|"]);
+      expect(progress).toEqual([[4, 5]]);
+      expect(worker.info().memory).toEqual({ activeBytes: 11, cacheBytes: 22, peakActiveBytes: 33 });
+      expect(worker.info().retention).toMatchObject({ maxActive: 2, queued: 3, retainedTotal: 1 });
+
+      const commands = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      const chats = commands.filter((command) => command.type === "chat");
+      const cancel = commands.find((command) => command.type === "cancel");
+      expect(chats.map((command) => command.messages[0].content)).toEqual(["first", "second", "third"]);
+      expect(cancel?.id).toBe(chats[1]?.id);
+      expect(cancel?.id).not.toBe(chats[0]?.id);
+      registry.shutdownAll();
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("rotates stderr and attributes each worker launch", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousHome = process.env.CLAP_HOME;
@@ -446,6 +502,66 @@ for await (const chunk of Bun.stdin.stream()) {
       maxActive = request.max_active;
       console.log(JSON.stringify({ id: request.id, done: true, retention: retention(request) }));
     }
+  }
+}
+`);
+  return { command: `/usr/bin/env bun ${path}`, log };
+}
+
+async function fakeProtocolWorker(dir: string): Promise<{ command: string; log: string }> {
+  const path = join(dir, "fake-protocol-worker");
+  const log = join(dir, "protocol-commands.jsonl");
+  await writeFile(log, "");
+  await writeFile(path, `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+const log = ${JSON.stringify(log)};
+const decoder = new TextDecoder();
+let buffer = "";
+const chats = [];
+const retention = {
+  max_active: 2, queued: 3,
+  active_policy: { mode: "auto", selected_max: 2, backend_ceiling: 4, hardware_ceiling: 4,
+    model_ceiling: 4, memory_ceiling: 2, reason: "memory_ceiling", inputs: {} },
+  active: 0, retained_total: 1, retained_sessions: 1, retained_anchors: 0,
+  retained_bytes: 100, session_bytes: 100, anchor_bytes: 0, budget_bytes: 1000,
+  high_watermark_bytes: 900, low_watermark_bytes: 750, under_pressure: false,
+  hard_ceiling: 8, eviction_reason: null, eviction_count: 0,
+};
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true });
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    const request = JSON.parse(line);
+    appendFileSync(log, JSON.stringify(request) + "\\n");
+    if (request.type === "shutdown") process.exit(0);
+    if (request.type === "load") {
+      console.log(JSON.stringify({ id: request.id, loaded: true, done: true }));
+      continue;
+    }
+    if (request.type === "cancel") {
+      console.log(JSON.stringify({ id: request.id, done: true, cancelled: true, finish_reason: "cancel" }));
+      continue;
+    }
+    if (request.type !== "chat") continue;
+    chats.push(request);
+    if (chats.length !== 3) continue;
+    const [first, second, third] = chats;
+    console.log(JSON.stringify({ memory: { active_bytes: 11, cache_bytes: 22, peak_active_bytes: 33 }, retention }));
+    console.log(JSON.stringify({ id: first.id, started: true }));
+    console.log(JSON.stringify({ id: second.id, started: true }));
+    console.log(JSON.stringify({ id: third.id, started: true }));
+    console.log(JSON.stringify({ id: first.id, token: "first-known|" }));
+    console.log(JSON.stringify({ id: second.id, token: "second-known|" }));
+    console.log(JSON.stringify({ id: third.id, content: "third-known|" }));
+    console.log(JSON.stringify({ id: "unknown-request", token: "ignored|" }));
+    console.log(JSON.stringify({ id: 17, token: "numeric-fallback|" }));
+    console.log("text-fallback|");
+    console.log(JSON.stringify({ id: first.id, prefill: { done: 4, total: 5 } }));
+    console.log(JSON.stringify({ id: first.id, done: true, finish_reason: "stop", usage: { prompt_tokens: 5, completion_tokens: 3 } }));
+    console.log(JSON.stringify({ id: third.id, error: "characterized rejection", code: "characterized_failure" }));
   }
 }
 `);

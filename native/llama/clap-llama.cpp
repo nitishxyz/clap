@@ -1,6 +1,7 @@
 #include "llama.h"
 #include "active-concurrency.h"
 #include "cache-adapter.h"
+#include "native-characterization.h"
 #include "stable-boundary.h"
 
 #include <nlohmann/json.hpp>
@@ -170,28 +171,6 @@ struct RequestError : std::runtime_error {
 struct CacheBackpressure : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
-
-// Number of trailing bytes forming an incomplete (but so far valid) UTF-8
-// sequence. Byte-level BPE tokens can split a multi-byte character across
-// pieces; those bytes must be held back until the character completes.
-std::size_t utf8_incomplete_suffix(const std::string& text) {
-  const std::size_t size = text.size();
-  std::size_t cont = 0;
-  while (cont < 3 && cont < size &&
-         (static_cast<unsigned char>(text[size - 1 - cont]) & 0xC0) == 0x80) {
-    cont += 1;
-  }
-  if (cont >= size) return 0;
-  const unsigned char lead = static_cast<unsigned char>(text[size - 1 - cont]);
-  std::size_t need = 0;
-  if ((lead & 0x80) == 0) need = 1;
-  else if ((lead & 0xE0) == 0xC0) need = 2;
-  else if ((lead & 0xF0) == 0xE0) need = 3;
-  else if ((lead & 0xF8) == 0xF0) need = 4;
-  else return 0;
-  const std::size_t have = cont + 1;
-  return have < need ? have : 0;
-}
 
 bool env_enabled(const char* name) {
   const char* raw = std::getenv(name);
@@ -559,35 +538,6 @@ std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
   n = llama_token_to_piece(vocab, token, big.data(), static_cast<int32_t>(big.size()), 0, true);
   if (n < 0) return "";
   return std::string(big.data(), n);
-}
-
-std::size_t max_stop_length(const std::vector<std::string>& stops) {
-  std::size_t max = 0;
-  for (const auto& stop : stops) max = std::max(max, stop.size());
-  return max;
-}
-
-// Returns the byte index of the earliest stop match in text, or npos.
-std::size_t find_stop(const std::string& text, const std::vector<std::string>& stops) {
-  std::size_t earliest = std::string::npos;
-  for (const auto& stop : stops) {
-    if (stop.empty()) continue;
-    const std::size_t index = text.find(stop);
-    if (index != std::string::npos && index < earliest) earliest = index;
-  }
-  return earliest;
-}
-
-// Longest suffix of text that is a prefix of any stop sequence.
-std::size_t partial_stop_suffix(const std::string& text, const std::vector<std::string>& stops) {
-  const std::size_t max = std::min(text.size(), max_stop_length(stops));
-  for (std::size_t length = max; length > 0; --length) {
-    const std::string suffix = text.substr(text.size() - length);
-    for (const auto& stop : stops) {
-      if (stop.size() > suffix.size() && stop.compare(0, suffix.size(), suffix) == 0) return length;
-    }
-  }
-  return 0;
 }
 
 llama_sampler* make_sampler(const SamplingParams& params) {
@@ -1122,7 +1072,7 @@ void fail_request(LoadedLlama& loaded, ActiveRequest& req, const std::string& me
 }
 
 void flush_held(ActiveRequest& req) {
-  req.held.resize(req.held.size() - utf8_incomplete_suffix(req.held));
+  req.held.resize(req.held.size() - clap::llama_native::utf8_incomplete_suffix(req.held));
   if (!req.held.empty()) emit(req.id, json{{"token", req.held}});
   req.held.clear();
 }
@@ -1131,16 +1081,16 @@ void flush_held(ActiveRequest& req) {
 // and incomplete UTF-8 tails. Returns true when a stop sequence completed.
 bool emit_visible(ActiveRequest& req) {
   if (!req.params.stops.empty()) {
-    const std::size_t stop_index = find_stop(req.held, req.params.stops);
+    const std::size_t stop_index = clap::llama_native::find_stop(req.held, req.params.stops);
     if (stop_index != std::string::npos) {
       std::string visible = req.held.substr(0, stop_index);
-      visible.resize(visible.size() - utf8_incomplete_suffix(visible));
+      visible.resize(visible.size() - clap::llama_native::utf8_incomplete_suffix(visible));
       if (!visible.empty()) emit(req.id, json{{"token", visible}});
       req.held.clear();
       return true;
     }
-    const std::size_t stop_hold = partial_stop_suffix(req.held, req.params.stops);
-    const std::size_t utf8_hold = utf8_incomplete_suffix(req.held);
+    const std::size_t stop_hold = clap::llama_native::partial_stop_suffix(req.held, req.params.stops);
+    const std::size_t utf8_hold = clap::llama_native::utf8_incomplete_suffix(req.held);
     const std::size_t hold = std::max(stop_hold, utf8_hold);
     const std::string visible = req.held.substr(0, req.held.size() - hold);
     if (!visible.empty()) {
@@ -1148,7 +1098,7 @@ bool emit_visible(ActiveRequest& req) {
       req.held = req.held.substr(visible.size());
     }
   } else {
-    const std::size_t hold = utf8_incomplete_suffix(req.held);
+    const std::size_t hold = clap::llama_native::utf8_incomplete_suffix(req.held);
     const std::string visible = req.held.substr(0, req.held.size() - hold);
     if (!visible.empty()) {
       emit(req.id, json{{"token", visible}});
@@ -1381,20 +1331,23 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
   std::vector<ActiveRequest*> contributors;
   int32_t budget = n_batch;
 
-  // Decode streams first: one token each keeps every session moving.
-  for (auto& req : active) {
-    if (req->done || req->phase != ActiveRequest::Phase::Decode) continue;
-    if (budget <= 0) break;
-    budget -= add_contribution(batch, *req, budget);
-    contributors.push_back(req.get());
+  std::vector<clap::llama_native::ScheduleRequest> schedule_requests;
+  schedule_requests.reserve(active.size());
+  for (const auto& req : active) {
+    const bool has_work = req->phase == ActiveRequest::Phase::Decode ||
+        req->prompt_tokens.size() != req->ingested;
+    schedule_requests.push_back({
+        req->phase == ActiveRequest::Phase::Decode
+            ? clap::llama_native::SchedulePhase::Decode
+            : clap::llama_native::SchedulePhase::Prefill,
+        !req->done && has_work,
+    });
   }
-  // Prefill fills the remaining budget in admission order.
-  for (auto& req : active) {
-    if (req->done || req->phase != ActiveRequest::Phase::Prefill) continue;
+  // Decode streams first, then prefill in admission order.
+  for (const std::size_t index : clap::llama_native::decode_first_order(schedule_requests)) {
     if (budget <= 0) break;
-    if (req->prompt_tokens.size() == req->ingested) continue;
-    budget -= add_contribution(batch, *req, budget);
-    contributors.push_back(req.get());
+    budget -= add_contribution(batch, *active[index], budget);
+    contributors.push_back(active[index].get());
   }
 
   if (contributors.empty()) {
@@ -1665,10 +1618,12 @@ int main() {
         if (type == "cancel") {
           const std::string target = message.value("id", "");
           for (auto& req : active) {
-            if (!req->done && (target.empty() || req->id == target)) req->cancelled = true;
+            if (!req->done && clap::llama_native::active_cancel_matches(target, req->id)) {
+              req->cancelled = true;
+            }
           }
           for (auto it = waiting.begin(); it != waiting.end(); ++it) {
-            if (!target.empty() && it->first == target) {
+            if (clap::llama_native::queued_cancel_matches(target, it->first)) {
               emit(target, json{{"done", true}, {"finish_reason", "cancel"}, {"cancelled", true}});
               waiting.erase(it);
               break;
