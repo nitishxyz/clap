@@ -1,32 +1,20 @@
 #include "llama.h"
 #include "active-concurrency.h"
 #include "cache-adapter.h"
-#include "clap/llama/cache-executor.h"
-#include "clap/llama/environment.h"
-#include "clap/llama/generation-stepper.h"
-#include "clap/llama/model-runtime.h"
-#include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
 #include "clap/llama/request-preparer.h"
 #include "clap/llama/request-state.h"
-#include "clap/llama/sampling.h"
-#include "clap/llama/stop-buffer.h"
-#include "clap/llama/telemetry.h"
+#include "clap/llama/worker-state.h"
 #include "native-characterization.h"
-#include "stable-boundary.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <cstdlib>
+#include <cstdio>
 #include <deque>
-#include <functional>
 #include <memory>
-#include <random>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,8 +22,6 @@ using json = nlohmann::json;
 
 namespace {
 
-using clap::llama::env_int;
-using clap::llama::env_u64;
 using clap::llama::emit;
 using clap::llama::emit_error;
 using clap::llama::make_sampler;
@@ -44,169 +30,7 @@ using clap::llama::StdinReader;
 using clap::llama::ActiveRequest;
 using clap::llama::CacheBackpressure;
 
-struct LoadedLlama {
-  clap::llama::ModelRuntime runtime;
-  int32_t max_active = 0;
-  clap::llama_active::Decision active_policy{};
-  std::string last_eviction_reason;
-  int32_t previous_max_active = 0;
-  std::string last_adjustment_reason;
-  std::string last_adjustment_at;
-  uint64_t retained_growth_reserve_bytes = 0;
-  uint64_t global_resident_memory_bytes = 0;
-  std::string pressure_state;
-  // KV cache slots: one llama sequence per slot so multiple concurrent
-  // sessions (agent loops, chats, side requests) each keep a warm prefix.
-  struct CacheSlot {
-    std::vector<llama_token> tokens;
-    uint64_t last_used = 0;
-    uint64_t coordinator_generation = 0;
-    bool busy = false;  // an active request is generating on this slot
-    bool is_anchor = false;  // holds a shared prefix snapshot, never generates
-  };
-  std::vector<CacheSlot> slots;
-  uint64_t use_counter = 0;
-  std::unique_ptr<clap::llama::CacheExecutor> cache_executor;
-  clap::llama_cache::Coordinator* coordinator = nullptr;
-};
-
-void unload(LoadedLlama& loaded) {
-  if (loaded.cache_executor) loaded.cache_executor->reset();
-  loaded.coordinator = nullptr;
-  loaded.cache_executor.reset();
-  loaded.slots.clear();
-  loaded.runtime.reset();
-  loaded.max_active = 0;
-  loaded.active_policy = {};
-  loaded.last_eviction_reason.clear();
-}
-
-void load_model(LoadedLlama& loaded, const std::string& model_path) {
-  if (loaded.runtime.same_path(model_path)) return;
-  unload(loaded);
-  loaded.runtime.load(model_path);
-  const int32_t n_ctx = loaded.runtime.backend_allocation_cap();
-  const int32_t retained_max = loaded.runtime.retained_max();
-  loaded.slots.assign(static_cast<std::size_t>(retained_max), {});
-  loaded.use_counter = 0;
-  loaded.active_policy = clap::llama_active::select({
-      env_int("CLAP_MAX_ACTIVE", 0), loaded.runtime.startup_available_bytes(),
-      loaded.runtime.model_file_bytes(),
-      static_cast<int>(std::max(1u, std::thread::hardware_concurrency())), n_ctx,
-      retained_max, loaded.runtime.hybrid(), loaded.runtime.has_encoder()});
-  loaded.max_active = loaded.active_policy.selected_max;
-  try {
-    clap::llama::CacheExecutorConfig config;
-    config.slot_count = static_cast<uint32_t>(retained_max);
-    config.logical_token_capacity = static_cast<uint64_t>(n_ctx);
-    config.max_anchors = static_cast<uint32_t>(retained_max);
-    config.hard_max_retained_entries = static_cast<uint32_t>(retained_max);
-    config.automatic_checkpoints = env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0;
-    config.checkpoint_minimum_tokens = static_cast<uint64_t>(
-        env_int("CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS", 2048));
-    config.checkpoint_interval_tokens = static_cast<uint64_t>(
-        env_int("CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS", 2048));
-    config.checkpoint_max = static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_MAX", 8));
-    config.checkpoint_budget_basis_points = static_cast<uint32_t>(
-        env_int("CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS", 2500));
-    config.checkpoint_budget_bytes = env_u64("CLAP_CACHE_CHECKPOINT_BUDGET_BYTES", 0);
-    loaded.cache_executor = std::make_unique<clap::llama::CacheExecutor>(
-        config, std::make_unique<clap::llama::LlamaPhysicalCacheBackend>(
-            loaded.runtime.context()));
-    loaded.coordinator = &loaded.cache_executor->coordinator();
-  } catch (const std::exception& error) {
-    loaded.coordinator = nullptr;
-    loaded.cache_executor.reset();
-    fprintf(stderr, "clap-llama: cache coordinator unavailable; using no-cache fresh mode: %s\n", error.what());
-  }
-}
-
-json retention_telemetry(const LoadedLlama& loaded, std::size_t active, std::size_t queued = 0) {
-  uint32_t retained_total = 0;
-  uint32_t retained_sessions = 0;
-  uint32_t retained_anchors = 0;
-  uint64_t evictions = 0;
-  if (loaded.cache_executor) {
-    const auto retention = loaded.cache_executor->retention_telemetry();
-    const auto telemetry = loaded.cache_executor->telemetry();
-    retained_total = retention.active_slots;
-    retained_sessions = retention.session_slots;
-    retained_anchors = retention.anchor_slots;
-    evictions = telemetry.evictions;
-  }
-  const clap::llama::RetentionTelemetrySnapshot snapshot{
-    loaded.max_active,
-    queued,
-    loaded.previous_max_active,
-    loaded.last_adjustment_reason,
-    loaded.last_adjustment_at,
-    loaded.retained_growth_reserve_bytes,
-    loaded.global_resident_memory_bytes,
-    loaded.pressure_state,
-    {
-      loaded.active_policy.mode,
-      loaded.active_policy.selected_max,
-      loaded.active_policy.backend_ceiling,
-      loaded.active_policy.hardware_ceiling,
-      loaded.active_policy.model_ceiling,
-      loaded.active_policy.memory_ceiling,
-      loaded.active_policy.reason,
-      loaded.runtime.startup_available_bytes(),
-      loaded.runtime.model_file_bytes(),
-      loaded.runtime.backend_allocation_cap(),
-      loaded.active_policy.context_ceiling,
-      loaded.active_policy.per_active_reserve_cells,
-      loaded.active_policy.per_active_reserve_bytes,
-      std::max(1u, std::thread::hardware_concurrency()),
-      loaded.runtime.hybrid(),
-    },
-    active,
-    retained_total,
-    retained_sessions,
-    retained_anchors,
-    loaded.runtime.retained_max(),
-    loaded.last_eviction_reason,
-    evictions,
-    loaded.runtime.backend_allocation_cap(),
-  };
-  return clap::llama::serialize_retention_telemetry(snapshot);
-}
-
-const std::string& telemetry_key() {
-  static const std::string key = [] {
-    if (const char* installed = std::getenv("CLAP_TELEMETRY_HMAC_KEY"); installed && *installed) {
-      return std::string(installed);
-    }
-    std::random_device random;
-    std::ostringstream out;
-    for (int index = 0; index < 8; ++index) out << std::hex << random();
-    return out.str();
-  }();
-  return key;
-}
-
-template <typename Token>
-std::string token_fingerprint(const std::vector<Token>& tokens, std::size_t count) {
-  count = std::min(count, tokens.size());
-  std::ostringstream encoded;
-  encoded << telemetry_key() << "|tokens-v1|" << count << '|';
-  for (std::size_t index = 0; index < count; ++index) {
-    const uint32_t token = static_cast<uint32_t>(tokens[index]);
-    encoded.write(reinterpret_cast<const char*>(&token), sizeof(token));
-  }
-  const std::string material = encoded.str();
-  std::ostringstream result;
-  for (int domain = 0; domain < 4; ++domain) {
-    result << std::hex << clap::llama_cache::hash(std::to_string(domain) + material);
-  }
-  return result.str();
-}
-
-
-void emit_completion(LoadedLlama& loaded, const clap::llama::RequestCompletion& completion) {
-  if (completion.released_slot >= 0) {
-    loaded.slots[static_cast<std::size_t>(completion.released_slot)].busy = false;
-  }
+void emit_completion(const clap::llama::RequestCompletion& completion) {
   const auto& facts = completion.cache;
   json cache{
     {"hit", facts.hit},
@@ -258,13 +82,7 @@ void emit_completion(LoadedLlama& loaded, const clap::llama::RequestCompletion& 
   });
 }
 
-void emit_failure(LoadedLlama& loaded, const clap::llama::RequestFailure& failure) {
-  if (failure.invalidated_slot >= 0) {
-    auto& slot = loaded.slots[static_cast<std::size_t>(failure.invalidated_slot)];
-    slot.busy = false;
-    slot.tokens.clear();
-    slot.coordinator_generation = failure.generation;
-  }
+void emit_failure(const clap::llama::RequestFailure& failure) {
   if (!failure.invalidation_error.empty()) {
     fprintf(stderr, "clap-llama: cache failure invalidation failed: %s\n",
             failure.invalidation_error.c_str());
@@ -272,14 +90,14 @@ void emit_failure(LoadedLlama& loaded, const clap::llama::RequestFailure& failur
   if (failure.code.empty()) emit_error(failure.id, failure.message);
   else emit(failure.id, json{{"error", failure.message}, {"code", failure.code}});
 }
-void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& active) {
+
+void step(clap::llama::WorkerState& worker,
+          std::vector<std::unique_ptr<ActiveRequest>>& active) {
   for (auto& req : active) {
     if (!req->done && req->cancelled) {
       req->finish_reason = "cancel";
-      auto completion = req->complete(false, [](const auto& tokens, std::size_t count) {
-        return token_fingerprint(tokens, count);
-      });
-      if (completion) emit_completion(loaded, *completion);
+      auto completion = worker.complete(*req, false);
+      if (completion) emit_completion(*completion);
     }
   }
 
@@ -300,13 +118,7 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
     ordered.push_back(active[index].get());
   }
 
-  clap::llama::GenerationStepper stepper(
-      loaded.runtime, loaded.cache_executor.get(), [](const auto& tokens, std::size_t count) {
-        return token_fingerprint(tokens, count);
-      });
-  const auto events = stepper.step(ordered,
-      static_cast<int32_t>(llama_n_batch(loaded.runtime.context())), active.size() == 1);
-  for (const auto& event : events) {
+  for (const auto& event : worker.step(ordered, active.size() == 1)) {
     auto& req = *event.request;
     switch (event.type) {
       case clap::llama::GenerationEvent::Type::Token:
@@ -316,85 +128,21 @@ void step(LoadedLlama& loaded, std::vector<std::unique_ptr<ActiveRequest>>& acti
         emit(req.id, json{{"prefill", {{"done", event.done}, {"total", event.total}}}});
         break;
       case clap::llama::GenerationEvent::Type::Complete:
-        if (event.completion) emit_completion(loaded, *event.completion);
+        if (event.completion) emit_completion(*event.completion);
         break;
       case clap::llama::GenerationEvent::Type::Failure:
-        if (event.failure) emit_failure(loaded, *event.failure);
+        if (event.failure) emit_failure(*event.failure);
         break;
-      case clap::llama::GenerationEvent::Type::CacheAppend: {
-        auto& slot = loaded.slots[event.slot];
-        slot.tokens.insert(slot.tokens.end(), event.tokens.begin(), event.tokens.end());
-        slot.coordinator_generation = event.generation;
+      default:
         break;
-      }
-      case clap::llama::GenerationEvent::Type::CacheResetSlot: {
-        auto& slot = loaded.slots[event.slot];
-        if (event.clear) slot.tokens.clear();
-        slot.coordinator_generation = event.generation;
-        break;
-      }
-      case clap::llama::GenerationEvent::Type::CacheResetAll:
-        for (auto& slot : loaded.slots) {
-          slot.tokens.clear();
-          slot.is_anchor = false;
-        }
-        loaded.slots[static_cast<std::size_t>(req.seq)].coordinator_generation =
-            req.cache_lease.generation();
-        break;
-      case clap::llama::GenerationEvent::Type::CacheAnchor: {
-        if (event.anchor && event.slot < loaded.slots.size()) {
-          auto& anchor = loaded.slots[event.slot];
-          anchor.tokens = event.tokens;
-          anchor.is_anchor = true;
-          anchor.last_used = ++loaded.use_counter;
-          anchor.coordinator_generation = event.generation;
-        }
-        for (const uint32_t victim : event.eviction_slots) {
-          if (victim != event.slot && victim < loaded.slots.size()) loaded.slots[victim] = {};
-          loaded.last_eviction_reason = "hard_ceiling";
-        }
-        break;
-      }
     }
   }
-}
-
-std::unique_ptr<ActiveRequest> prepare_request(LoadedLlama& loaded, const std::string& id, const json& request) {
-  std::vector<clap::llama::RequestSlotState> slots;
-  slots.reserve(loaded.slots.size());
-  for (const auto& slot : loaded.slots) {
-    slots.push_back({slot.tokens, slot.coordinator_generation, slot.busy, slot.is_anchor});
-  }
-  clap::llama::RequestPreparer preparer(
-      loaded.runtime, loaded.cache_executor.get(), std::move(slots), telemetry_key(),
-      [](const auto& tokens, std::size_t count) { return token_fingerprint(tokens, count); });
-  auto prepared = preparer.prepare(id, request);
-  const std::size_t target = static_cast<std::size_t>(prepared.sequence);
-  if (loaded.runtime.has_encoder()) {
-    for (auto& slot : loaded.slots) slot = {};
-  }
-  for (const uint32_t victim : prepared.cache_evicted_slots) {
-    if (victim != target && victim < loaded.slots.size()) loaded.slots[victim] = {};
-    loaded.last_eviction_reason = "hard_ceiling";
-  }
-  if (target < loaded.slots.size()) {
-    auto& slot = loaded.slots[target];
-    slot.tokens.assign(prepared.full_prompt_tokens.begin(),
-        prepared.full_prompt_tokens.begin() + prepared.initial_position);
-    slot.coordinator_generation = prepared.cache_target_generation;
-    slot.last_used = ++loaded.use_counter;
-    slot.busy = true;
-    slot.is_anchor = false;
-  }
-  auto active = std::make_unique<ActiveRequest>(std::move(prepared));
-  active->sampler.reset(make_sampler(active->params));
-  return active;
 }
 
 }  // namespace
 
 int main() {
-  LoadedLlama loaded;
+  clap::llama::WorkerState worker;
   std::vector<std::unique_ptr<ActiveRequest>> active;
   std::deque<std::pair<std::string, json>> waiting;
 
@@ -435,49 +183,44 @@ int main() {
         }
         if (type == "set_max_active") {
           const int requested = message.value("max_active", 0);
-          if (requested <= 0) throw std::runtime_error("set_max_active.max_active must be positive");
-          const int previous = loaded.max_active;
-          loaded.max_active = std::max(1, std::min({requested,
-              loaded.active_policy.backend_ceiling, loaded.active_policy.hardware_ceiling,
-              loaded.active_policy.model_ceiling, loaded.active_policy.context_ceiling}));
-          loaded.active_policy.selected_max = loaded.max_active;
-          loaded.previous_max_active = message.value("previous_max_active", previous);
-          loaded.active_policy.reason = message.value("limiting_reason", loaded.active_policy.reason);
-          loaded.last_adjustment_reason = message.value("last_adjustment_reason", "");
-          loaded.last_adjustment_at = message.value("last_adjustment_at", "");
-          loaded.retained_growth_reserve_bytes = message.value("retained_growth_reserve_bytes", UINT64_C(0));
-          loaded.global_resident_memory_bytes = message.value("global_resident_memory_bytes", UINT64_C(0));
-          loaded.pressure_state = message.value("pressure_state", "");
-          emit(id, json{{"done", true}, {"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+          worker.set_max_active({requested,
+              message.value("previous_max_active", worker.max_active()),
+              message.value("limiting_reason", ""),
+              message.value("last_adjustment_reason", ""),
+              message.value("last_adjustment_at", ""),
+              message.value("retained_growth_reserve_bytes", UINT64_C(0)),
+              message.value("global_resident_memory_bytes", UINT64_C(0)),
+              message.value("pressure_state", "")});
+          emit(id, json{{"done", true}, {"retention", worker.retention(active.size(), waiting.size())}});
           return true;
         }
         if (type == "unload") {
           if (!active.empty()) throw std::runtime_error("cannot unload while requests are active");
-          unload(loaded);
+          worker.unload();
           emit(id, json{{"unloaded", true}, {"done", true}});
           return true;
         }
         if (type == "load") {
           const std::string model = message.value("model", "");
           if (model.empty()) throw std::runtime_error("load.model is required");
-          if (!active.empty() && loaded.runtime.loaded() && loaded.runtime.model_path() != model) {
+          if (!active.empty() && worker.loaded() && !worker.same_path(model)) {
             throw std::runtime_error("cannot switch models while requests are active");
           }
-          load_model(loaded, model);
-          const int32_t effective = loaded.runtime.backend_allocation_cap();
+          worker.load(model);
+          const int32_t effective = worker.effective_context_window();
           emit(id, json{{"loaded", true}, {"done", true}, {"token_capabilities", {
-            {"model_context_window", loaded.runtime.model_context_window() > 0 ? json(loaded.runtime.model_context_window()) : json(nullptr)},
+            {"model_context_window", worker.model_context_window() > 0 ? json(worker.model_context_window()) : json(nullptr)},
             {"effective_context_window", effective},
             {"max_input_tokens", std::max(0, effective - 1)},
-            {"max_output_tokens", loaded.runtime.max_output_tokens() > 0 ? json(loaded.runtime.max_output_tokens()) : json(nullptr)},
-            {"backend_allocation_cap", loaded.runtime.backend_allocation_cap()},
-            {"user_configured_override", loaded.runtime.context_override() > 0 ? json(loaded.runtime.context_override()) : json(nullptr)},
-          }}, {"retention", retention_telemetry(loaded, active.size())}});
+            {"max_output_tokens", worker.max_output_tokens() > 0 ? json(worker.max_output_tokens()) : json(nullptr)},
+            {"backend_allocation_cap", worker.effective_context_window()},
+            {"user_configured_override", worker.context_override() > 0 ? json(worker.context_override()) : json(nullptr)},
+          }}, {"retention", worker.retention(active.size())}});
           return true;
         }
         // Anything else is a chat request; it queues until a slot frees up.
         waiting.emplace_back(id, message);
-        emit("", json{{"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+        emit("", json{{"retention", worker.retention(active.size(), waiting.size())}});
         return true;
       } catch (const RequestError& error) {
         emit_error(id, error.what(), error.code);
@@ -510,24 +253,24 @@ int main() {
           continue;
         }
         // Drain in-flight requests before switching models.
-        if (!active.empty() && loaded.runtime.loaded() && loaded.runtime.model_path() != req_model) break;
+        if (!active.empty() && worker.loaded() && !worker.same_path(req_model)) break;
         try {
-          load_model(loaded, req_model);
+          worker.load(req_model);
         } catch (const std::exception& error) {
           emit_error(waiting.front().first, error.what());
           waiting.pop_front();
           continue;
         }
-        if (loaded.runtime.has_encoder() && !active.empty()) break;
+        if (worker.has_encoder() && !active.empty()) break;
         if (!clap::llama_cache::can_admit(active.size(),
-                                          static_cast<uint32_t>(loaded.max_active))) break;
+                                          static_cast<uint32_t>(worker.max_active()))) break;
         auto [wid, wreq] = std::move(waiting.front());
         waiting.pop_front();
         try {
-          auto prepared = prepare_request(loaded, wid, wreq);
+          auto prepared = worker.prepare(wid, wreq);
           active.push_back(std::move(prepared));
           emit(wid, json{{"started", true},
-                         {"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+                         {"retention", worker.retention(active.size(), waiting.size())}});
         } catch (const CacheBackpressure&) {
           waiting.emplace_front(std::move(wid), std::move(wreq));
           break;
@@ -539,13 +282,13 @@ int main() {
       }
 
       if (!active.empty()) {
-        step(loaded, active);
+        step(worker, active);
         const std::size_t before_cleanup = active.size();
         active.erase(
           std::remove_if(active.begin(), active.end(), [](const std::unique_ptr<ActiveRequest>& r) { return r->done; }),
           active.end());
         if (active.size() != before_cleanup) {
-          emit("", json{{"retention", retention_telemetry(loaded, active.size(), waiting.size())}});
+          emit("", json{{"retention", worker.retention(active.size(), waiting.size())}});
         }
       }
     }
@@ -554,17 +297,15 @@ int main() {
       if (!req->done) {
         req->finish_reason = "cancel";
         req->cancelled = true;
-        auto completion = req->complete(false, [](const auto& tokens, std::size_t count) {
-          return token_fingerprint(tokens, count);
-        });
-        if (completion) emit_completion(loaded, *completion);
+        auto completion = worker.complete(*req, false);
+        if (completion) emit_completion(*completion);
       }
     }
-    unload(loaded);
+    worker.unload();
     return 0;
   } catch (const std::exception& error) {
     emit_error("", error.what());
-    unload(loaded);
+    worker.unload();
     return 1;
   }
 }
