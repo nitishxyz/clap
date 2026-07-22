@@ -22,6 +22,7 @@ export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type Worker
 export { classifyWorkerCrash, classifyWorkerExit, classifyWorkerExitPhase, type WorkerExitClassification,
   type WorkerExitPhase } from "./process/crash-classification";
 export { mapWorkerResultPayload, mapWorkerTelemetryPayload } from "./process/result-mapper";
+export * from "./residency";
 
 export function listBackends() {
   return [llamaBackendStatus(), mlxBackendStatus()];
