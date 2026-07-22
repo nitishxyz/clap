@@ -30,6 +30,8 @@ const swiftCoordinator = /\b(?:cacheCoordinator|coordinator)\s*\??\s*\.\s*(?:pla
 const swiftRegistry = /\b(?:retainedRegistry|registry)\s*\.\s*(?:register|activate|release|validateEvictions|reconcileEvictions)\s*\(/g;
 const swiftGenerationPrimitive = /\b(?:TokenIterator|LMInput)\s*\(|\bdetokenizer\s*\.\s*(?:append|next)\s*\(|\bStopSequencePolicy\s*\.\s*scan\s*\(/g;
 const swiftGenerationLoop = /\bwhile\s+steps\s*<|\b(?:prefill|decode)StartedNs\b/g;
+const swiftMainSchedulerOwnership = /\b(?:pendingChats|schedulerCore)\b|\bLatencyScheduler\s*\.\s*round\s*\(|\bstate\s*\.\s*(?:prepareRequest|step|finalize)\s*\(/g;
+const swiftQueueDeclaration = /\bvar\s+(?:active|pendingChats)\s*(?::|=)/g;
 
 for await (const path of new Bun.Glob("native/mlx/Sources/**/*.swift").scan({ cwd: root })) {
   if (path.startsWith("native/mlx/Sources/ClapMLXCache/")) continue;
@@ -45,6 +47,14 @@ reportMatches(swiftMain, swiftMainText, swiftGenerationPrimitive,
   "direct MLX generation operation");
 reportMatches(swiftMain, swiftMainText, swiftGenerationLoop,
   "mutable generation loop");
+reportMatches(swiftMain, swiftMainText, swiftMainSchedulerOwnership,
+  "direct inference scheduling operation");
+
+for await (const path of new Bun.Glob("native/mlx/Sources/clap-mlx/**/*.swift").scan({ cwd: root })) {
+  if (path.startsWith("native/mlx/Sources/clap-mlx/Scheduling/")) continue;
+  const text = await Bun.file(resolve(root, path)).text();
+  reportMatches(path, text, swiftQueueDeclaration, "inference queue declaration");
+}
 
 if (violations.length > 0) {
   console.error("Native ownership check failed:");

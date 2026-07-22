@@ -45,12 +45,21 @@ func main() async {
 
     let decodeStepsPerPass = 6
 
-    typealias ActiveRequest = MLXActiveRequest
-
-    var active: [ActiveRequest] = []
-    var pendingChats: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
     var controlBacklog: [String] = []
-    let schedulerCore = WorkerScheduler<ControlRequest, ActiveRequest>()
+    let scheduler = ExecutableWorkerScheduler()
+
+    func emitSchedulingEvents(_ events: [WorkerSchedulingEvent]) {
+      for event in events {
+        switch event {
+        case .started(let id): emit(id: id, started: true)
+        case .pendingCancelled(let id):
+          emit(id: id, done: true, cancelled: true, finishReason: "cancel",
+            usage: nil, cache: nil)
+        case .queueChanged(let count):
+          emit(retention: state.retentionSnapshot(queued: count))
+        }
+      }
+    }
 
     // Returns true when the worker should shut down.
     func handleLine(_ line: String) async -> Bool {
@@ -60,34 +69,13 @@ func main() async {
       let type = control.type ?? "chat"
 
       if type == "shutdown" {
-        for req in active {
-          req.cancelled = true
-          state.finalize(req)
-        }
-        active.removeAll()
-        for pending in pendingChats {
-          emit(id: pending.id, done: true, cancelled: true, finishReason: "cancel", usage: nil, cache: nil)
-        }
-        pendingChats.removeAll()
+        emitSchedulingEvents(scheduler.shutdown(using: state))
         emit(id: id, done: true)
         return true
       }
 
       if type == "cancel" {
-        let target = control.id
-        for req in active where RequestCancellationPolicy.matches(
-          target: target, requestID: req.id) {
-          req.cancelled = true
-        }
-        var remaining: [(id: String?, control: ControlRequest, data: Data, receivedNs: UInt64)] = []
-        for pending in pendingChats {
-          if RequestCancellationPolicy.matches(target: target, requestID: pending.id) {
-            emit(id: pending.id, done: true, cancelled: true, finishReason: "cancel", usage: nil, cache: nil)
-          } else {
-            remaining.append(pending)
-          }
-        }
-        pendingChats = remaining
+        emitSchedulingEvents(scheduler.cancel(target: control.id))
         return false
       }
 
@@ -97,13 +85,14 @@ func main() async {
           return false
         }
         state.updateMaxActive(requested, control: control)
-        emit(id: id, done: true, retention: state.retentionSnapshot(queued: pendingChats.count))
+        emit(id: id, done: true,
+          retention: state.retentionSnapshot(queued: scheduler.queuedCount))
         return false
       }
 
       if type == "unload" || type == "load" {
         // Model mutations wait until in-flight requests drain.
-        if !active.isEmpty || !pendingChats.isEmpty {
+        if !scheduler.isEmpty {
           controlBacklog.append(line)
           return false
         }
@@ -132,16 +121,15 @@ func main() async {
         return false
       }
 
-      pendingChats.append((id: id, control: control, data: data,
+      emitSchedulingEvents(scheduler.enqueue(id: id, control: control, data: data,
         receivedNs: DispatchTime.now().uptimeNanoseconds))
-      emit(retention: state.retentionSnapshot(queued: pendingChats.count))
       return false
     }
 
     mainLoop: while true {
       // Idle: block on input (or drain deferred control work) instead of
       // spinning; busy: poll without blocking so generation keeps stepping.
-      if active.isEmpty && pendingChats.isEmpty {
+      if scheduler.isEmpty {
         if !controlBacklog.isEmpty {
           let line = controlBacklog.removeFirst()
           if await handleLine(line) { break mainLoop }
@@ -154,58 +142,11 @@ func main() async {
         if await handleLine(line) { break mainLoop }
       }
 
-      // Admit pending chats up to the parallel limit. Requests for a
-      // different model wait until the current model's requests drain.
-      while active.count < state.maxActive, !pendingChats.isEmpty {
-        if state.retainedRegistry.count >= state.retentionConfig.hardCeiling &&
-           state.kvSlots.allSatisfy(\.busy) { break }
-        let candidate = pendingChats[0]
-        let needsLoad = state.modelRuntime.modelIdentifier != candidate.control.model
-          || !state.modelRuntime.isLoaded
-        if needsLoad && !active.isEmpty { break }
-        pendingChats.removeFirst()
-        emit(id: candidate.id, started: true)
-        let admissionOrder = schedulerCore.reserveAdmissionOrder()
-        switch await state.prepareRequest(id: candidate.id, control: candidate.control,
-          data: candidate.data, receivedNs: candidate.receivedNs,
-          admissionOrder: admissionOrder) {
-        case .admitted(let request):
-          active.append(request)
-          state.allocatorNeedsIdleClear = true
-          emit(retention: state.retentionSnapshot(queued: pendingChats.count))
-        case .backpressured:
-          pendingChats.insert(candidate, at: 0)
-          break
-        case .rejected:
-          break
-        }
-      }
-
-      // Every runnable request gets one bounded Metal turn per round. Short
-      // not-yet-emitting requests run first, while all requests remain present
-      // exactly once so the priority boost cannot starve long prefills.
-      let schedule = LatencyScheduler.round(active.map { request in
-        LatencySchedulerRequest(
-          id: String(request.admissionOrder), admissionOrder: request.admissionOrder,
-          residualPrefillTokens: max(0, request.suffix.count - request.pos),
-          decoding: request.iterator != nil, emittedFirstToken: request.emitted > 0,
-          cancelled: request.cancelled)
-      })
-      for turn in schedule {
-        if let request = active.first(where: { String($0.admissionOrder) == turn.id }) {
-          for _ in 0..<turn.turns where !request.completed && !request.cancelled && !request.failed {
-            state.step(request, prefillQuantum: turn.prefillQuantum,
-              decodeLimit: decodeStepsPerPass)
-          }
-        }
-      }
-      for request in active where request.completed || request.cancelled || request.failed {
-        state.finalize(request)
-      }
-      active.removeAll { $0.completed || $0.cancelled || $0.failed }
-      state.clearAllocatorIfIdle(activeEmpty: active.isEmpty,
-        pendingEmpty: pendingChats.isEmpty)
-      if !pendingChats.isEmpty {
+      emitSchedulingEvents(await scheduler.admit(using: state))
+      scheduler.runRound(using: state, decodeLimit: decodeStepsPerPass)
+      state.clearAllocatorIfIdle(activeEmpty: scheduler.activeIsEmpty,
+        pendingEmpty: scheduler.pendingIsEmpty)
+      if !scheduler.pendingIsEmpty {
         try? await Task.sleep(nanoseconds: 10_000_000)
       }
     }
