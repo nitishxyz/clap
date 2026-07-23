@@ -4,6 +4,7 @@ export * from "./native";
 export * from "./plain";
 export * from "./reasoning";
 export { selectRegisteredParser } from "./registry";
+export * from "./stream-state";
 export { inferParserFamilies, resolveParserTemplateInfo } from "./traits";
 export * from "./tool-arguments";
 export type * from "./types";

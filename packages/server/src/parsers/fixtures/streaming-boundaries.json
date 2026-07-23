@@ -1,0 +1,58 @@
+[
+  {
+    "name": "think tags and utf8",
+    "input": "before<think>réason 🧠</think>after",
+    "options": { "toolMode": false },
+    "content": "before\nafter",
+    "reasoning": "réason 🧠",
+    "state": "content"
+  },
+  {
+    "name": "harmony channels",
+    "input": "<|channel|>analysis\nmémo<|channel|>final\nanswer",
+    "options": { "toolMode": false },
+    "content": "answer",
+    "reasoning": "mémo",
+    "state": "content"
+  },
+  {
+    "name": "native tagged tool marker",
+    "input": "visible<tool_call>{\"name\":\"search\"}</tool_call>",
+    "options": { "toolMode": true },
+    "content": "visible",
+    "reasoning": "",
+    "state": "suppressed_tool"
+  },
+  {
+    "name": "partial xml tool marker",
+    "input": "visible<function=search><parameter=q>docs",
+    "options": { "toolMode": true },
+    "content": "visible",
+    "reasoning": "",
+    "state": "suppressed_tool"
+  },
+  {
+    "name": "json tool marker",
+    "input": "visible{\"tool_calls\":[{\"name\":\"search\"}]}",
+    "options": { "toolMode": true },
+    "content": "visible",
+    "reasoning": "",
+    "state": "suppressed_tool"
+  },
+  {
+    "name": "quotes backslashes and braces remain plain",
+    "input": "UTF-8 café 🐚 says {\\\"path\\\":\\\"C:\\\\\\\\tmp\\\"}",
+    "options": { "toolMode": false },
+    "content": "UTF-8 café 🐚 says {\\\"path\\\":\\\"C:\\\\\\\\tmp\\\"}",
+    "reasoning": "",
+    "state": "content"
+  },
+  {
+    "name": "overlapping stops choose configured first match",
+    "input": "keepEND!leak",
+    "options": { "toolMode": false, "stops": ["END", "END!"] },
+    "content": "keep",
+    "reasoning": "",
+    "state": "stopped"
+  }
+]

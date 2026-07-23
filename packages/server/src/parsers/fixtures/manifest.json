@@ -6,6 +6,7 @@
     "plain-text.json",
     "qwen-template-tool.json",
     "reasoning.json",
+    "streaming-boundaries.json",
     "xml-partial.json"
   ]
 }
