@@ -82,6 +82,30 @@ describe("critical pressure eviction", () => {
     })).toBeUndefined();
     expect(calls).toBe(0);
   });
+
+  test("propagates shutdown and resample failures without trying another victim", async () => {
+    let attempts = 0;
+    await expect(evictOneIdleForCriticalPressure({
+      lifecycle: {
+        snapshotForResidency: () => [pressureSnapshot("victim"), pressureSnapshot("other")],
+        tryEvictIdle: async () => { attempts += 1; throw new Error("shutdown failed"); },
+        setResidencyTransition: () => {}, clearResidencyTransition: () => {},
+      },
+    })).rejects.toThrow("shutdown failed");
+    expect(attempts).toBe(1);
+
+    const order: string[] = [];
+    await expect(evictOneIdleForCriticalPressure({
+      lifecycle: {
+        snapshotForResidency: () => [pressureSnapshot("victim")],
+        tryEvictIdle: async () => { order.push("shutdown"); return "evicted"; },
+        setResidencyTransition: () => {}, clearResidencyTransition: () => {},
+      },
+      onEvicted: () => { order.push("event"); },
+      resample: () => { order.push("resample"); throw new Error("resample failed"); },
+    })).rejects.toThrow("resample failed");
+    expect(order).toEqual(["shutdown", "event", "resample"]);
+  });
 });
 
 describe("worker retention telemetry", () => {

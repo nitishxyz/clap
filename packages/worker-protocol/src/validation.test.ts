@@ -92,6 +92,12 @@ describe("worker protocol validation", () => {
       estimated_retained_bytes: 1, estimated_retained_bytes_source: "estimated",
       estimated_retained_bytes_basis: "runtime_allocator",
     } }))).toThrow(ProtocolValidationError);
+    for (const retention of [
+      { retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "cache_components" },
+      { retained_bytes: 1, retained_bytes_source: "estimated", retained_bytes_basis: "not_observed" },
+      { retained_bytes: null, retained_bytes_source: "estimated", retained_bytes_basis: "cache_components" },
+      { retained_bytes: 1, retained_bytes_source: "unavailable", retained_bytes_basis: "not_observed" },
+    ]) expect(() => decodeWorkerEvent(event({ retention }))).toThrow(ProtocolValidationError);
   });
 
   test("requires a strict opaque cache identity on generate requests", () => {
