@@ -46,10 +46,11 @@ int main() {
     const auto events = lines(output.str());
     assert(events.size() == 3);
     assert(events[0]["type"] == "ready");
-    assert(events[0]["structured_output"] == nlohmann::json({
-        {"json_object", "native"}, {"json_schema", "native"},
-        {"post_validation", true}, {"max_schema_bytes", 65536},
-    }));
+    assert(events[0]["worker_capabilities"]["backend"] == "llama");
+    assert(events[0]["worker_capabilities"]["scheduling"] == nlohmann::json({
+        {"fused_multi_sequence_batching", true}, {"interleaved", true}}));
+    assert(events[0]["model_capabilities"].is_null());
+    assert(!events[0].contains("structured_output"));
     assert(!events[0].contains("request_id"));
     assert(events[1] == nlohmann::json({{"protocol", 1}, {"type", "accepted"},
         {"request_id", "req_shutdown"}, {"sequence", 0}}));

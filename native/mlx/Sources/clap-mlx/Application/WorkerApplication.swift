@@ -1,4 +1,5 @@
 import ClapMLXModel
+import ClapMLXWorkerCore
 import Foundation
 
 func debugLog(_ message: String) {
@@ -137,8 +138,18 @@ final class WorkerApplication {
       }
       let capabilities = state.modelRuntime.tokenCapabilities.workerEvent(
         contextOverride: state.contextOverride)
+      let effectiveCapabilities: [String: Any] = [
+        "cache": ["partial_suffix_trim": false, "partial_prefix_branch": false,
+          "whole_state_copy": true, "prompt_boundary_snapshots": true,
+          "quantized_kv": state.kvBits != nil],
+        "generation": ["structured_output": ["json_object": "post_validate",
+          "json_schema": "post_validate", "post_validation": true,
+          "max_schema_bytes": structuredOutputMaxSchemaBytes], "tool_templates": true],
+        "modalities": ["input": ["text"], "output": ["text"]],
+      ]
       if let id {
         completeV1Command(id, result: ["kind": "loaded", "model": model,
+          "effective_model_capabilities": effectiveCapabilities,
           "token_capabilities": v1JSONObject(capabilities)])
       }
     } catch {

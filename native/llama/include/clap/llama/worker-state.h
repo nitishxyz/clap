@@ -45,6 +45,7 @@ class WorkerState {
   int32_t model_context_window() const noexcept { return runtime_.model_context_window(); }
   int32_t max_output_tokens() const noexcept { return runtime_.max_output_tokens(); }
   int32_t context_override() const noexcept { return runtime_.context_override(); }
+  const std::string& kv_format() const noexcept { return runtime_.kv_format(); }
   int32_t retained_capacity() const noexcept { return runtime_.retained_max(); }
 
   void load(const std::string& model_path);

@@ -189,6 +189,40 @@ export const ModelTokenCapabilitiesSchema = z.object({
   userConfiguredOverride: z.number().int().positive().nullable(),
 });
 
+export const StructuredOutputCapabilitiesSchema = z.object({
+  json_object: z.enum(["native", "post_validate", "unsupported"]),
+  json_schema: z.enum(["native", "post_validate", "unsupported"]),
+  post_validation: z.boolean(),
+  max_schema_bytes: z.number().int().nonnegative(),
+}).strict();
+
+export const WorkerCapabilitiesSchema = z.object({
+  backend: z.enum(["llama", "mlx"]),
+  streaming: z.boolean(),
+  scheduling: z.object({
+    fused_multi_sequence_batching: z.boolean(),
+    interleaved: z.boolean(),
+  }).strict(),
+}).strict();
+
+export const EffectiveModelCapabilitiesSchema = z.object({
+  cache: z.object({
+    partial_suffix_trim: z.boolean(),
+    partial_prefix_branch: z.boolean(),
+    whole_state_copy: z.boolean(),
+    prompt_boundary_snapshots: z.boolean(),
+    quantized_kv: z.boolean(),
+  }).strict(),
+  generation: z.object({
+    structured_output: StructuredOutputCapabilitiesSchema,
+    tool_templates: z.boolean(),
+  }).strict(),
+  modalities: z.object({
+    input: z.tuple([z.literal("text")]),
+    output: z.tuple([z.literal("text")]),
+  }).strict(),
+}).strict();
+
 export const LoadedModelSchema = z.object({
   key: z.string(),
   id: z.string(),
@@ -292,6 +326,8 @@ export const LoadedModelSchema = z.object({
       evictionCount: z.number().int().nonnegative(),
     }).optional(),
     tokenCapabilities: ModelTokenCapabilitiesSchema.optional(),
+    workerCapabilities: WorkerCapabilitiesSchema.optional(),
+    effectiveModelCapabilities: EffectiveModelCapabilitiesSchema.optional(),
   }),
 });
 

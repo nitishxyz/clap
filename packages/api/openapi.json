@@ -1214,6 +1214,162 @@
                         "backendAllocationCap",
                         "userConfiguredOverride"
                       ]
+                    },
+                    "workerCapabilities": {
+                      "type": "object",
+                      "properties": {
+                        "backend": {
+                          "type": "string",
+                          "enum": [
+                            "llama",
+                            "mlx"
+                          ]
+                        },
+                        "streaming": {
+                          "type": "boolean"
+                        },
+                        "scheduling": {
+                          "type": "object",
+                          "properties": {
+                            "fused_multi_sequence_batching": {
+                              "type": "boolean"
+                            },
+                            "interleaved": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "fused_multi_sequence_batching",
+                            "interleaved"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "backend",
+                        "streaming",
+                        "scheduling"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "effectiveModelCapabilities": {
+                      "type": "object",
+                      "properties": {
+                        "cache": {
+                          "type": "object",
+                          "properties": {
+                            "partial_suffix_trim": {
+                              "type": "boolean"
+                            },
+                            "partial_prefix_branch": {
+                              "type": "boolean"
+                            },
+                            "whole_state_copy": {
+                              "type": "boolean"
+                            },
+                            "prompt_boundary_snapshots": {
+                              "type": "boolean"
+                            },
+                            "quantized_kv": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "partial_suffix_trim",
+                            "partial_prefix_branch",
+                            "whole_state_copy",
+                            "prompt_boundary_snapshots",
+                            "quantized_kv"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "generation": {
+                          "type": "object",
+                          "properties": {
+                            "structured_output": {
+                              "type": "object",
+                              "properties": {
+                                "json_object": {
+                                  "type": "string",
+                                  "enum": [
+                                    "native",
+                                    "post_validate",
+                                    "unsupported"
+                                  ]
+                                },
+                                "json_schema": {
+                                  "type": "string",
+                                  "enum": [
+                                    "native",
+                                    "post_validate",
+                                    "unsupported"
+                                  ]
+                                },
+                                "post_validation": {
+                                  "type": "boolean"
+                                },
+                                "max_schema_bytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "json_object",
+                                "json_schema",
+                                "post_validation",
+                                "max_schema_bytes"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "tool_templates": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "structured_output",
+                            "tool_templates"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "modalities": {
+                          "type": "object",
+                          "properties": {
+                            "input": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text"
+                                ]
+                              },
+                              "minItems": 1,
+                              "maxItems": 1
+                            },
+                            "output": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text"
+                                ]
+                              },
+                              "minItems": 1,
+                              "maxItems": 1
+                            }
+                          },
+                          "required": [
+                            "input",
+                            "output"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "cache",
+                        "generation",
+                        "modalities"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -1861,6 +2017,162 @@
                       "backendAllocationCap",
                       "userConfiguredOverride"
                     ]
+                  },
+                  "workerCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "backend": {
+                        "type": "string",
+                        "enum": [
+                          "llama",
+                          "mlx"
+                        ]
+                      },
+                      "streaming": {
+                        "type": "boolean"
+                      },
+                      "scheduling": {
+                        "type": "object",
+                        "properties": {
+                          "fused_multi_sequence_batching": {
+                            "type": "boolean"
+                          },
+                          "interleaved": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "fused_multi_sequence_batching",
+                          "interleaved"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "backend",
+                      "streaming",
+                      "scheduling"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "effectiveModelCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "cache": {
+                        "type": "object",
+                        "properties": {
+                          "partial_suffix_trim": {
+                            "type": "boolean"
+                          },
+                          "partial_prefix_branch": {
+                            "type": "boolean"
+                          },
+                          "whole_state_copy": {
+                            "type": "boolean"
+                          },
+                          "prompt_boundary_snapshots": {
+                            "type": "boolean"
+                          },
+                          "quantized_kv": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "partial_suffix_trim",
+                          "partial_prefix_branch",
+                          "whole_state_copy",
+                          "prompt_boundary_snapshots",
+                          "quantized_kv"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "generation": {
+                        "type": "object",
+                        "properties": {
+                          "structured_output": {
+                            "type": "object",
+                            "properties": {
+                              "json_object": {
+                                "type": "string",
+                                "enum": [
+                                  "native",
+                                  "post_validate",
+                                  "unsupported"
+                                ]
+                              },
+                              "json_schema": {
+                                "type": "string",
+                                "enum": [
+                                  "native",
+                                  "post_validate",
+                                  "unsupported"
+                                ]
+                              },
+                              "post_validation": {
+                                "type": "boolean"
+                              },
+                              "max_schema_bytes": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "json_object",
+                              "json_schema",
+                              "post_validation",
+                              "max_schema_bytes"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "tool_templates": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "structured_output",
+                          "tool_templates"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "modalities": {
+                        "type": "object",
+                        "properties": {
+                          "input": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text"
+                              ]
+                            },
+                            "minItems": 1,
+                            "maxItems": 1
+                          },
+                          "output": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text"
+                              ]
+                            },
+                            "minItems": 1,
+                            "maxItems": 1
+                          }
+                        },
+                        "required": [
+                          "input",
+                          "output"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "cache",
+                      "generation",
+                      "modalities"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -2496,6 +2808,162 @@
                       "backendAllocationCap",
                       "userConfiguredOverride"
                     ]
+                  },
+                  "workerCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "backend": {
+                        "type": "string",
+                        "enum": [
+                          "llama",
+                          "mlx"
+                        ]
+                      },
+                      "streaming": {
+                        "type": "boolean"
+                      },
+                      "scheduling": {
+                        "type": "object",
+                        "properties": {
+                          "fused_multi_sequence_batching": {
+                            "type": "boolean"
+                          },
+                          "interleaved": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "fused_multi_sequence_batching",
+                          "interleaved"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "backend",
+                      "streaming",
+                      "scheduling"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "effectiveModelCapabilities": {
+                    "type": "object",
+                    "properties": {
+                      "cache": {
+                        "type": "object",
+                        "properties": {
+                          "partial_suffix_trim": {
+                            "type": "boolean"
+                          },
+                          "partial_prefix_branch": {
+                            "type": "boolean"
+                          },
+                          "whole_state_copy": {
+                            "type": "boolean"
+                          },
+                          "prompt_boundary_snapshots": {
+                            "type": "boolean"
+                          },
+                          "quantized_kv": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "partial_suffix_trim",
+                          "partial_prefix_branch",
+                          "whole_state_copy",
+                          "prompt_boundary_snapshots",
+                          "quantized_kv"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "generation": {
+                        "type": "object",
+                        "properties": {
+                          "structured_output": {
+                            "type": "object",
+                            "properties": {
+                              "json_object": {
+                                "type": "string",
+                                "enum": [
+                                  "native",
+                                  "post_validate",
+                                  "unsupported"
+                                ]
+                              },
+                              "json_schema": {
+                                "type": "string",
+                                "enum": [
+                                  "native",
+                                  "post_validate",
+                                  "unsupported"
+                                ]
+                              },
+                              "post_validation": {
+                                "type": "boolean"
+                              },
+                              "max_schema_bytes": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "json_object",
+                              "json_schema",
+                              "post_validation",
+                              "max_schema_bytes"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "tool_templates": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "structured_output",
+                          "tool_templates"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "modalities": {
+                        "type": "object",
+                        "properties": {
+                          "input": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text"
+                              ]
+                            },
+                            "minItems": 1,
+                            "maxItems": 1
+                          },
+                          "output": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text"
+                              ]
+                            },
+                            "minItems": 1,
+                            "maxItems": 1
+                          }
+                        },
+                        "required": [
+                          "input",
+                          "output"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "cache",
+                      "generation",
+                      "modalities"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -6931,6 +7399,162 @@
                                   "backendAllocationCap",
                                   "userConfiguredOverride"
                                 ]
+                              },
+                              "workerCapabilities": {
+                                "type": "object",
+                                "properties": {
+                                  "backend": {
+                                    "type": "string",
+                                    "enum": [
+                                      "llama",
+                                      "mlx"
+                                    ]
+                                  },
+                                  "streaming": {
+                                    "type": "boolean"
+                                  },
+                                  "scheduling": {
+                                    "type": "object",
+                                    "properties": {
+                                      "fused_multi_sequence_batching": {
+                                        "type": "boolean"
+                                      },
+                                      "interleaved": {
+                                        "type": "boolean"
+                                      }
+                                    },
+                                    "required": [
+                                      "fused_multi_sequence_batching",
+                                      "interleaved"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "required": [
+                                  "backend",
+                                  "streaming",
+                                  "scheduling"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "effectiveModelCapabilities": {
+                                "type": "object",
+                                "properties": {
+                                  "cache": {
+                                    "type": "object",
+                                    "properties": {
+                                      "partial_suffix_trim": {
+                                        "type": "boolean"
+                                      },
+                                      "partial_prefix_branch": {
+                                        "type": "boolean"
+                                      },
+                                      "whole_state_copy": {
+                                        "type": "boolean"
+                                      },
+                                      "prompt_boundary_snapshots": {
+                                        "type": "boolean"
+                                      },
+                                      "quantized_kv": {
+                                        "type": "boolean"
+                                      }
+                                    },
+                                    "required": [
+                                      "partial_suffix_trim",
+                                      "partial_prefix_branch",
+                                      "whole_state_copy",
+                                      "prompt_boundary_snapshots",
+                                      "quantized_kv"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "generation": {
+                                    "type": "object",
+                                    "properties": {
+                                      "structured_output": {
+                                        "type": "object",
+                                        "properties": {
+                                          "json_object": {
+                                            "type": "string",
+                                            "enum": [
+                                              "native",
+                                              "post_validate",
+                                              "unsupported"
+                                            ]
+                                          },
+                                          "json_schema": {
+                                            "type": "string",
+                                            "enum": [
+                                              "native",
+                                              "post_validate",
+                                              "unsupported"
+                                            ]
+                                          },
+                                          "post_validation": {
+                                            "type": "boolean"
+                                          },
+                                          "max_schema_bytes": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                          }
+                                        },
+                                        "required": [
+                                          "json_object",
+                                          "json_schema",
+                                          "post_validation",
+                                          "max_schema_bytes"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      "tool_templates": {
+                                        "type": "boolean"
+                                      }
+                                    },
+                                    "required": [
+                                      "structured_output",
+                                      "tool_templates"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  "modalities": {
+                                    "type": "object",
+                                    "properties": {
+                                      "input": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "text"
+                                          ]
+                                        },
+                                        "minItems": 1,
+                                        "maxItems": 1
+                                      },
+                                      "output": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string",
+                                          "enum": [
+                                            "text"
+                                          ]
+                                        },
+                                        "minItems": 1,
+                                        "maxItems": 1
+                                      }
+                                    },
+                                    "required": [
+                                      "input",
+                                      "output"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "required": [
+                                  "cache",
+                                  "generation",
+                                  "modalities"
+                                ],
+                                "additionalProperties": false
                               }
                             },
                             "required": [
@@ -8193,6 +8817,162 @@
                                 "backendAllocationCap",
                                 "userConfiguredOverride"
                               ]
+                            },
+                            "workerCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "backend": {
+                                  "type": "string",
+                                  "enum": [
+                                    "llama",
+                                    "mlx"
+                                  ]
+                                },
+                                "streaming": {
+                                  "type": "boolean"
+                                },
+                                "scheduling": {
+                                  "type": "object",
+                                  "properties": {
+                                    "fused_multi_sequence_batching": {
+                                      "type": "boolean"
+                                    },
+                                    "interleaved": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "fused_multi_sequence_batching",
+                                    "interleaved"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": [
+                                "backend",
+                                "streaming",
+                                "scheduling"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "effectiveModelCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "cache": {
+                                  "type": "object",
+                                  "properties": {
+                                    "partial_suffix_trim": {
+                                      "type": "boolean"
+                                    },
+                                    "partial_prefix_branch": {
+                                      "type": "boolean"
+                                    },
+                                    "whole_state_copy": {
+                                      "type": "boolean"
+                                    },
+                                    "prompt_boundary_snapshots": {
+                                      "type": "boolean"
+                                    },
+                                    "quantized_kv": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "partial_suffix_trim",
+                                    "partial_prefix_branch",
+                                    "whole_state_copy",
+                                    "prompt_boundary_snapshots",
+                                    "quantized_kv"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "generation": {
+                                  "type": "object",
+                                  "properties": {
+                                    "structured_output": {
+                                      "type": "object",
+                                      "properties": {
+                                        "json_object": {
+                                          "type": "string",
+                                          "enum": [
+                                            "native",
+                                            "post_validate",
+                                            "unsupported"
+                                          ]
+                                        },
+                                        "json_schema": {
+                                          "type": "string",
+                                          "enum": [
+                                            "native",
+                                            "post_validate",
+                                            "unsupported"
+                                          ]
+                                        },
+                                        "post_validation": {
+                                          "type": "boolean"
+                                        },
+                                        "max_schema_bytes": {
+                                          "type": "integer",
+                                          "minimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "json_object",
+                                        "json_schema",
+                                        "post_validation",
+                                        "max_schema_bytes"
+                                      ],
+                                      "additionalProperties": false
+                                    },
+                                    "tool_templates": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "structured_output",
+                                    "tool_templates"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "modalities": {
+                                  "type": "object",
+                                  "properties": {
+                                    "input": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text"
+                                        ]
+                                      },
+                                      "minItems": 1,
+                                      "maxItems": 1
+                                    },
+                                    "output": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text"
+                                        ]
+                                      },
+                                      "minItems": 1,
+                                      "maxItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "input",
+                                    "output"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": [
+                                "cache",
+                                "generation",
+                                "modalities"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [
@@ -8903,6 +9683,162 @@
                                 "backendAllocationCap",
                                 "userConfiguredOverride"
                               ]
+                            },
+                            "workerCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "backend": {
+                                  "type": "string",
+                                  "enum": [
+                                    "llama",
+                                    "mlx"
+                                  ]
+                                },
+                                "streaming": {
+                                  "type": "boolean"
+                                },
+                                "scheduling": {
+                                  "type": "object",
+                                  "properties": {
+                                    "fused_multi_sequence_batching": {
+                                      "type": "boolean"
+                                    },
+                                    "interleaved": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "fused_multi_sequence_batching",
+                                    "interleaved"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": [
+                                "backend",
+                                "streaming",
+                                "scheduling"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "effectiveModelCapabilities": {
+                              "type": "object",
+                              "properties": {
+                                "cache": {
+                                  "type": "object",
+                                  "properties": {
+                                    "partial_suffix_trim": {
+                                      "type": "boolean"
+                                    },
+                                    "partial_prefix_branch": {
+                                      "type": "boolean"
+                                    },
+                                    "whole_state_copy": {
+                                      "type": "boolean"
+                                    },
+                                    "prompt_boundary_snapshots": {
+                                      "type": "boolean"
+                                    },
+                                    "quantized_kv": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "partial_suffix_trim",
+                                    "partial_prefix_branch",
+                                    "whole_state_copy",
+                                    "prompt_boundary_snapshots",
+                                    "quantized_kv"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "generation": {
+                                  "type": "object",
+                                  "properties": {
+                                    "structured_output": {
+                                      "type": "object",
+                                      "properties": {
+                                        "json_object": {
+                                          "type": "string",
+                                          "enum": [
+                                            "native",
+                                            "post_validate",
+                                            "unsupported"
+                                          ]
+                                        },
+                                        "json_schema": {
+                                          "type": "string",
+                                          "enum": [
+                                            "native",
+                                            "post_validate",
+                                            "unsupported"
+                                          ]
+                                        },
+                                        "post_validation": {
+                                          "type": "boolean"
+                                        },
+                                        "max_schema_bytes": {
+                                          "type": "integer",
+                                          "minimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "json_object",
+                                        "json_schema",
+                                        "post_validation",
+                                        "max_schema_bytes"
+                                      ],
+                                      "additionalProperties": false
+                                    },
+                                    "tool_templates": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "structured_output",
+                                    "tool_templates"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "modalities": {
+                                  "type": "object",
+                                  "properties": {
+                                    "input": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text"
+                                        ]
+                                      },
+                                      "minItems": 1,
+                                      "maxItems": 1
+                                    },
+                                    "output": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text"
+                                        ]
+                                      },
+                                      "minItems": 1,
+                                      "maxItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "input",
+                                    "output"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": [
+                                "cache",
+                                "generation",
+                                "modalities"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [

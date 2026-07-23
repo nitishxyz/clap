@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, ModelTokenCapabilities } from "@clap/api";
-import type { StructuredOutputCapabilities, StructuredOutputContract } from "@clap/worker-protocol";
+import type { EffectiveModelCapabilities, StructuredOutputContract, WorkerCapabilities } from "@clap/worker-protocol";
 import { getLlamaWorkerStatus, LlamaWorkerError } from "@clap/runtime-llama";
 import { getMlxWorkerStatus, MlxWorkerError } from "@clap/runtime-mlx";
 import { V1RequestTracker, type ResidentProtocolFact } from "../protocol/request-tracker";
@@ -31,7 +31,7 @@ type ActiveLaunch = {
   shutdownId?: string;
   resolveShutdown?: () => void;
   closePromise?: Promise<void>;
-  structuredOutputCapabilities?: StructuredOutputCapabilities;
+  workerCapabilities?: WorkerCapabilities;
   exited: Promise<void>;
   resolveExited: () => void;
 };
@@ -50,6 +50,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private memory?: ResidentMlxMemory;
   private retention?: ResidentMlxRetention;
   private tokenCapabilities?: ModelTokenCapabilities;
+  private effectiveModelCapabilities?: EffectiveModelCapabilities;
   private workerLaunchId?: string;
   private lastLaunchPaths?: WorkerLaunchPaths;
   private crashClassification?: string;
@@ -82,7 +83,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       memory: this.memory,
       retention: this.retention,
       tokenCapabilities: this.tokenCapabilities,
-      structuredOutputCapabilities: this.active?.structuredOutputCapabilities,
+      workerCapabilities: this.active?.workerCapabilities,
+      effectiveModelCapabilities: this.effectiveModelCapabilities,
+      structuredOutputCapabilities: this.effectiveModelCapabilities?.generation.structured_output,
     };
   }
 
@@ -122,6 +125,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
           undefined, undefined, launch);
         if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
         this.tokenCapabilities = result.tokenCapabilities;
+        this.effectiveModelCapabilities = result.effectiveModelCapabilities;
         this.loaded = true;
         this.setLoadState("resident", launch);
         this.consecutiveCrashes = 0;
@@ -147,7 +151,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private requireStructuredOutputCapability(contract?: StructuredOutputContract): void {
     if (!contract) return;
-    const capabilities = this.active?.structuredOutputCapabilities;
+    const capabilities = this.effectiveModelCapabilities?.generation.structured_output;
     const mode = capabilities?.[contract.kind] ?? "unsupported";
     const supported = contract.strength === "required"
       ? mode === "native"
@@ -223,6 +227,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.memory = undefined;
     this.retention = undefined;
     this.tokenCapabilities = undefined;
+    this.effectiveModelCapabilities = undefined;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
@@ -314,6 +319,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
+      this.effectiveModelCapabilities = undefined;
       this.setLoadState("not_started");
     }
     await this.ignoreMetadataFailure(() => this.launchLogs.finalize(launch.context, exitCode, classification));
@@ -324,7 +330,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     try {
       const fact = launch.tracker.consumeLine(line);
       if (fact.kind === "ready") {
-        if (this.active === launch) launch.structuredOutputCapabilities = fact.structuredOutputCapabilities;
+        if (this.active === launch) launch.workerCapabilities = fact.workerCapabilities;
         launch.context.phase = "idle";
         void this.ignoreMetadataFailure(() => this.launchLogs.markReady(launch.context));
         launch.resolveHandshake?.();
@@ -375,7 +381,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     }
     if (fact.kind === "failed") {
       this.pending.delete(fact.requestId); pending.cleanup?.();
-      if (pending.phase === "load" && this.active === launch && !launch.closePromise) this.setLoadState("starting", launch);
+      if (pending.phase === "load" && this.active === launch && !launch.closePromise) {
+        this.tokenCapabilities = undefined;
+        this.effectiveModelCapabilities = undefined;
+        this.setLoadState("starting", launch);
+      }
       pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath)); return;
     }
     this.applyWorkerPayload(launch, mapWorkerResultPayload(fact.result as Record<string, unknown>,
@@ -391,6 +401,9 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       setMemory: (memory) => { if (this.active === launch) this.memory = memory; },
       setRetention: (retention) => { if (this.active === launch) this.retention = retention; },
       setTokenCapabilities: (capabilities) => { if (this.active === launch) this.tokenCapabilities = capabilities; },
+      setEffectiveModelCapabilities: (capabilities) => {
+        if (this.active === launch) this.effectiveModelCapabilities = capabilities;
+      },
       onRetention: (previous, current) => { if (this.active === launch) this.onTelemetry?.(this, previous, current); },
       workerError: (detail, code) => this.workerError(detail, code, launch.context.paths.stderrPath),
     });
@@ -412,6 +425,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
+      this.effectiveModelCapabilities = undefined;
       this.setLoadState("not_started");
     }
     try { launch.proc.kill(); } catch { /* process already exited */ }

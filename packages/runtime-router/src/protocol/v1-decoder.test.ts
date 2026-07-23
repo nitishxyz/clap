@@ -6,8 +6,9 @@ const line = (value: unknown) => JSON.stringify(value);
 const ready = {
   protocol: 1,
   type: "ready",
-  worker_capabilities: { streaming: true },
-  model_capabilities: { context_window: 4096 },
+  worker_capabilities: { backend: "llama", streaming: true,
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true } },
+  model_capabilities: null,
 };
 
 function fault(run: () => unknown): WorkerProtocolFault {

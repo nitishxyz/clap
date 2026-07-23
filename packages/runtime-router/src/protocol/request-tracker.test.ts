@@ -4,10 +4,8 @@ import { V1RequestTracker } from "./request-tracker";
 
 const json = (value: unknown) => JSON.stringify(value);
 const ready = {
-  protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {},
-  structured_output: {
-    json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
-  },
+  protocol: 1, type: "ready", worker_capabilities: { backend: "llama", streaming: true,
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true } }, model_capabilities: null,
 } as const;
 const scoped = (type: string, requestId: string, sequence: number, fields: Record<string, unknown> = {}) =>
   json({ protocol: 1, type, request_id: requestId, sequence, ...fields });
@@ -15,8 +13,7 @@ const scoped = (type: string, requestId: string, sequence: number, fields: Recor
 function tracker(maxTombstones = 1024) {
   const result = new V1RequestTracker(undefined, maxTombstones);
   expect(result.consumeLine(json(ready))).toEqual({
-    kind: "ready", workerCapabilities: {}, modelCapabilities: {},
-    structuredOutputCapabilities: ready.structured_output,
+    kind: "ready", workerCapabilities: ready.worker_capabilities, modelCapabilities: null,
   });
   return result;
 }

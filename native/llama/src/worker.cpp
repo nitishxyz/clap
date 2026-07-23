@@ -35,12 +35,8 @@ Worker::Worker() : Worker(std::cin, std::cout) {}
 Worker::Worker(std::istream& input, std::ostream& output)
     : output_(output), v1_(std::make_unique<ProtocolWriter>(output)),
       state_(), scheduler_(scheduler_state(state_)), reader_(input) {
-  v1_->ready({{"backend", "llama"}, {"streaming", true}}, nlohmann::json::object(), {
-      {"json_object", "native"},
-      {"json_schema", "native"},
-      {"post_validation", true},
-      {"max_schema_bytes", 64 * 1024},
-  });
+  v1_->ready({{"backend", "llama"}, {"streaming", true}, {"scheduling", {
+      {"fused_multi_sequence_batching", true}, {"interleaved", true}}}}, nullptr);
 }
 
 void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {
@@ -159,6 +155,15 @@ bool Worker::dispatch(const std::string& line) {
       state_.load(model);
       const int32_t effective = state_.effective_context_window();
       v1_->completed(request.request_id, {{"kind", "loaded"}, {"model", model},
+        {"effective_model_capabilities", {
+          {"cache", {{"partial_suffix_trim", true}, {"partial_prefix_branch", true},
+            {"whole_state_copy", true}, {"prompt_boundary_snapshots", true},
+            {"quantized_kv", state_.kv_format().find('q') != std::string::npos}}},
+          {"generation", {{"structured_output", {{"json_object", "native"},
+            {"json_schema", "native"}, {"post_validation", true},
+            {"max_schema_bytes", 64 * 1024}}}, {"tool_templates", false}}},
+          {"modalities", {{"input", {"text"}}, {"output", {"text"}}}}
+        }},
         {"token_capabilities", {{"model_context_window", state_.model_context_window() > 0
               ? nlohmann::json(state_.model_context_window()) : nlohmann::json(nullptr)},
           {"effective_context_window", effective}, {"max_input_tokens", std::max(0, effective - 1)},

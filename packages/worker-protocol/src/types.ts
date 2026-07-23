@@ -121,7 +121,6 @@ export type UnloadRequest = { protocol: 1; type: "unload"; request_id: string; [
 export type ShutdownRequest = { protocol: 1; type: "shutdown"; request_id: string; [key: string]: unknown };
 export type WorkerRequest = LoadRequest | GenerateRequest | CancelRequest | SetMaxActiveRequest | UnloadRequest | ShutdownRequest;
 
-export type LoadedResult = { kind: "loaded"; [key: string]: unknown };
 export type GeneratedResult = { kind: "generated"; content: string; [key: string]: unknown };
 export type CancelledResult = { kind: "cancelled"; [key: string]: unknown };
 export type MaxActiveUpdatedResult = { kind: "max_active_updated"; max_active: number; [key: string]: unknown };
@@ -135,7 +134,51 @@ export type StructuredOutputCapabilities = {
   post_validation: boolean;
   max_schema_bytes: number;
 };
-export type ReadyEvent = { protocol: 1; type: "ready"; worker_capabilities: Record<string, unknown>; model_capabilities: Record<string, unknown>; structured_output?: StructuredOutputCapabilities; [key: string]: unknown };
+export type WorkerCapabilities = {
+  backend: "llama" | "mlx";
+  streaming: boolean;
+  scheduling: {
+    fused_multi_sequence_batching: boolean;
+    interleaved: boolean;
+  };
+};
+export type CacheCapabilities = {
+  partial_suffix_trim: boolean;
+  partial_prefix_branch: boolean;
+  whole_state_copy: boolean;
+  prompt_boundary_snapshots: boolean;
+  quantized_kv: boolean;
+};
+export type GenerationCapabilities = {
+  structured_output: StructuredOutputCapabilities;
+  tool_templates: boolean;
+};
+export type ModalCapabilities = {
+  input: ["text"];
+  output: ["text"];
+};
+export type EffectiveModelCapabilities = {
+  cache: CacheCapabilities;
+  generation: GenerationCapabilities;
+  modalities: ModalCapabilities;
+};
+export type WorkerTokenCapabilities = {
+  model_context_window: number | null;
+  effective_context_window: number;
+  max_input_tokens: number;
+  max_output_tokens: number | null;
+  backend_allocation_cap: number;
+  user_configured_override: number | null;
+  model_context_window_source?: string | null;
+  max_output_tokens_source?: string | null;
+};
+export type LoadedResult = {
+  kind: "loaded";
+  effective_model_capabilities: EffectiveModelCapabilities;
+  token_capabilities: WorkerTokenCapabilities;
+  [key: string]: unknown;
+};
+export type ReadyEvent = { protocol: 1; type: "ready"; worker_capabilities: WorkerCapabilities; model_capabilities: null; [key: string]: unknown };
 export type ScopedEventBase = { protocol: 1; request_id: string; sequence: number; [key: string]: unknown };
 export type AcceptedEvent = ScopedEventBase & { type: "accepted" };
 export type StartedEvent = ScopedEventBase & { type: "started" };

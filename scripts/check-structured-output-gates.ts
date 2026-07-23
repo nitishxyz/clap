@@ -17,6 +17,7 @@ const server = await read("packages/server/src/index.ts");
 const router = await read("packages/runtime-router/src/process/resident-worker-process.ts");
 const parserRegistry = await read("packages/server/src/parsers/registry.ts");
 const mlxTransport = await read("native/mlx/Sources/clap-mlx/Protocol/JSONLineTransport.swift");
+const mlxApplication = await read("native/mlx/Sources/clap-mlx/Application/WorkerApplication.swift");
 const mlxPreparation = await read("native/mlx/Sources/clap-mlx/Application/RequestPreparation.swift");
 const llamaWorker = await read("native/llama/src/worker.cpp");
 const llamaStructured = await read("native/llama/src/structured-output.cpp");
@@ -61,12 +62,12 @@ if (!parserSelectionTests.includes("model names alone cannot select built-in fam
   failures.push("parser selection regression coverage is missing model-name isolation");
 }
 
-if (mlxTransport.includes('"json_object": "native"') || mlxTransport.includes('"json_schema": "native"')) {
+if (mlxApplication.includes('"json_object": "native"') || mlxApplication.includes('"json_schema": "native"')) {
   failures.push("MLX must never advertise native structured output");
 }
 for (const marker of ['"json_object": "post_validate"', '"json_schema": "post_validate"',
   '"post_validation": true']) {
-  if (!mlxTransport.includes(marker)) failures.push(`MLX ready capability is missing ${marker}`);
+  if (!mlxApplication.includes(marker)) failures.push(`MLX effective capability is missing ${marker}`);
 }
 if (!mlxPreparation.includes("structured_output_capability_required")) {
   failures.push("MLX required constraints must fail before admission");
@@ -75,8 +76,8 @@ for (const marker of ['{"json_object", "native"}', '{"json_schema", "native"}',
   '{"post_validation", true}', '{"max_schema_bytes", 64 * 1024}']) {
   if (!llamaWorker.includes(marker)) failures.push(`llama ready capability is missing ${marker}`);
 }
-for (const marker of ['{"json_object", "native"}', '{"json_schema", "native"}']) {
-  if (!llamaWorkerTests.includes(marker)) failures.push(`llama ready capability test is missing ${marker}`);
+for (const marker of ['worker_capabilities', 'model_capabilities', 'structured_output']) {
+  if (!llamaWorkerTests.includes(marker)) failures.push(`llama capability handshake test is missing ${marker}`);
 }
 for (const marker of ["kMaxStructuredOutputSchemaBytes", "validate_schema", "json_schema_to_grammar",
   "unsupported_structured_output"]) {
@@ -85,7 +86,7 @@ for (const marker of ["kMaxStructuredOutputSchemaBytes", "validate_schema", "jso
 
 for (const marker of ["StructuredOutputContractSchema", "StructuredOutputCapabilitiesSchema",
   "structured_output: StructuredOutputContractSchema.optional()",
-  "structured_output: StructuredOutputCapabilitiesSchema.optional()"]) {
+  "structured_output: StructuredOutputCapabilitiesSchema"]) {
   if (!protocolSchemas.includes(marker)) failures.push(`worker protocol schema is missing ${marker}`);
 }
 for (const marker of ["validates strict structured-output contracts and ready capabilities",

@@ -61,7 +61,10 @@ async function lifecycleWorker(root: string): Promise<{ path: string; commands: 
   await writeFile(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const commands = ${JSON.stringify(commands)}; const behavior = process.env.TEST_SHUTDOWN ?? "terminal";
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {}, structured_output: { json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65536 } }));
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
@@ -70,7 +73,7 @@ const command = JSON.parse(raw); appendFileSync(commands, JSON.stringify({ ...co
 if (command.type === "shutdown") { if (behavior === "ignore") continue; send("accepted", command.request_id); send("started", command.request_id); send("completed", command.request_id, { result: { kind: "shutdown" } }); process.exit(0); }
 send("accepted", command.request_id); send("started", command.request_id);
 if (command.type === "load") await Bun.sleep(Number(process.env.TEST_LOAD_DELAY ?? 0));
-const result = command.type === "load" ? { kind: "loaded" } : command.type === "generate"
+const result = command.type === "load" ? { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens } : command.type === "generate"
   ? { kind: "generated", content: "{}" } : { kind: "unloaded" };
 send("completed", command.request_id, { result }); }}
 `);
@@ -85,16 +88,18 @@ async function staleExitWorker(root: string): Promise<string> {
 import { existsSync, writeFileSync } from "node:fs"; const first = !existsSync(${JSON.stringify(marker)});
 if (first) writeFileSync(${JSON.stringify(marker)}, "1");
 process.on("SIGTERM", async () => { await Bun.sleep(250); process.exit(9); });
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {}, structured_output: first
-  ? { json_object: "native", json_schema: "native", post_validation: false, max_schema_bytes: 32768 }
-  : { json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024 } }));
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const structured = first ? { json_object: "native", json_schema: "native", post_validation: false, max_schema_bytes: 32768 } : { json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024 };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: structured, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue; const command = JSON.parse(raw);
 if (command.type === "shutdown") process.exit(0); send("accepted", command.request_id); send("started", command.request_id);
 if (first && command.type === "generate") { console.log(JSON.stringify({ protocol: 1, type: "token", request_id: "unknown", sequence: 0, text: "bad" })); continue; }
-send("completed", command.request_id, { result: { kind: command.type === "load" ? "loaded" : "unloaded" } }); }}
+send("completed", command.request_id, { result: command.type === "load" ? { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens } : { kind: "unloaded" } }); }}
 `);
   await chmod(path, 0o755);
   return path;
@@ -153,6 +158,8 @@ describe.serial("resident worker lifecycle races", () => {
       structuredOutputCapabilities: {
         json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
       },
+      workerCapabilities: { backend: "llama", scheduling: { interleaved: true } },
+      effectiveModelCapabilities: { modalities: { input: ["text"], output: ["text"] } },
     });
 
     const close = worker.shutdownAsync();
@@ -160,6 +167,7 @@ describe.serial("resident worker lifecycle races", () => {
     await close;
     expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
     expect(worker.info().structuredOutputCapabilities).toBeUndefined();
+    expect(worker.info().effectiveModelCapabilities).toBeUndefined();
     expect(events.map((event) => event.loadState)).toEqual([
       "starting", "loading", "resident", "closing", "not_started",
     ]);

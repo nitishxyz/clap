@@ -61,11 +61,11 @@ if (telemetryVector.type !== "telemetry" ||
   throw new Error("MLX telemetry must preserve honest allocator and cache provenance");
 }
 if (events[0]?.type !== "ready") throw new Error("v1 ready must be the first event");
-if (events[0].structured_output?.json_object !== "post_validate" ||
-    events[0].structured_output?.json_schema !== "post_validate" ||
-    events[0].structured_output?.post_validation !== true ||
-    events[0].structured_output?.max_schema_bytes !== 64 * 1024) {
-  throw new Error("v1 ready must advertise honest MLX post-validation capabilities");
+if (events[0].worker_capabilities.backend !== "mlx" ||
+    events[0].worker_capabilities.scheduling.fused_multi_sequence_batching !== false ||
+    events[0].worker_capabilities.scheduling.interleaved !== true ||
+    events[0].model_capabilities !== null) {
+  throw new Error("v1 ready must advertise strict MLX worker capabilities without model facts");
 }
 if (!events.some((event) => event.type === "diagnostic")) {
   throw new Error("malformed JSON must produce an unscoped diagnostic");

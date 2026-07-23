@@ -1,10 +1,10 @@
-{"protocol":1,"type":"ready","worker_capabilities":{"backend":"fixture","streaming":true},"model_capabilities":{"context_window":4096},"structured_output":{"json_object":"native","json_schema":"post_validate","post_validation":true,"max_schema_bytes":65536}}
+{"protocol":1,"type":"ready","worker_capabilities":{"backend":"llama","streaming":true,"scheduling":{"fused_multi_sequence_batching":true,"interleaved":true}},"model_capabilities":null}
 {"protocol":1,"type":"accepted","request_id":"req_generate","sequence":0}
 {"protocol":1,"type":"started","request_id":"req_generate","sequence":1}
 {"protocol":1,"type":"token","request_id":"req_generate","sequence":2,"text":"Hello"}
 {"protocol":1,"type":"content","request_id":"req_generate","sequence":3,"content":{"type":"text","text":"Hello"}}
 {"protocol":1,"type":"prefill_progress","request_id":"req_generate","sequence":4,"completed":8,"total":16}
-{"protocol":1,"type":"completed","request_id":"req_load","sequence":1,"result":{"kind":"loaded","model":"example"}}
+{"protocol":1,"type":"completed","request_id":"req_load","sequence":1,"result":{"kind":"loaded","model":"example","effective_model_capabilities":{"cache":{"partial_suffix_trim":true,"partial_prefix_branch":true,"whole_state_copy":true,"prompt_boundary_snapshots":true,"quantized_kv":false},"generation":{"structured_output":{"json_object":"native","json_schema":"native","post_validation":true,"max_schema_bytes":65536},"tool_templates":false},"modalities":{"input":["text"],"output":["text"]}},"token_capabilities":{"model_context_window":4096,"effective_context_window":4096,"max_input_tokens":4095,"max_output_tokens":null,"backend_allocation_cap":4096,"user_configured_override":null}}}
 {"protocol":1,"type":"completed","request_id":"req_generate","sequence":5,"result":{"kind":"generated","content":"Hello","finish_reason":"stop"}}
 {"protocol":1,"type":"completed","request_id":"req_cancel","sequence":1,"result":{"kind":"cancelled"}}
 {"protocol":1,"type":"completed","request_id":"req_limit","sequence":1,"result":{"kind":"max_active_updated","max_active":2}}

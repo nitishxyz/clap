@@ -23,7 +23,9 @@ async function v1Worker(dir: string) {
   await executable(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const log = ${JSON.stringify(log)};
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: { streaming: true }, model_capabilities: {} }));
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "native", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const next = new Map();
 const send = (type, id, fields = {}) => { const sequence = next.get(id) ?? 0; next.set(id, sequence + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) {
@@ -38,7 +40,7 @@ for await (const chunk of Bun.stdin.stream()) {
       send("completed", command.request_id, { result: { kind: "cancelled" } }); continue;
     }
     send("started", command.request_id);
-    if (command.type === "load") send("completed", command.request_id, { result: { kind: "loaded", token_capabilities: { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null, model_context_window_source: "worker" } } });
+    if (command.type === "load") send("completed", command.request_id, { result: { kind: "loaded", effective_model_capabilities: effective, token_capabilities: { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null, model_context_window_source: "worker" } } });
     if (command.type === "generate") {
       send("prefill_progress", command.request_id, { completed: 2, total: 2 });
       send("token", command.request_id, { text: "v1 " });

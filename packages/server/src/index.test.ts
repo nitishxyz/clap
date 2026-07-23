@@ -2699,11 +2699,20 @@ describe("clap server", () => {
       expect(loadBody.model.worker.launchId).toBeString();
       expect(loadBody.model.worker.stderrLogPath).toContain(loadBody.model.worker.launchId);
       expect(loadBody.model.worker.launchMetadataPath).toContain(loadBody.model.worker.launchId);
+      expect(loadBody.model.worker.workerCapabilities).toMatchObject({
+        backend: "llama", scheduling: { fused_multi_sequence_batching: true, interleaved: true },
+      });
+      expect(loadBody.model.worker.effectiveModelCapabilities).toMatchObject({
+        generation: { structured_output: { json_object: "native" }, tool_templates: false },
+        modalities: { input: ["text"], output: ["text"] },
+      });
 
       const active = await app.request("/clap/v1/runtime/models");
       const activeBody = await active.json();
       expect(activeBody.models.map((entry: { id: string }) => entry.id)).toContain("acme/lifecycle-gguf");
       expect(activeBody.models[0].worker.pid).toBe(loadBody.model.worker.pid);
+      expect(activeBody.models[0].worker.effectiveModelCapabilities)
+        .toEqual(loadBody.model.worker.effectiveModelCapabilities);
       expect(activeBody.models[0].worker).toMatchObject({
         launchId: loadBody.model.worker.launchId,
         stderrLogPath: loadBody.model.worker.stderrLogPath,
@@ -3289,9 +3298,10 @@ const send = (type, id, fields = {}) => {
   console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields }));
 };
 const structuredMode = process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE ?? "native";
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {},
-  structured_output: { json_object: structuredMode, json_schema: structuredMode,
-    post_validation: true, max_schema_bytes: 65536 } }));
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: structuredMode, json_schema: structuredMode, post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 for await (const chunk of Bun.stdin.stream()) {
   buffer += decoder.decode(chunk, { stream: true });
   let newline;
@@ -3308,7 +3318,7 @@ for await (const chunk of Bun.stdin.stream()) {
       process.exit(0);
     }
     if (request.type === "load") {
-      send("started", id); send("completed", id, { result: { kind: "loaded" } });
+      send("started", id); send("completed", id, { result: { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens } });
       continue;
     }
     if (request.type === "unload") {

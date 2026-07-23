@@ -10,6 +10,11 @@ import type { WorkerLaunchContext, WorkerLaunchMetadata } from "./types";
 
 const originalHome = process.env.CLAP_HOME;
 const originalWorker = process.env.CLAP_LLAMA_WORKER;
+const capabilityFixture = `
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "native", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
+`;
 
 afterEach(() => {
   if (originalHome === undefined) delete process.env.CLAP_HOME; else process.env.CLAP_HOME = originalHome;
@@ -20,13 +25,14 @@ async function workerScript(root: string): Promise<string> {
   const path = join(root, "worker");
   await writeFile(path, `#!/usr/bin/env bun
 console.error("launch-stderr:" + process.pid);
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
+${capabilityFixture}
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue;
 const command = JSON.parse(raw); if (command.type === "shutdown") process.exit(0); send("accepted", command.request_id); send("started", command.request_id);
-send("completed", command.request_id, { result: { kind: command.type === "load" ? "loaded" : "unloaded" } }); }}
+send("completed", command.request_id, { result: command.type === "load" ? { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens } : { kind: "unloaded" } }); }}
 `);
   await chmod(path, 0o755);
   return path;
@@ -37,14 +43,15 @@ async function crashOnceWorker(root: string): Promise<string> {
   const marker = join(root, "crashed-once");
   await writeFile(path, `#!/usr/bin/env bun
 import { existsSync, writeFileSync } from "node:fs";
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
+${capabilityFixture}
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue;
 const command = JSON.parse(raw); if (command.type === "shutdown") process.exit(0); send("accepted", command.request_id); send("started", command.request_id);
 if (command.type === "generate" && !existsSync(${JSON.stringify(marker)})) { send("token", command.request_id, { text: "partial" }); writeFileSync(${JSON.stringify(marker)}, "1"); process.exit(9); }
-send("completed", command.request_id, { result: { kind: command.type === "load" ? "loaded" : "unloaded" } }); }}
+send("completed", command.request_id, { result: command.type === "load" ? { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens } : { kind: "unloaded" } }); }}
 `);
   await chmod(path, 0o755);
   return path;

@@ -1,5 +1,6 @@
 import type { ModelTokenCapabilities } from "@clap/api";
-import { WorkerMemoryTelemetrySchema, type MemoryBasis, type MemorySource } from "@clap/worker-protocol";
+import { EffectiveModelCapabilitiesSchema, WorkerMemoryTelemetrySchema, type EffectiveModelCapabilities,
+  type MemoryBasis, type MemorySource } from "@clap/worker-protocol";
 import { parseWorkerRetention, parseWorkerTokenCapabilities, type ResidentCacheInfo,
   type ResidentChatResult, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentProgress, type ResidentTiming, type ResidentUsage } from "../resident";
@@ -17,6 +18,7 @@ export type PendingWorkerResult = {
   cache?: ResidentCacheInfo;
   timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
+  effectiveModelCapabilities?: EffectiveModelCapabilities;
   launchPaths?: WorkerLaunchPaths;
   phase: WorkerRequestPhase;
   cleanup?: () => void;
@@ -29,6 +31,7 @@ export type WorkerPayloadContext = {
   setMemory: (memory: ResidentMlxMemory) => void;
   setRetention: (retention: ResidentMlxRetention) => void;
   setTokenCapabilities: (capabilities: ModelTokenCapabilities) => void;
+  setEffectiveModelCapabilities: (capabilities: EffectiveModelCapabilities) => void;
   onRetention: (previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void;
   workerError: (message: string, code?: string) => Error;
 };
@@ -97,6 +100,8 @@ export function applyWorkerPayload(
     }
     const parsedCapabilities = parseWorkerTokenCapabilities(message.token_capabilities);
     if (parsedCapabilities) context.setTokenCapabilities(parsedCapabilities);
+    const parsedEffectiveCapabilities = EffectiveModelCapabilitiesSchema.safeParse(message.effective_model_capabilities);
+    if (parsedEffectiveCapabilities.success) context.setEffectiveModelCapabilities(parsedEffectiveCapabilities.data);
     const pending = id ? context.pending.get(id) : undefined;
     if (!pending) return;
     if (message.started === true) {
@@ -250,10 +255,11 @@ export function applyWorkerPayload(
       pending.finishReason = message.finish_reason;
     }
     if (parsedCapabilities) pending.tokenCapabilities = parsedCapabilities;
+    if (parsedEffectiveCapabilities.success) pending.effectiveModelCapabilities = parsedEffectiveCapabilities.data;
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) context.pending.delete(id);
       pending.cleanup?.();
       if (pending.cache && !pending.cache.workerLaunchId) pending.cache.workerLaunchId = context.workerLaunchId;
-      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities });
+      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities, effectiveModelCapabilities: pending.effectiveModelCapabilities });
     }
   }

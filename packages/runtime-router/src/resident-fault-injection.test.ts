@@ -20,13 +20,16 @@ async function faultWorker(scenario: string) {
 const scenario = ${JSON.stringify(scenario)};
 const send = (value) => console.log(typeof value === "string" ? value : JSON.stringify(value));
 const scoped = (type, id, sequence, fields = {}) => send({ protocol: 1, type, request_id: id, sequence, ...fields });
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "native", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
 if (scenario === "exit_handshake") process.exit(17);
 if (scenario === "timeout") await Bun.sleep(10000);
 if (scenario === "malformed_ready") { send({ protocol: 1, type: "ready", worker_capabilities: {} }); await Bun.sleep(10000); }
 if (scenario === "version_mismatch") { send({ protocol: 2, type: "ready", worker_capabilities: {}, model_capabilities: {} }); await Bun.sleep(10000); }
 if (scenario === "non_json") { send("not-json"); await Bun.sleep(10000); }
 if (scenario === "unknown_type") { send({ protocol: 1, type: "surprise" }); await Bun.sleep(10000); }
-send({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} });
+send({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null });
 if (scenario === "exit_idle") setTimeout(() => process.exit(23), 100);
 const terminal = new Set();
 const complete = (id, sequence, result) => { if (terminal.has(id)) return; terminal.add(id); scoped("completed", id, sequence, { result }); };
@@ -40,7 +43,7 @@ for await (const chunk of Bun.stdin.stream()) {
     scoped("accepted", id, 0);
     if (command.type === "load") {
       if (scenario === "exit_load") process.exit(18);
-      scoped("started", id, 1); complete(id, 2, { kind: "loaded" }); continue;
+      scoped("started", id, 1); complete(id, 2, { kind: "loaded", effective_model_capabilities: effective, token_capabilities: tokens }); continue;
     }
     if (command.type === "cancel") {
       if (scenario === "cancel_unknown") scoped("failed", id, 1, { error: { code: "unknown_request", message: "unknown target", retryable: false, fatal: false } });

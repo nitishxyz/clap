@@ -137,19 +137,10 @@ describe("worker protocol validation", () => {
       { kind: "json_schema", strength: "required", schema: {}, extension: true },
     ]) expect(() => decodeWorkerRequest({ ...base, structured_output })).toThrow(ProtocolValidationError);
 
-    const ready = { protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} } as const;
-    expect(decodeWorkerEvent({
-      ...ready,
-      structured_output: {
-        json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
-      },
-    })).toMatchObject({ structured_output: { json_object: "native", max_schema_bytes: 65_536 } });
-    for (const structured_output of [
-      { json_object: "native", json_schema: "unsupported", post_validation: true },
-      { json_object: "grammar", json_schema: "unsupported", post_validation: false, max_schema_bytes: 0 },
-      { json_object: "native", json_schema: "unsupported", post_validation: false, max_schema_bytes: -1 },
-      { json_object: "native", json_schema: "unsupported", post_validation: false, max_schema_bytes: 0, extension: true },
-    ]) expect(() => decodeWorkerEvent({ ...ready, structured_output })).toThrow(ProtocolValidationError);
+    const ready = { protocol: 1, type: "ready", worker_capabilities: fixtureWorkerCapabilities(), model_capabilities: null } as const;
+    expect(decodeWorkerEvent(ready)).toMatchObject({ worker_capabilities: { backend: "llama" }, model_capabilities: null });
+    expect(() => decodeWorkerEvent({ ...ready, worker_capabilities: {} })).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerEvent({ ...ready, model_capabilities: {} })).toThrow(ProtocolValidationError);
   });
 
 function fixtureCacheIdentity() {
@@ -179,6 +170,11 @@ function fixtureCacheIdentity() {
   } as const;
 }
 
+function fixtureWorkerCapabilities() {
+  return { backend: "llama", streaming: true,
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true } } as const;
+}
+
   test("requires protocol exactly 1 and nonempty request IDs", () => {
     expect(() => decodeWorkerRequest({ protocol: 2, type: "shutdown", request_id: "req" })).toThrow(ProtocolValidationError);
     expect(() => decodeWorkerRequest({ protocol: 1, type: "shutdown", request_id: "" })).toThrow(ProtocolValidationError);
@@ -204,7 +200,7 @@ function fixtureCacheIdentity() {
 
   test("forbids request scope on unsolicited events", () => {
     const unsolicited = [
-      { type: "ready", worker_capabilities: {}, model_capabilities: {} },
+      { type: "ready", worker_capabilities: fixtureWorkerCapabilities(), model_capabilities: null },
       { type: "telemetry", telemetry: {} },
       { type: "diagnostic", level: "info", message: "hello" },
     ];

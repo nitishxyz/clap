@@ -124,8 +124,56 @@ export const WorkerRequestSchema = z.discriminatedUnion("type", [
   UnloadRequestSchema, ShutdownRequestSchema,
 ]);
 
+const structuredOutputMode = z.enum(["native", "post_validate", "unsupported"]);
+export const StructuredOutputCapabilitiesSchema = z.object({
+  json_object: structuredOutputMode,
+  json_schema: structuredOutputMode,
+  post_validation: z.boolean(),
+  max_schema_bytes: z.number().int().nonnegative(),
+}).strict();
+export const WorkerCapabilitiesSchema = z.object({
+  backend: z.enum(["llama", "mlx"]),
+  streaming: z.boolean(),
+  scheduling: z.object({
+    fused_multi_sequence_batching: z.boolean(),
+    interleaved: z.boolean(),
+  }).strict(),
+}).strict();
+export const CacheCapabilitiesSchema = z.object({
+  partial_suffix_trim: z.boolean(),
+  partial_prefix_branch: z.boolean(),
+  whole_state_copy: z.boolean(),
+  prompt_boundary_snapshots: z.boolean(),
+  quantized_kv: z.boolean(),
+}).strict();
+export const GenerationCapabilitiesSchema = z.object({
+  structured_output: StructuredOutputCapabilitiesSchema,
+  tool_templates: z.boolean(),
+}).strict();
+export const ModalCapabilitiesSchema = z.object({
+  input: z.tuple([z.literal("text")]),
+  output: z.tuple([z.literal("text")]),
+}).strict();
+export const EffectiveModelCapabilitiesSchema = z.object({
+  cache: CacheCapabilitiesSchema,
+  generation: GenerationCapabilitiesSchema,
+  modalities: ModalCapabilitiesSchema,
+}).strict();
+export const WorkerTokenCapabilitiesSchema = z.object({
+  model_context_window: z.number().int().positive().nullable(),
+  effective_context_window: z.number().int().positive(),
+  max_input_tokens: z.number().int().nonnegative(),
+  max_output_tokens: z.number().int().positive().nullable(),
+  backend_allocation_cap: z.number().int().positive(),
+  user_configured_override: z.number().int().positive().nullable(),
+  model_context_window_source: z.string().nullable().optional(),
+  max_output_tokens_source: z.string().nullable().optional(),
+}).strict();
+
 const resultSchemas = [
-  extensibleObject({ kind: z.literal("loaded") }),
+  extensibleObject({ kind: z.literal("loaded"),
+    effective_model_capabilities: EffectiveModelCapabilitiesSchema,
+    token_capabilities: WorkerTokenCapabilitiesSchema }),
   extensibleObject({ kind: z.literal("generated"), content: z.string() }),
   extensibleObject({ kind: z.literal("cancelled") }),
   extensibleObject({ kind: z.literal("max_active_updated"), max_active: z.number().int().positive() }),
@@ -142,19 +190,11 @@ export const ProtocolErrorSchema = extensibleObject({
 const scopedBase = { protocol, request_id: requestId, sequence };
 const unsolicitedBase = { protocol, request_id: z.never().optional(), sequence: z.never().optional() };
 
-const structuredOutputMode = z.enum(["native", "post_validate", "unsupported"]);
-export const StructuredOutputCapabilitiesSchema = z.object({
-  json_object: structuredOutputMode,
-  json_schema: structuredOutputMode,
-  post_validation: z.boolean(),
-  max_schema_bytes: z.number().int().nonnegative(),
-}).strict();
 export const ReadyEventSchema = extensibleObject({
   ...unsolicitedBase,
   type: z.literal("ready"),
-  worker_capabilities: z.record(z.unknown()),
-  model_capabilities: z.record(z.unknown()),
-  structured_output: StructuredOutputCapabilitiesSchema.optional(),
+  worker_capabilities: WorkerCapabilitiesSchema,
+  model_capabilities: z.null(),
 });
 export const AcceptedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("accepted") });
 export const StartedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("started") });
