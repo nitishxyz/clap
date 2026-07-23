@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, ModelTokenCapabilities } from "@clap/api";
+import type { StructuredOutputCapabilities, StructuredOutputContract } from "@clap/worker-protocol";
 import { getLlamaWorkerStatus, LlamaWorkerError } from "@clap/runtime-llama";
 import { getMlxWorkerStatus, MlxWorkerError } from "@clap/runtime-mlx";
 import { V1RequestTracker, type ResidentProtocolFact } from "../protocol/request-tracker";
@@ -30,6 +31,7 @@ type ActiveLaunch = {
   shutdownId?: string;
   resolveShutdown?: () => void;
   closePromise?: Promise<void>;
+  structuredOutputCapabilities?: StructuredOutputCapabilities;
   exited: Promise<void>;
   resolveExited: () => void;
 };
@@ -80,6 +82,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       memory: this.memory,
       retention: this.retention,
       tokenCapabilities: this.tokenCapabilities,
+      structuredOutputCapabilities: this.active?.structuredOutputCapabilities,
     };
   }
 
@@ -134,8 +137,11 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     onProgress?: ResidentProgress, onDispatch?: () => void, options?: ResidentChatOptions): Promise<ResidentChatResult> {
     await this.load();
     if (!options?.cacheIdentity) throw new Error("resident chat requires an internal cache identity");
-    const { cache_identity: _untrustedIdentity, ...publicRequest } = request as ChatCompletionRequest & { cache_identity?: unknown };
-    return this.sendControl("chat", publicRequest, onToken, signal, onProgress, onDispatch, undefined, options.cacheIdentity);
+    const { cache_identity: _untrustedIdentity, structured_output: _untrustedContract, ...publicRequest } =
+      request as ChatCompletionRequest & { cache_identity?: unknown; structured_output?: unknown };
+    const structuredOutput = normalizedStructuredOutput(publicRequest.response_format);
+    return this.sendControl("chat", publicRequest, onToken, signal, onProgress, onDispatch,
+      undefined, options.cacheIdentity, structuredOutput);
   }
 
   async setMaxActive(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void> {
@@ -302,6 +308,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     try {
       const fact = launch.tracker.consumeLine(line);
       if (fact.kind === "ready") {
+        if (this.active === launch) launch.structuredOutputCapabilities = fact.structuredOutputCapabilities;
         launch.context.phase = "idle";
         void this.ignoreMetadataFailure(() => this.launchLogs.markReady(launch.context));
         launch.resolveHandshake?.();
@@ -396,7 +403,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private async sendControl(type: string, body: Record<string, unknown>, onToken?: (token: string) => void,
     signal?: AbortSignal, onProgress?: ResidentProgress, onDispatch?: () => void,
-    expectedLaunch?: ActiveLaunch, cacheIdentity?: ResidentChatOptions["cacheIdentity"]): Promise<ResidentChatResult> {
+    expectedLaunch?: ActiveLaunch, cacheIdentity?: ResidentChatOptions["cacheIdentity"],
+    structuredOutput?: StructuredOutputContract): Promise<ResidentChatResult> {
     const launch = expectedLaunch ?? await this.ensureStarted();
     if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker is shutting down");
     await launch.handshake;
@@ -425,7 +433,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     launch.tracker.register(id);
     const requestType = type === "chat" ? "generate" : type;
     this.write(launch, requestType === "generate"
-      ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body, cache_identity: cacheIdentity }
+      ? { protocol: 1, type: requestType, request_id: id, prompt: JSON.stringify(body), request: body,
+          cache_identity: cacheIdentity, ...(structuredOutput ? { structured_output: structuredOutput } : {}) }
       : { protocol: 1, type: requestType, request_id: id, ...body });
     return promise;
   }
@@ -516,4 +525,11 @@ function enrichWorkerError(message: string, backend: ResidentBackend, logPath?: 
     return `${message}${logHint} For GGUF/llama.cpp Metal failures, try a smaller quant such as Q4_K_M, reduce CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, lower CLAP_LLAMA_GPU_LAYERS, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.`;
   }
   return `${message}${logHint}`;
+}
+
+function normalizedStructuredOutput(format: ChatCompletionRequest["response_format"]): StructuredOutputContract | undefined {
+  if (!format || format.type === "text") return undefined;
+  const strength = format.constraint === "required" ? "required" : "best_effort";
+  if (format.type === "json_object") return { kind: "json_object", strength };
+  return { kind: "json_schema", strength, schema: format.json_schema.schema };
 }

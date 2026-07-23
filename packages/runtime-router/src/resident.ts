@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, LoadedModel, ModelTokenCapabilities } from "@clap/api";
-import type { CacheIdentity } from "@clap/worker-protocol";
+import type { CacheIdentity, StructuredOutputCapabilities } from "@clap/worker-protocol";
 import { freemem, totalmem } from "node:os";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
@@ -28,6 +28,7 @@ export type ResidentWorkerInfo = {
   memory?: ResidentMlxMemory;
   retention?: ResidentMlxRetention;
   tokenCapabilities?: ModelTokenCapabilities;
+  structuredOutputCapabilities?: StructuredOutputCapabilities;
 };
 
 export type ResidentWorkerResidencyInfo = {

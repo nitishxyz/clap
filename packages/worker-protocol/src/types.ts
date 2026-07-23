@@ -13,10 +13,17 @@ export const COMPLETED_RESULT_KINDS = [
   "loaded", "generated", "cancelled", "max_active_updated", "unloaded", "shutdown",
 ] as const;
 
+export const STRUCTURED_OUTPUT_KINDS = ["json_object", "json_schema"] as const;
+export const STRUCTURED_OUTPUT_STRENGTHS = ["best_effort", "required"] as const;
+export const STRUCTURED_OUTPUT_MODES = ["native", "post_validate", "unsupported"] as const;
+
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
 export type WorkerRequestType = typeof WORKER_REQUEST_TYPES[number];
 export type WorkerEventType = typeof WORKER_EVENT_TYPES[number];
 export type CompletedResultKind = typeof COMPLETED_RESULT_KINDS[number];
+export type StructuredOutputKind = typeof STRUCTURED_OUTPUT_KINDS[number];
+export type StructuredOutputStrength = typeof STRUCTURED_OUTPUT_STRENGTHS[number];
+export type StructuredOutputMode = typeof STRUCTURED_OUTPUT_MODES[number];
 
 export type ProtocolError = {
   code: string;
@@ -55,7 +62,10 @@ export type CacheIdentity = {
     layout_version: number;
   };
 };
-export type GenerateRequest = { protocol: 1; type: "generate"; request_id: string; prompt: string; cache_identity: CacheIdentity; [key: string]: unknown };
+export type StructuredOutputContract =
+  | { kind: "json_object"; strength: StructuredOutputStrength; schema?: never }
+  | { kind: "json_schema"; strength: StructuredOutputStrength; schema: Record<string, unknown> };
+export type GenerateRequest = { protocol: 1; type: "generate"; request_id: string; prompt: string; cache_identity: CacheIdentity; structured_output?: StructuredOutputContract; [key: string]: unknown };
 export type CancelRequest = { protocol: 1; type: "cancel"; request_id: string; target_request_id: string; [key: string]: unknown };
 export type SetMaxActiveRequest = { protocol: 1; type: "set_max_active"; request_id: string; max_active: number; [key: string]: unknown };
 export type UnloadRequest = { protocol: 1; type: "unload"; request_id: string; [key: string]: unknown };
@@ -70,7 +80,13 @@ export type UnloadedResult = { kind: "unloaded"; [key: string]: unknown };
 export type ShutdownResult = { kind: "shutdown"; [key: string]: unknown };
 export type CompletedResult = LoadedResult | GeneratedResult | CancelledResult | MaxActiveUpdatedResult | UnloadedResult | ShutdownResult;
 
-export type ReadyEvent = { protocol: 1; type: "ready"; worker_capabilities: Record<string, unknown>; model_capabilities: Record<string, unknown>; [key: string]: unknown };
+export type StructuredOutputCapabilities = {
+  json_object: StructuredOutputMode;
+  json_schema: StructuredOutputMode;
+  post_validation: boolean;
+  max_schema_bytes: number;
+};
+export type ReadyEvent = { protocol: 1; type: "ready"; worker_capabilities: Record<string, unknown>; model_capabilities: Record<string, unknown>; structured_output?: StructuredOutputCapabilities; [key: string]: unknown };
 export type ScopedEventBase = { protocol: 1; request_id: string; sequence: number; [key: string]: unknown };
 export type AcceptedEvent = ScopedEventBase & { type: "accepted" };
 export type StartedEvent = ScopedEventBase & { type: "started" };

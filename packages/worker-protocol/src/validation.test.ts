@@ -66,6 +66,42 @@ describe("worker protocol validation", () => {
     } })).toThrow(ProtocolValidationError);
   });
 
+  test("validates strict structured-output contracts and ready capabilities", () => {
+    const base = {
+      protocol: 1, type: "generate", request_id: "req", prompt: "hello",
+      cache_identity: fixtureCacheIdentity(),
+    } as const;
+    expect(decodeWorkerRequest({
+      ...base, structured_output: { kind: "json_object", strength: "best_effort" },
+    })).toMatchObject({ structured_output: { kind: "json_object", strength: "best_effort" } });
+    expect(decodeWorkerRequest({
+      ...base, structured_output: {
+        kind: "json_schema", strength: "required", schema: { type: "object" },
+      },
+    })).toMatchObject({ structured_output: { kind: "json_schema", schema: { type: "object" } } });
+    for (const structured_output of [
+      { kind: "json_schema", strength: "required" },
+      { kind: "json_object", strength: "best_effort", schema: {} },
+      { kind: "json_schema", strength: "strict", schema: {} },
+      { kind: "grammar", strength: "required", schema: {} },
+      { kind: "json_schema", strength: "required", schema: {}, extension: true },
+    ]) expect(() => decodeWorkerRequest({ ...base, structured_output })).toThrow(ProtocolValidationError);
+
+    const ready = { protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} } as const;
+    expect(decodeWorkerEvent({
+      ...ready,
+      structured_output: {
+        json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
+      },
+    })).toMatchObject({ structured_output: { json_object: "native", max_schema_bytes: 65_536 } });
+    for (const structured_output of [
+      { json_object: "native", json_schema: "unsupported", post_validation: true },
+      { json_object: "grammar", json_schema: "unsupported", post_validation: false, max_schema_bytes: 0 },
+      { json_object: "native", json_schema: "unsupported", post_validation: false, max_schema_bytes: -1 },
+      { json_object: "native", json_schema: "unsupported", post_validation: false, max_schema_bytes: 0, extension: true },
+    ]) expect(() => decodeWorkerEvent({ ...ready, structured_output })).toThrow(ProtocolValidationError);
+  });
+
 function fixtureCacheIdentity() {
   const fingerprint = "a".repeat(64);
   return {

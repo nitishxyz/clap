@@ -61,16 +61,18 @@ async function lifecycleWorker(root: string): Promise<{ path: string; commands: 
   await writeFile(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const commands = ${JSON.stringify(commands)}; const behavior = process.env.TEST_SHUTDOWN ?? "terminal";
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {}, structured_output: { json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65536 } }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
 while ((newline = buffer.indexOf("\\n")) >= 0) { const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!raw) continue;
-const command = JSON.parse(raw); appendFileSync(commands, JSON.stringify({ type: command.type, at: Date.now() }) + "\\n");
+const command = JSON.parse(raw); appendFileSync(commands, JSON.stringify({ ...command, at: Date.now() }) + "\\n");
 if (command.type === "shutdown") { if (behavior === "ignore") continue; send("accepted", command.request_id); send("started", command.request_id); send("completed", command.request_id, { result: { kind: "shutdown" } }); process.exit(0); }
 send("accepted", command.request_id); send("started", command.request_id);
 if (command.type === "load") await Bun.sleep(Number(process.env.TEST_LOAD_DELAY ?? 0));
-send("completed", command.request_id, { result: { kind: command.type === "load" ? "loaded" : "unloaded" } }); }}
+const result = command.type === "load" ? { kind: "loaded" } : command.type === "generate"
+  ? { kind: "generated", content: "{}" } : { kind: "unloaded" };
+send("completed", command.request_id, { result }); }}
 `);
   await chmod(path, 0o755);
   return { path, commands };
@@ -83,7 +85,9 @@ async function staleExitWorker(root: string): Promise<string> {
 import { existsSync, writeFileSync } from "node:fs"; const first = !existsSync(${JSON.stringify(marker)});
 if (first) writeFileSync(${JSON.stringify(marker)}, "1");
 process.on("SIGTERM", async () => { await Bun.sleep(250); process.exit(9); });
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {}, structured_output: first
+  ? { json_object: "native", json_schema: "native", post_validation: false, max_schema_bytes: 32768 }
+  : { json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024 } }));
 const decoder = new TextDecoder(); let buffer = ""; const sequence = new Map();
 const send = (type, id, fields = {}) => { const next = sequence.get(id) ?? 0; sequence.set(id, next + 1); console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields })); };
 for await (const chunk of Bun.stdin.stream()) { buffer += decoder.decode(chunk, { stream: true }); let newline;
@@ -107,6 +111,11 @@ async function setup(behavior = "terminal", loadDelay = "0") {
   const worker = new ResidentWorkerProcess("key", "llama", model, undefined,
     { TEST_SHUTDOWN: behavior, TEST_LOAD_DELAY: loadDelay });
   return { worker, home, commands: fixture.commands };
+}
+
+async function commands(path: string): Promise<Array<Record<string, unknown>>> {
+  try { return (await readFile(path, "utf8")).trim().split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>); } catch { return []; }
 }
 
 async function commandTypes(path: string): Promise<string[]> {
@@ -139,12 +148,18 @@ describe.serial("resident worker lifecycle races", () => {
     expect(worker.info()).toMatchObject({ state: "resident", loadState: "loading" });
     const pid = worker.info().pid;
     await load;
-    expect(worker.info()).toMatchObject({ pid, state: "resident", loadState: "resident" });
+    expect(worker.info()).toMatchObject({
+      pid, state: "resident", loadState: "resident",
+      structuredOutputCapabilities: {
+        json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
+      },
+    });
 
     const close = worker.shutdownAsync();
     expect(worker.info()).toMatchObject({ pid, state: "resident", loadState: "closing" });
     await close;
     expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
+    expect(worker.info().structuredOutputCapabilities).toBeUndefined();
     expect(events.map((event) => event.loadState)).toEqual([
       "starting", "loading", "resident", "closing", "not_started",
     ]);
@@ -206,6 +221,29 @@ describe.serial("resident worker lifecycle races", () => {
     expect((await finalized(home)).crashClassification).toBe("expected_exit");
   });
 
+  test("injects normalized structured-output contracts and strips caller contracts", async () => {
+    const { worker, commands: path } = await setup();
+    await worker.chat({
+      model: "key",
+      messages: [{ role: "user", content: "x" }],
+      stream: false,
+      response_format: {
+        type: "json_schema",
+        constraint: "required",
+        json_schema: { name: "answer", schema: { type: "object", required: ["answer"] } },
+      },
+      structured_output: { kind: "grammar", strength: "required", schema: { caller: true } },
+    } as Parameters<ResidentWorkerProcess["chat"]>[0], undefined, undefined, undefined, undefined,
+    testResidentChatOptions);
+    const generate = (await commands(path)).find((command) => command.type === "generate")!;
+    expect(generate.structured_output).toEqual({
+      kind: "json_schema", strength: "required", schema: { type: "object", required: ["answer"] },
+    });
+    expect(generate.request).not.toHaveProperty("structured_output");
+    expect(JSON.parse(generate.prompt as string)).not.toHaveProperty("structured_output");
+    await worker.shutdownAsync();
+  });
+
   test("unload terminal precedes graceful shutdown", async () => {
     const { worker, commands } = await setup();
     await worker.load();
@@ -220,12 +258,18 @@ describe.serial("resident worker lifecycle races", () => {
     const model = join(root, "model.gguf"); await writeFile(model, "model");
     const worker = new ResidentWorkerProcess("key", "llama", model);
     await worker.load();
+    expect(worker.info().structuredOutputCapabilities?.json_schema).toBe("native");
     await expect(worker.chat({ model: "key", messages: [{ role: "user", content: "x" }], stream: false }, undefined, undefined, undefined, undefined, testResidentChatOptions))
       .rejects.toMatchObject({ code: "worker_protocol_error" });
+    expect(worker.info().structuredOutputCapabilities).toBeUndefined();
     await worker.load();
     const replacement = worker.info().launchId;
+    expect(worker.info().structuredOutputCapabilities).toEqual({
+      json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024,
+    });
     await Bun.sleep(350);
     expect(worker.info()).toMatchObject({ state: "resident", launchId: replacement });
+    expect(worker.info().structuredOutputCapabilities?.json_schema).toBe("unsupported");
     expect(worker.info().loadState).toBe("resident");
     await worker.shutdownAsync();
   });

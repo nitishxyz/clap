@@ -3,13 +3,21 @@ import { WorkerProtocolFault } from "./errors";
 import { V1RequestTracker } from "./request-tracker";
 
 const json = (value: unknown) => JSON.stringify(value);
-const ready = { protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} };
+const ready = {
+  protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {},
+  structured_output: {
+    json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
+  },
+} as const;
 const scoped = (type: string, requestId: string, sequence: number, fields: Record<string, unknown> = {}) =>
   json({ protocol: 1, type, request_id: requestId, sequence, ...fields });
 
 function tracker(maxTombstones = 1024) {
   const result = new V1RequestTracker(undefined, maxTombstones);
-  expect(result.consumeLine(json(ready))).toEqual({ kind: "ready", workerCapabilities: {}, modelCapabilities: {} });
+  expect(result.consumeLine(json(ready))).toEqual({
+    kind: "ready", workerCapabilities: {}, modelCapabilities: {},
+    structuredOutputCapabilities: ready.structured_output,
+  });
   return result;
 }
 

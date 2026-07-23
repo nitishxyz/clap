@@ -1,4 +1,4 @@
-{"protocol":1,"type":"ready","worker_capabilities":{"backend":"fixture","streaming":true},"model_capabilities":{"context_window":4096}}
+{"protocol":1,"type":"ready","worker_capabilities":{"backend":"fixture","streaming":true},"model_capabilities":{"context_window":4096},"structured_output":{"json_object":"native","json_schema":"post_validate","post_validation":true,"max_schema_bytes":65536}}
 {"protocol":1,"type":"accepted","request_id":"req_generate","sequence":0}
 {"protocol":1,"type":"started","request_id":"req_generate","sequence":1}
 {"protocol":1,"type":"token","request_id":"req_generate","sequence":2,"text":"Hello"}

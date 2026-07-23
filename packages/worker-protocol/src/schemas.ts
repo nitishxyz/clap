@@ -46,9 +46,22 @@ export const CacheIdentitySchema = z.object({
     layout_version: z.number().int().positive(),
   }).strict(),
 }).strict();
+export const StructuredOutputContractSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("json_object"),
+    strength: z.enum(["best_effort", "required"]),
+    schema: z.never().optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("json_schema"),
+    strength: z.enum(["best_effort", "required"]),
+    schema: z.record(z.unknown()),
+  }).strict(),
+]);
 export const LoadRequestSchema = extensibleObject({ ...requestBase, type: z.literal("load"), model: z.string().min(1) });
 export const GenerateRequestSchema = extensibleObject({
   ...requestBase, type: z.literal("generate"), prompt: z.string(), cache_identity: CacheIdentitySchema,
+  structured_output: StructuredOutputContractSchema.optional(),
 });
 export const CancelRequestSchema = extensibleObject({ ...requestBase, type: z.literal("cancel"), target_request_id: requestId });
 export const SetMaxActiveRequestSchema = extensibleObject({ ...requestBase, type: z.literal("set_max_active"), max_active: z.number().int().positive() });
@@ -78,11 +91,19 @@ export const ProtocolErrorSchema = extensibleObject({
 const scopedBase = { protocol, request_id: requestId, sequence };
 const unsolicitedBase = { protocol, request_id: z.never().optional(), sequence: z.never().optional() };
 
+const structuredOutputMode = z.enum(["native", "post_validate", "unsupported"]);
+export const StructuredOutputCapabilitiesSchema = z.object({
+  json_object: structuredOutputMode,
+  json_schema: structuredOutputMode,
+  post_validation: z.boolean(),
+  max_schema_bytes: z.number().int().nonnegative(),
+}).strict();
 export const ReadyEventSchema = extensibleObject({
   ...unsolicitedBase,
   type: z.literal("ready"),
   worker_capabilities: z.record(z.unknown()),
   model_capabilities: z.record(z.unknown()),
+  structured_output: StructuredOutputCapabilitiesSchema.optional(),
 });
 export const AcceptedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("accepted") });
 export const StartedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("started") });

@@ -1,11 +1,12 @@
-import type { WorkerEvent } from "@clap/worker-protocol";
+import type { StructuredOutputCapabilities, WorkerEvent } from "@clap/worker-protocol";
 import { V1WorkerProtocolDecoder } from "./v1-decoder";
 import { WorkerProtocolFault, protocolFault } from "./errors";
 
 export type TrackedRequestState = "registered" | "accepted" | "started";
 
 export type ResidentProtocolFact =
-  | { kind: "ready"; workerCapabilities: Record<string, unknown>; modelCapabilities: Record<string, unknown> }
+  | { kind: "ready"; workerCapabilities: Record<string, unknown>; modelCapabilities: Record<string, unknown>;
+      structuredOutputCapabilities?: StructuredOutputCapabilities }
   | { kind: "accepted"; requestId: string }
   | { kind: "started"; requestId: string }
   | { kind: "token"; requestId: string; text: string }
@@ -49,7 +50,12 @@ export class V1RequestTracker {
 
   consume(event: WorkerEvent): ResidentProtocolFact {
     if (event.type === "ready") {
-      return { kind: "ready", workerCapabilities: event.worker_capabilities, modelCapabilities: event.model_capabilities };
+      return {
+        kind: "ready",
+        workerCapabilities: event.worker_capabilities,
+        modelCapabilities: event.model_capabilities,
+        ...(event.structured_output ? { structuredOutputCapabilities: event.structured_output } : {}),
+      };
     }
     if (event.type === "telemetry") return { kind: "telemetry", telemetry: event.telemetry };
     if (event.type === "diagnostic") return { kind: "diagnostic", level: event.level, message: event.message };
