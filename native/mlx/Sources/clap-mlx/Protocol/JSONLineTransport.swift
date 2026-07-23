@@ -49,7 +49,10 @@ private final class V1ProtocolWriter {
   func ready() {
     write(["protocol": 1, "type": "ready",
       "worker_capabilities": ["backend": "mlx", "streaming": true],
-      "model_capabilities": [:]])
+      "model_capabilities": [:],
+      "structured_output": ["json_object": "post_validate",
+        "json_schema": "post_validate", "post_validation": true,
+        "max_schema_bytes": structuredOutputMaxSchemaBytes]])
   }
 
   func accepted(_ id: String) -> Bool {

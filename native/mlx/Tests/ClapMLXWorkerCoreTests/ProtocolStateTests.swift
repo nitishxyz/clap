@@ -25,6 +25,103 @@ struct ProtocolStateTests {
     let messages = generated?["messages"] as? [[String: Any]]
     #expect(messages?.first?["content"] as? String == "Hello")
     #expect(generated?["protocol"] == nil)
+    #expect(requests[1].structuredOutput?.kind == "json_schema")
+    #expect(requests[1].structuredOutput?.strength == "required")
+    #expect(requests[1].structuredOutput?.schemaJSON != nil)
+  }
+
+  @Test("structured output validates typed contracts and schema bounds")
+  func structuredOutputContracts() throws {
+    let identity = try fixtureIdentity()
+    let bestEffort = try generateEnvelope(identity: identity, structuredOutput: [
+      "kind": "json_object", "strength": "best_effort",
+    ])
+    #expect(bestEffort.structuredOutput == V1StructuredOutput(
+      kind: "json_object", strength: "best_effort", schemaJSON: nil))
+
+    let localReference = try generateEnvelope(identity: identity, structuredOutput: [
+      "kind": "json_schema", "strength": "best_effort",
+      "schema": ["$defs": ["item": ["type": "string"]],
+        "type": "array", "items": ["$ref": "#/$defs/item"]],
+    ])
+    #expect(localReference.structuredOutput?.schemaJSON != nil)
+
+    let malformed: [Any] = [
+      "bad",
+      ["kind": "grammar", "strength": "best_effort"],
+      ["kind": "json_object", "strength": "strict"],
+      ["kind": "json_schema", "strength": "best_effort"],
+      ["kind": "json_object", "strength": "best_effort", "schema": [:]],
+      ["kind": "json_object", "strength": "best_effort", "extra": true],
+      ["kind": "json_schema", "strength": "best_effort",
+        "schema": ["$ref": "https://example.com/schema.json"]],
+    ]
+    for contract in malformed {
+      do {
+        _ = try generateEnvelope(identity: identity, structuredOutput: contract)
+        Issue.record("invalid structured output decoded: \(contract)")
+      } catch let error as V1EnvelopeDecodeError {
+        #expect(error.code == "invalid_structured_output")
+      }
+    }
+
+    do {
+      _ = try generateEnvelope(identity: identity, structuredOutput: [
+        "kind": "json_schema", "strength": "best_effort",
+        "schema": ["description": String(repeating: "x", count: 65 * 1024)],
+      ])
+      Issue.record("oversized schema decoded")
+    } catch let error as V1EnvelopeDecodeError {
+      #expect(error.code == "invalid_structured_output")
+      #expect(error.description.contains("64 KiB"))
+    }
+
+    var nested: Any = ["type": "string"]
+    for _ in 0..<33 { nested = [nested] }
+    do {
+      _ = try generateEnvelope(identity: identity, structuredOutput: [
+        "kind": "json_schema", "strength": "best_effort", "schema": ["allOf": nested],
+      ])
+      Issue.record("overly deep schema decoded")
+    } catch let error as V1EnvelopeDecodeError {
+      #expect(error.code == "invalid_structured_output")
+      #expect(error.description.contains("depth"))
+    }
+
+    let properties = Dictionary(uniqueKeysWithValues: (0..<1025).map {
+      ("p\($0)", ["type": "string"])
+    })
+    do {
+      _ = try generateEnvelope(identity: identity, structuredOutput: [
+        "kind": "json_schema", "strength": "best_effort",
+        "schema": ["type": "object", "properties": properties],
+      ])
+      Issue.record("schema with too many properties decoded")
+    } catch let error as V1EnvelopeDecodeError {
+      #expect(error.code == "invalid_structured_output")
+      #expect(error.description.contains("1024 properties"))
+    }
+  }
+
+  private func fixtureIdentity() throws -> [String: Any] {
+    let testFile = URL(fileURLWithPath: #filePath)
+    let root = testFile.deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let fixture = root.appendingPathComponent(
+      "packages/worker-protocol/fixtures/v1/cache-identity-vector.json")
+    let object = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as! [String: Any]
+    return object["identity"] as! [String: Any]
+  }
+
+  private func generateEnvelope(identity: [String: Any], structuredOutput: Any) throws
+      -> V1RequestEnvelope {
+    let object: [String: Any] = [
+      "protocol": 1, "type": "generate", "request_id": "structured",
+      "prompt": "hello", "cache_identity": identity,
+      "structured_output": structuredOutput,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object)
+    return try decodeV1Envelope(String(decoding: data, as: UTF8.self))
   }
 
   @Test("malformed, invalid version, cancel, and shutdown envelopes are classified")

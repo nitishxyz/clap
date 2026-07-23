@@ -20,6 +20,12 @@ extension WorkerState {
       let admittedNs = DispatchTime.now().uptimeNanoseconds
       let receivedToAdmittedMs = Double(admittedNs - receivedNs) / 1_000_000
       let templateStartNs = admittedNs
+      if control.structured_output?.strength == "required" {
+        emit(id: id,
+          error: "MLX supports structured output only as best_effort post-validation",
+          code: "structured_output_capability_required")
+        return .rejected
+      }
       guard let model = control.model else {
         emit(id: id, error: "chat.model is required")
         return .rejected
@@ -45,9 +51,14 @@ extension WorkerState {
         PromptBoundaryDescriptor(kind: $0.kind, throughMessage: $0.through_message,
           label: $0.label)
       }
+      var messages = promptMessages(control.messages ?? [])
+      if let structuredOutput = control.structured_output {
+        messages.insert(PromptMessage(role: "system",
+          content: structuredOutputInstruction(structuredOutput)), at: 0)
+      }
       let prompt: PreparedPrompt
       do {
-        prompt = try PromptRenderer.render(messages: promptMessages(control.messages ?? []),
+        prompt = try PromptRenderer.render(messages: messages,
           tools: toolSpecs, boundaries: descriptors,
           modelDirectory: modelRuntime.directory ?? modelDirectory,
           tokenizer: promptTokenizerAdapter(tok)) { message in
@@ -175,4 +186,18 @@ extension WorkerState {
       return .rejected
     }
   }
+
+private func structuredOutputInstruction(_ contract: StructuredOutputRequest) -> String {
+  if contract.kind == "json_object" {
+    return "Return only one valid JSON object. Do not include markdown or explanatory text."
+  }
+  let schema: String
+  if let value = contract.schema,
+     let data = try? JSONSerialization.data(withJSONObject: value.foundationValue,
+       options: [.sortedKeys]),
+     let encoded = String(data: data, encoding: .utf8) {
+    schema = encoded
+  } else { schema = "{}" }
+  return "Return only JSON matching this schema. Do not include markdown or explanatory text. Schema: \(schema)"
+}
 }

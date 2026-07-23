@@ -10,10 +10,47 @@ struct V1Request {
   let controlData: Data
 }
 
+struct StructuredOutputRequest: Decodable {
+  let kind: String
+  let strength: String
+  let schema: StructuredJSONValue?
+}
+
+enum StructuredJSONValue: Decodable {
+  case object([String: StructuredJSONValue]), array([StructuredJSONValue]), string(String)
+  case number(Double), boolean(Bool), null
+
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() { self = .null }
+    else if let value = try? container.decode([String: StructuredJSONValue].self) { self = .object(value) }
+    else if let value = try? container.decode([StructuredJSONValue].self) { self = .array(value) }
+    else if let value = try? container.decode(String.self) { self = .string(value) }
+    else if let value = try? container.decode(Bool.self) { self = .boolean(value) }
+    else { self = .number(try container.decode(Double.self)) }
+  }
+
+  var foundationValue: Any {
+    switch self {
+    case .object(let value): return value.mapValues(\.foundationValue)
+    case .array(let value): return value.map(\.foundationValue)
+    case .string(let value): return value
+    case .number(let value): return value
+    case .boolean(let value): return value
+    case .null: return NSNull()
+    }
+  }
+}
+
 typealias V1DecodeError = V1EnvelopeDecodeError
 
 func decodeV1Request(_ line: String) throws -> V1Request {
   let envelope = try decodeV1Envelope(line)
+  if envelope.structuredOutput?.strength == "required" {
+    throw V1DecodeError(code: "structured_output_capability_required",
+      requestID: envelope.requestID,
+      description: "MLX supports structured output only as best_effort post-validation")
+  }
   let control: ControlRequest
   do {
     control = try JSONDecoder().decode(ControlRequest.self, from: envelope.legacyPayload)
@@ -107,4 +144,5 @@ struct ControlRequest: Decodable {
   let frequency_penalty: Double?
   let cache: CacheIntent?
   let cache_identity: OpaqueCacheIdentityInput?
+  let structured_output: StructuredOutputRequest?
 }
