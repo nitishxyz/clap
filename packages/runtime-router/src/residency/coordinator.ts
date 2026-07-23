@@ -55,7 +55,7 @@ export interface ResidencyCoordinatorDependencies {
 }
 
 export type ResidencyCoordinatorEventType = "model_load_reserved" | "model_load_started" | "model_load_committed"
-  | "model_load_rolled_back" | "model_evicted_for_load" | "model_load_rejected";
+  | "model_load_rolled_back" | "model_evicted_for_load" | "model_evicted_for_pressure" | "model_load_rejected";
 
 export interface ResidencyCoordinatorEvent {
   readonly type: ResidencyCoordinatorEventType;

@@ -11,6 +11,7 @@ import type { WorkerLoadState, WorkerLoadStateEvent, WorkerRssSampler } from "./
 import { ResidencyCoordinator, measuredResidencyMemory,
   type ResidencyCoordinatorDependencies, type ResidencyLifecycleAdapter } from "./residency/coordinator";
 import type { LoadReservation, ResidencyModelDescriptor } from "./residency/types";
+import { selectIdleEvictionVictims } from "./residency/eviction";
 
 export { ResidentWorkerProcess } from "./process/resident-worker-process";
 export type { ResidentCacheInfo } from "./process/types";
@@ -157,6 +158,34 @@ export type ResidentWorkerHandle = {
   shutdownAsync?(): Promise<void>;
   drainAndShutdownAsync?(): Promise<void>;
 };
+
+export async function evictOneIdleForCriticalPressure(input: {
+  lifecycle: ResidencyLifecycleAdapter;
+  reservedKeys?: ReadonlySet<string>;
+  onEvicted?: (snapshot: import("./lifecycle").LifecycleResidencySnapshot) => void | Promise<void>;
+  resample?: () => void | Promise<void>;
+}): Promise<import("./lifecycle").LifecycleResidencySnapshot | undefined> {
+  const attempted = new Set<string>();
+  while (true) {
+    const victim = selectIdleEvictionVictims(input.lifecycle.snapshotForResidency(), {
+      reservedKeys: input.reservedKeys,
+    }).find((snapshot) => !attempted.has(snapshot.key));
+    if (!victim) return undefined;
+    attempted.add(victim.key);
+    if (await input.lifecycle.tryEvictIdle(victim) === "changed") continue;
+    await input.onEvicted?.(victim);
+    await input.resample?.();
+    return victim;
+  }
+}
+
+export function shouldEvictForCriticalPressure(
+  pressure: MemoryPressure,
+  workers: readonly Pick<ResidentMlxRetention, "maxActive" | "activePolicy">[],
+): boolean {
+  return pressure === "critical" && workers.length > 0 && workers.every((retention) =>
+    retention.maxActive <= 1 || retention.activePolicy.memoryCeiling <= 1);
+}
 
 export type RegistryResidencyConfiguration = Omit<ResidencyCoordinatorDependencies,
   "memorySnapshot" | "lifecycle"> & {
@@ -456,6 +485,8 @@ export class ResidentWorkerRegistry {
   private rebalancing = false;
   private readonly operationGate = new RegistryOperationGate();
   private residencyCoordinator?: ResidencyCoordinator;
+  private residencyLifecycle?: ResidencyLifecycleAdapter;
+  private residencyEvent?: ResidencyCoordinatorDependencies["onEvent"];
   onCrash?: ResidentCrashListener;
   memorySnapshot: (pids: number[]) => Promise<{
     physicalMemoryBytes: number;
@@ -477,6 +508,8 @@ export class ResidentWorkerRegistry {
       setResidencyTransition: (key, state) => configuration.lifecycle.setResidencyTransition(key, state),
       clearResidencyTransition: (key) => configuration.lifecycle.clearResidencyTransition(key),
     };
+    this.residencyLifecycle = lifecycle;
+    this.residencyEvent = configuration.onEvent;
     this.residencyCoordinator = new ResidencyCoordinator({
       ...configuration,
       lifecycle,
@@ -641,84 +674,120 @@ export class ResidentWorkerRegistry {
 
   async rebalance(reason = "manual"): Promise<void> {
     if (this.rebalancing) return;
-    const resident = [...this.workers.values()].filter((worker) => worker.info().retention);
-    if (!resident.length) return;
     this.rebalancing = true;
     try {
-      const pids = resident.map((worker) => worker.info().pid).filter((pid): pid is number => pid !== undefined);
-      const snapshot = await this.memorySnapshot(pids);
-      const physical = Math.max(1, snapshot.physicalMemoryBytes);
-      const pressure = classifyMemoryPressure(snapshot.availableMemoryBytes, physical, this.pressureState);
-      const topologyChanged = pressure !== this.pressureState;
-      this.pressureState = pressure;
-      const now = Date.now();
-      const inputWorkers = resident.flatMap((worker) => {
-        const info = worker.info();
-        const retention = info.retention;
-        if (!retention) return [];
-        const inputs = retention.activePolicy.inputs;
-        const inputNumber = (name: string) => typeof inputs[name] === "number" ? inputs[name] : undefined;
-        const environment = this.workerEnvironments.get(worker.key) ?? {};
-        const configured = Number(environment.CLAP_MAX_ACTIVE ?? process.env.CLAP_MAX_ACTIVE ?? 0);
-        const growth = this.recentRetainedGrowth.get(worker.key);
-        const configuredMinimum = Number(environment.CLAP_MLX_RETAINED_GROWTH_MIN_BYTES);
-        const configuredPercent = Number(environment.CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT);
-        const fallbackResident = info.memory && info.memory.activeBytes !== null && info.memory.cacheBytes !== null
-          ? info.memory.activeBytes + info.memory.cacheBytes
-          : inputNumber("model_active_bytes") ?? inputNumber("model_file_bytes") ?? 0;
-        return [{
-          key: worker.key,
-          mode: retention.activePolicy.mode,
-          requestedMax: retention.activePolicy.mode === "fixed" && configured > 0
-            ? configured : retention.activePolicy.selectedMax,
-          currentMax: retention.maxActive,
-          backendCeiling: retention.activePolicy.backendCeiling,
-          hardwareCeiling: retention.activePolicy.hardwareCeiling,
-          modelCeiling: retention.activePolicy.modelCeiling,
-          retainedCeiling: retention.hardCeiling,
-          perActiveReserveBytes: inputNumber("per_active_reserve_bytes") ?? 1024 ** 3,
-          residentBytes: info.pid ? snapshot.residentBytesByPid.get(info.pid) ?? fallbackResident : fallbackResident,
-          retainedBytes: retention.retainedBytes ?? retention.estimatedRetainedBytes ?? 0,
-          retainedBudgetBytes: retention.budgetBytes,
-          recentRetainedGrowthBytes: growth && now - growth.at <= 60_000 ? growth.bytes : 0,
-          growthMinimumBytes: Number.isFinite(configuredMinimum) && configuredMinimum >= 0
-            ? configuredMinimum : 64 * 1024 ** 2,
-          growthReservePercent: Number.isFinite(configuredPercent) && configuredPercent >= 0
-            ? configuredPercent : 10,
-        }];
-      });
-      const osReserve = Math.min(physical, Math.max(2 * 1024 ** 3, Math.floor(physical / 10)));
-      const plans = selectGlobalActiveLimits({
-        physicalMemoryBytes: physical,
-        osReserveBytes: osReserve,
-        pressure,
-        workers: inputWorkers,
-      });
-      for (const plan of plans) {
-        const worker = this.workers.get(plan.key);
-        if (!worker) continue;
-        const previousAdjustment = this.lastAdjustments.get(plan.key);
-        const adjust = shouldAdjustActiveLimit(plan, now, previousAdjustment?.at);
-        if (adjust) this.lastAdjustments.set(plan.key, {
-          at: now,
-          reason: plan.reason,
-          previous: plan.previousMax,
-        });
-        const adjustment = this.lastAdjustments.get(plan.key);
-        await worker.setMaxActive(adjust ? plan.selectedMax : plan.previousMax, {
-          previousMaxActive: adjustment?.previous ?? plan.previousMax,
-          limitingReason: plan.limitingReason,
-          lastAdjustmentReason: adjust ? plan.reason : adjustment?.reason
-            ?? (topologyChanged ? `pressure_${pressure}` : reason),
-          lastAdjustmentAt: adjustment ? new Date(adjustment.at).toISOString() : undefined,
-          retainedGrowthReserveBytes: plan.retainedGrowthReserveBytes,
-          globalResidentMemoryBytes: plan.globalResidentBytes,
-          pressureState: pressure,
-        });
-      }
+      await this.operationGate.exclusiveOperation(() => this.rebalanceExclusive(reason));
     } finally {
       this.rebalancing = false;
     }
+  }
+
+  private async rebalanceExclusive(reason: string): Promise<void> {
+    let resident = [...this.workers.values()].filter((worker) => worker.info().retention);
+    if (!resident.length) return;
+    let pids = resident.map((worker) => worker.info().pid).filter((pid): pid is number => pid !== undefined);
+    let snapshot = await this.memorySnapshot(pids);
+    let physical = Math.max(1, snapshot.physicalMemoryBytes);
+    let pressure = classifyMemoryPressure(snapshot.availableMemoryBytes, physical, this.pressureState);
+    const topologyChanged = pressure !== this.pressureState;
+    this.pressureState = pressure;
+    if (shouldEvictForCriticalPressure(pressure,
+      resident.flatMap((worker) => worker.info().retention ?? []))) {
+      const eviction = await this.evictOneForCriticalPressure();
+      if (eviction) {
+        resident = [...this.workers.values()].filter((worker) => worker.info().retention);
+        if (!resident.length) return;
+        pids = resident.map((worker) => worker.info().pid).filter((pid): pid is number => pid !== undefined);
+        snapshot = await this.memorySnapshot(pids);
+        physical = Math.max(1, snapshot.physicalMemoryBytes);
+        pressure = classifyMemoryPressure(snapshot.availableMemoryBytes, physical, pressure);
+        this.pressureState = pressure;
+      }
+    }
+    const now = Date.now();
+    const inputWorkers = resident.flatMap((worker) => {
+      const info = worker.info();
+      const retention = info.retention;
+      if (!retention) return [];
+      const inputs = retention.activePolicy.inputs;
+      const inputNumber = (name: string) => typeof inputs[name] === "number" ? inputs[name] : undefined;
+      const environment = this.workerEnvironments.get(worker.key) ?? {};
+      const configured = Number(environment.CLAP_MAX_ACTIVE ?? process.env.CLAP_MAX_ACTIVE ?? 0);
+      const growth = this.recentRetainedGrowth.get(worker.key);
+      const configuredMinimum = Number(environment.CLAP_MLX_RETAINED_GROWTH_MIN_BYTES);
+      const configuredPercent = Number(environment.CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT);
+      const fallbackResident = info.memory && info.memory.activeBytes !== null && info.memory.cacheBytes !== null
+        ? info.memory.activeBytes + info.memory.cacheBytes
+        : inputNumber("model_active_bytes") ?? inputNumber("model_file_bytes") ?? 0;
+      return [{
+        key: worker.key,
+        mode: retention.activePolicy.mode,
+        requestedMax: retention.activePolicy.mode === "fixed" && configured > 0
+          ? configured : retention.activePolicy.selectedMax,
+        currentMax: retention.maxActive,
+        backendCeiling: retention.activePolicy.backendCeiling,
+        hardwareCeiling: retention.activePolicy.hardwareCeiling,
+        modelCeiling: retention.activePolicy.modelCeiling,
+        retainedCeiling: retention.hardCeiling,
+        perActiveReserveBytes: inputNumber("per_active_reserve_bytes") ?? 1024 ** 3,
+        residentBytes: info.pid ? snapshot.residentBytesByPid.get(info.pid) ?? fallbackResident : fallbackResident,
+        retainedBytes: retention.retainedBytes ?? retention.estimatedRetainedBytes ?? 0,
+        retainedBudgetBytes: retention.budgetBytes,
+        recentRetainedGrowthBytes: growth && now - growth.at <= 60_000 ? growth.bytes : 0,
+        growthMinimumBytes: Number.isFinite(configuredMinimum) && configuredMinimum >= 0
+          ? configuredMinimum : 64 * 1024 ** 2,
+        growthReservePercent: Number.isFinite(configuredPercent) && configuredPercent >= 0
+          ? configuredPercent : 10,
+      }];
+    });
+    const osReserve = Math.min(physical, Math.max(2 * 1024 ** 3, Math.floor(physical / 10)));
+    const plans = selectGlobalActiveLimits({
+      physicalMemoryBytes: physical,
+      osReserveBytes: osReserve,
+      pressure,
+      workers: inputWorkers,
+    });
+    for (const plan of plans) {
+      const worker = this.workers.get(plan.key);
+      if (!worker) continue;
+      const previousAdjustment = this.lastAdjustments.get(plan.key);
+      const adjust = shouldAdjustActiveLimit(plan, now, previousAdjustment?.at);
+      if (adjust) this.lastAdjustments.set(plan.key, {
+        at: now,
+        reason: plan.reason,
+        previous: plan.previousMax,
+      });
+      const adjustment = this.lastAdjustments.get(plan.key);
+      await worker.setMaxActive(adjust ? plan.selectedMax : plan.previousMax, {
+        previousMaxActive: adjustment?.previous ?? plan.previousMax,
+        limitingReason: plan.limitingReason,
+        lastAdjustmentReason: adjust ? plan.reason : adjustment?.reason
+          ?? (topologyChanged ? `pressure_${pressure}` : reason),
+        lastAdjustmentAt: adjustment ? new Date(adjustment.at).toISOString() : undefined,
+        retainedGrowthReserveBytes: plan.retainedGrowthReserveBytes,
+        globalResidentMemoryBytes: plan.globalResidentBytes,
+        pressureState: pressure,
+      });
+    }
+  }
+
+  private async evictOneForCriticalPressure(): Promise<boolean> {
+    const lifecycle = this.residencyLifecycle;
+    if (!lifecycle) return false;
+    const reservedKeys = new Set(this.residencyReservations().map((reservation) => reservation.model.modelKey));
+    const backendByKey = new Map([...this.handles].map(([key, handle]) => [key, handle.backend]));
+    const victim = await evictOneIdleForCriticalPressure({
+      lifecycle,
+      reservedKeys,
+      onEvicted: (snapshot) => this.residencyEvent?.({
+        type: "model_evicted_for_pressure",
+        backend: backendByKey.get(snapshot.key) ?? "unknown",
+        reason: "critical_memory_pressure",
+        reservationBytes: 0,
+        activeReservations: this.residencyReservations().length,
+      }),
+    });
+    return victim !== undefined;
   }
 
   private handleTelemetry(worker: ResidentWorkerProcess, previous: ResidentMlxRetention | undefined,

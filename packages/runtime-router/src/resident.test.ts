@@ -1,5 +1,88 @@
 import { describe, expect, test } from "bun:test";
-import { deriveTokenCapabilities, parseWorkerRetention, parseWorkerTokenCapabilities, validateTokenBudget } from "./resident";
+import { deriveTokenCapabilities, evictOneIdleForCriticalPressure, parseWorkerRetention, parseWorkerTokenCapabilities, shouldEvictForCriticalPressure, validateTokenBudget } from "./resident";
+import { unavailableMemory } from "./residency";
+import type { LifecycleResidencySnapshot } from "./lifecycle";
+
+function pressureSnapshot(key: string, overrides: Partial<LifecycleResidencySnapshot> = {}): LifecycleResidencySnapshot {
+  return { key, state: "idle", activeRequests: 0, pinned: false, always: false,
+    loadedAtMs: 1, lastUsedAtMs: 1, lifecycleVersion: 1, retainedValueScore: 0,
+    memory: unavailableMemory("not_observed"), ...overrides };
+}
+
+describe("critical pressure eviction", () => {
+  test("triggers only when critical pressure cannot be relieved above minimum concurrency", () => {
+    const retention = parseWorkerRetention({
+      max_active: 1, active_policy: { mode: "auto", selected_max: 1, backend_ceiling: 8,
+        hardware_ceiling: 8, model_ceiling: 8, memory_ceiling: 1, reason: "memory_ceiling", inputs: {} },
+      active: 0, retained_total: 0, retained_sessions: 0, retained_anchors: 0,
+      retained_bytes: 0, session_bytes: 0, anchor_bytes: 0, budget_bytes: 1,
+      high_watermark_bytes: 1, low_watermark_bytes: 1, under_pressure: false,
+      hard_ceiling: 1, eviction_count: 0,
+    })!;
+    expect(shouldEvictForCriticalPressure("critical", [retention])).toBe(true);
+    expect(shouldEvictForCriticalPressure("warning", [retention])).toBe(false);
+    expect(shouldEvictForCriticalPressure("critical", [{ ...retention, maxActive: 2,
+      activePolicy: { ...retention.activePolicy, memoryCeiling: 2 } }])).toBe(false);
+  });
+
+  test("protects unsafe residents and selects the oldest eligible candidate", async () => {
+    const snapshots = [
+      pressureSnapshot("active", { state: "active", activeRequests: 1, lastUsedAtMs: 0 }),
+      pressureSnapshot("pinned", { pinned: true, lastUsedAtMs: 0 }),
+      pressureSnapshot("loading", { state: "loading", lastUsedAtMs: 0 }),
+      pressureSnapshot("always", { always: true, lastUsedAtMs: 0 }),
+      pressureSnapshot("reserved", { lastUsedAtMs: 0 }),
+      pressureSnapshot("oldest", { lastUsedAtMs: 10 }),
+      pressureSnapshot("newest", { lastUsedAtMs: 20 }),
+    ];
+    const evicted: string[] = [];
+    const victim = await evictOneIdleForCriticalPressure({
+      lifecycle: {
+        snapshotForResidency: () => snapshots,
+        tryEvictIdle: async (snapshot) => { evicted.push(snapshot.key); return "evicted"; },
+        setResidencyTransition: () => {}, clearResidencyTransition: () => {},
+      },
+      reservedKeys: new Set(["reserved"]),
+    });
+    expect(victim?.key).toBe("oldest");
+    expect(evicted).toEqual(["oldest"]);
+  });
+
+  test("replans stale snapshots, awaits shutdown, resamples, and evicts once", async () => {
+    let snapshots = [pressureSnapshot("stale", { lastUsedAtMs: 1 }), pressureSnapshot("next", { lastUsedAtMs: 2 })];
+    const order: string[] = [];
+    const victim = await evictOneIdleForCriticalPressure({
+      lifecycle: {
+        snapshotForResidency: () => snapshots,
+        tryEvictIdle: async (snapshot) => {
+          order.push(`try:${snapshot.key}`);
+          if (snapshot.key === "stale") { snapshots = snapshots.slice(1); return "changed"; }
+          await Promise.resolve();
+          order.push(`shutdown:${snapshot.key}`);
+          snapshots = [];
+          return "evicted";
+        },
+        setResidencyTransition: () => {}, clearResidencyTransition: () => {},
+      },
+      onEvicted: (snapshot) => { order.push(`event:${snapshot.key}`); },
+      resample: () => { order.push("resample"); },
+    });
+    expect(victim?.key).toBe("next");
+    expect(order).toEqual(["try:stale", "try:next", "shutdown:next", "event:next", "resample"]);
+  });
+
+  test("falls back safely when no eligible candidate exists", async () => {
+    let calls = 0;
+    expect(await evictOneIdleForCriticalPressure({
+      lifecycle: {
+        snapshotForResidency: () => [pressureSnapshot("active", { state: "active", activeRequests: 1 })],
+        tryEvictIdle: async () => { calls += 1; return "evicted"; },
+        setResidencyTransition: () => {}, clearResidencyTransition: () => {},
+      },
+    })).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+});
 
 describe("worker retention telemetry", () => {
   test("parses a complete MLX retention snapshot", () => {

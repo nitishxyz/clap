@@ -198,4 +198,16 @@ describe("metrics queue accounting", () => {
     expect(handle.record.sessionDisplayId).toBe(handle.record.conversation);
     expect(handle.record.sessionFingerprint).toBeUndefined();
   });
+
+  test("records critical pressure evictions with a safe reason", () => {
+    const metrics = new MetricsCollector();
+    metrics.residencyEvent({
+      type: "model_evicted_for_pressure", backend: "mlx", reason: "critical_memory_pressure",
+      reservationBytes: 0, activeReservations: 0,
+    });
+    expect(metrics.residency.evictions.get("mlx\0critical_memory_pressure")).toBe(1);
+    expect(metrics.events(1)[0]).toMatchObject({
+      type: "model_evicted_for_pressure", backend: "mlx", reason: "critical_memory_pressure",
+    });
+  });
 });

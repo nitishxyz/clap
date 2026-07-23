@@ -119,7 +119,7 @@ export type ServerEvent = {
   at: number;
   type: "server" | "load" | "unload" | "expire" | "error" | "download"
     | "model_load_reserved" | "model_load_started" | "model_load_committed" | "model_load_rolled_back"
-    | "model_evicted_for_load" | "model_load_rejected";
+    | "model_evicted_for_load" | "model_evicted_for_pressure" | "model_load_rejected";
   message: string;
   model?: string;
   durationMs?: number;
@@ -344,8 +344,8 @@ export class MetricsCollector {
       const key = `${event.backend}\0${event.reason ?? "unknown"}\0${event.type}`;
       this.residency.outcomes.set(key, (this.residency.outcomes.get(key) ?? 0) + 1);
     }
-    if (event.type === "model_evicted_for_load") {
-      const key = `${event.backend}\0${event.reason ?? "memory_admission"}`;
+    if (event.type === "model_evicted_for_load" || event.type === "model_evicted_for_pressure") {
+      const key = `${event.backend}\0${event.reason ?? (event.type === "model_evicted_for_pressure" ? "critical_memory_pressure" : "memory_admission")}`;
       this.residency.evictions.set(key, (this.residency.evictions.get(key) ?? 0) + 1);
     }
     if (event.type === "model_load_committed" && event.estimateBytes && event.observedRssBytes) {
