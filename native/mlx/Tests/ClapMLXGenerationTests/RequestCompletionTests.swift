@@ -101,6 +101,19 @@ struct RequestCompletionTests {
     #expect(fixture.snapshotContinuationCounts == [1])
     #expect(fixture.snapshotPromptCounts == [1])
   }
+
+  @Test("completion preserves coordinator target generation")
+  func targetGeneration() {
+    let decision = CacheDecision(hit: true, operation: 1, scope: 5, target: 3,
+      targetGeneration: 42, donor: 1, plannedReuseTokens: 2,
+      realizedReuseTokens: 2, decisionUs: 7)
+    let fixture = Fixture(streaming: true, cacheDecision: decision)
+    guard case .completion(let completion)? = fixture.finalize() else {
+      Issue.record("expected completion")
+      return
+    }
+    #expect(completion.cache.decision?.targetGeneration == 42)
+  }
 }
 
 private final class Fixture {
@@ -110,7 +123,7 @@ private final class Fixture {
   var snapshotContinuationCounts: [Int] = []
   var snapshotPromptCounts: [Int] = []
 
-  init(streaming: Bool) {
+  init(streaming: Bool, cacheDecision: CacheDecision? = nil) {
     let identity = testCacheIdentity()
     let boundary = BoundaryInfo(tokenCount: 2, kind: "automatic_token", label: nil,
       requested: false, status: "authorized", skipReason: nil)
@@ -119,7 +132,7 @@ private final class Fixture {
       coordinatorPlanMs: 0.3, coordinatorApplyMs: 0.4,
       cacheMaterializeMs: 0.5, streaming: streaming, maxTokens: 8,
       promptTokens: [1, 2, 3], reusedTokens: 1, reuseKind: "continue",
-      reuseScope: "session", cacheIdentity: identity, cacheDecision: nil,
+      reuseScope: "session", cacheIdentity: identity, cacheDecision: cacheDecision,
       cacheCandidates: [], cacheEvictions: [4], cacheFallback: nil,
       parameters: CompletionParameters(), stops: ["stop"], anchorPlantAt: [2],
       anchorPlantScopes: [2: identity.scope], resolvedBoundaries: [2: boundary],

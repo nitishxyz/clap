@@ -51,6 +51,7 @@ struct WorkerCache: Encodable {
   let namespace: String?
   let donor_slot: Int?
   let target_slot: Int
+  let target_generation: UInt64?
   let evicted_slots: [Int]
   let decision_us: UInt64
   let planned_reuse_tokens: Int

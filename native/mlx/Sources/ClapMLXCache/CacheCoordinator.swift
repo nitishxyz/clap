@@ -79,10 +79,25 @@ public struct CacheDecision {
   public let operation: UInt32
   public let scope: UInt32
   public let target: Int
+  public let targetGeneration: UInt64
   public let donor: Int?
   public let plannedReuseTokens: Int
   public let realizedReuseTokens: Int
   public let decisionUs: UInt64
+
+  public init(hit: Bool, operation: UInt32, scope: UInt32, target: Int,
+              targetGeneration: UInt64, donor: Int?, plannedReuseTokens: Int,
+              realizedReuseTokens: Int, decisionUs: UInt64) {
+    self.hit = hit
+    self.operation = operation
+    self.scope = scope
+    self.target = target
+    self.targetGeneration = targetGeneration
+    self.donor = donor
+    self.plannedReuseTokens = plannedReuseTokens
+    self.realizedReuseTokens = realizedReuseTokens
+    self.decisionUs = decisionUs
+  }
 }
 
 public enum CacheCoordinatorError: Error, CustomStringConvertible {
@@ -180,6 +195,7 @@ public final class CachePlan {
       operation: raw.operation,
       scope: raw.scope,
       target: Int(raw.target_slot),
+      targetGeneration: view.targetGeneration,
       donor: raw.has_donor != 0 ? Int(raw.donor_slot) : nil,
       plannedReuseTokens: Int(raw.planned_reuse_tokens),
       realizedReuseTokens: Int(raw.realized_reuse_tokens),
