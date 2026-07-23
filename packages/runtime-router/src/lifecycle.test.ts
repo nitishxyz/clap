@@ -49,6 +49,19 @@ describe("runtime model lifecycle", () => {
     expect(manager.list()).toEqual([]);
   });
 
+  test("async unload waits for removal hooks before reporting success", async () => {
+    const order: string[] = [];
+    const manager = new ModelLifecycleManager(() => Date.now(), async () => {
+      await Bun.sleep(5);
+      order.push("removed");
+    });
+    manager.load(resolved);
+    const result = await manager.unloadAsync(resolved);
+    order.push("returned");
+    expect(result.unloaded).toBe(true);
+    expect(order).toEqual(["removed", "returned"]);
+  });
+
   test("exposes honest residency state, memory, and loading transitions", () => {
     const manager = new ModelLifecycleManager(() => Date.parse("2026-01-01T00:00:00.000Z"));
     const loaded = manager.load(resolved);

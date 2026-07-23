@@ -729,7 +729,7 @@ export function createServer(
     const request = UnloadModelRequestSchema.parse(await c.req.json());
     const resolved = resolveAvailableModel(request.model, request.backend);
     if ("response" in resolved) return resolved.response(c);
-    return c.json(UnloadModelResponseSchema.parse(lifecycle.unload(resolved.model)));
+    return c.json(UnloadModelResponseSchema.parse(await lifecycle.unloadAsync(resolved.model)));
   });
 
   app.post("/clap/v1/models/remove", async (c) => {

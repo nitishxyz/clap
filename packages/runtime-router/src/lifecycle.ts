@@ -111,6 +111,15 @@ export class ModelLifecycleManager {
     return { unloaded: true, model: entry };
   }
 
+  async unloadAsync(resolved: ResolvedModel): Promise<{ unloaded: boolean; model?: LoadedModel }> {
+    const localPath = resolved.modelPath ?? resolved.input;
+    const key = modelLifecycleKey(resolved.id, resolved.backend, localPath);
+    const entry = this.entries.get(key);
+    if (!entry || entry.activeRequests > 0) return this.unload(resolved);
+    await this.deleteAsync(key, "unload");
+    return { unloaded: true, model: entry };
+  }
+
   list(): LoadedModel[] {
     this.expireIdle();
     return [...this.entries.values()].sort((a, b) => a.loadedAt.localeCompare(b.loadedAt));
