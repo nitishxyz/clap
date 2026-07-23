@@ -15,6 +15,7 @@ type CacheEvent = {
   backend?: string;
   status?: string;
   promptTokenCount?: number;
+  promptTokenHash?: string;
   workerLaunchId?: string;
   stableBoundaries?: Array<{ kind?: string; label?: string; status?: string; materialized?: boolean; skipReason?: string }>;
   cache?: {
@@ -133,6 +134,7 @@ function telemetry(event: CacheEvent | undefined) {
     requestId: event.requestId,
     status: event.status,
     promptTokens: event.promptTokenCount,
+    promptTokenHash: event.promptTokenHash,
     workerLaunchId: event.workerLaunchId,
     hit: event.cache?.hit,
     kind: event.cache?.kind,
@@ -259,19 +261,21 @@ for (const backend of (["mlx", "gguf"] as const)) {
       + "amber bronze cobalt denim emerald fuchsia gold hazel indigo jade ".repeat(12);
     const identity = { namespace: `forced-anchor-${backend}`, project: "deployment",
       harness: "forced-anchor-v1", agent: "shared-anchor-agent", session: "shared-anchor-cache-domain",
-      priority: "normal", boundaries: [{ kind: "messages", through_message: 0, label: "stable-system" }] };
+      priority: "background", side_request: true,
+      boundaries: [{ kind: "messages", through_message: 0, label: "stable-system" }] };
     const seed = await runChat(backend, { messages: [{ role: "system", content: stable },
       { role: "user", content: "Logical session anchor seed: return exactly ANCHOR_SEED" }], cache: identity });
     if (seed.text.trim() !== "ANCHOR_SEED") throw new Error(`${backend} anchor seed response mismatch`);
     const seedFacts = telemetry(seed.event) as any;
     const explicitBoundary = seedFacts?.stableBoundaries?.find((item: any) => item.label === "stable-system");
     await Bun.sleep(500);
-    const fillCount = 160;
+    const fillCount = 48;
     for (let offset = 0; offset < fillCount; offset += 16) {
       await Promise.all(Array.from({ length: Math.min(16, fillCount - offset) }, async (_, index) => {
         const filler = offset + index;
         const response = await jsonRequest("/v1/chat/completions", { method: "POST", body: JSON.stringify({
-          model: models[backend], backend, messages: [{ role: "user", content: `Filler ${filler}` }],
+          model: models[backend], backend, messages: [{ role: "user",
+            content: `Filler ${filler} ` + "north south east west copper silver violet orange ".repeat(30) }],
           temperature: 0, max_tokens: 1, cache: { namespace: `filler-${backend}-${filler}`,
             session: `filler-${filler}`, priority: "interactive" },
         }) });
@@ -282,6 +286,11 @@ for (const backend of (["mlx", "gguf"] as const)) {
       { role: "user", content: "Logical session restored: return exactly ANCHOR_ISOLATED" }],
       cache: { ...identity, side_request: true } });
     const facts = telemetry(restored.event) as any;
+    const cold = await runChat(backend, { messages: [{ role: "system", content: stable },
+      { role: "user", content: "Logical session restored: return exactly ANCHOR_ISOLATED" }],
+      cache: { ...identity, namespace: `forced-anchor-cold-${backend}`,
+        session: "cold-anchor-control", side_request: false, boundaries: undefined } });
+    const coldFacts = telemetry(cold.event) as any;
     const restoredAsAnchor = facts?.kind === "anchor" && facts?.hit === true;
     forcedScenarios.push({ backend, scenario: "anchor", skipped: !restoredAsAnchor,
       reason: restoredAsAnchor ? undefined : facts?.fallback === "decode_retry_full_prefill"
@@ -289,7 +298,11 @@ for (const backend of (["mlx", "gguf"] as const)) {
         : "advertised checkpoint snapshot materialized, but session-affinity selected a resident slot instead of restore",
       correct: restored.text.trim() === "ANCHOR_ISOLATED",
       contaminated: restored.text.includes("ANCHOR_SEED"),
-      explicitBoundary, cache: facts });
+      coldEquivalent: cold.text === restored.text
+        && coldFacts?.promptTokens === facts?.promptTokens && coldFacts?.hit === false,
+      fingerprintIsolated: typeof coldFacts?.promptTokenHash === "string"
+        && coldFacts.promptTokenHash !== facts?.promptTokenHash,
+      explicitBoundary, cache: facts, coldCache: coldFacts });
   }
 }
 
@@ -375,6 +388,8 @@ const failed = results.filter((item: any) => !item.correct || item.contaminated
   || (item.continuation && (item.cache.hit !== true || !(item.cache.reusedTokens > 0))));
 const forcedFailed = forcedScenarios.filter((item: any) => !item.skipped
   && (!item.correct || item.contaminated || item.cache?.status !== "ok"
+    || (item.scenario === "anchor"
+      && (item.coldEquivalent !== true || item.fingerprintIsolated !== true))
     || item.cache?.hit !== true || !(item.cache?.reusedTokens > 0)
     || item.cache?.kind !== item.scenario || !(item.cache?.targetGeneration > 0)
     || (item.scenario === "anchor" && item.explicitBoundary?.status !== "resolved"
