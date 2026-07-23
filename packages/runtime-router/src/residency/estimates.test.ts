@@ -56,7 +56,7 @@ describe("model load estimates", () => {
 
     expect(estimate).toEqual({
       source: "estimated",
-      bytes: Math.ceil(4 * GIB * 1.35) + GIB + 8 * GIB,
+      bytes: Math.ceil(4 * GIB * 1.15) + 512 * MIB + 8 * GIB,
       basis: "configured_cache",
     });
   });
@@ -65,9 +65,24 @@ describe("model load estimates", () => {
     const descriptor = model({ backend: "mlx", artifactBytes: 2 * GIB, configuredContext: 1_024 });
     const estimate = estimateModelLoadMemory(descriptor, undefined, { physicalMemoryBytes: 16 * GIB, env: {} });
     expect(estimate.bytes).toBe(
-      Math.ceil(2 * GIB * 1.35) + GIB + 1_024 * CONSERVATIVE_KV_BYTES_PER_TOKEN,
+      Math.ceil(2 * GIB * 1.15) + 512 * MIB + 1_024 * CONSERVATIVE_KV_BYTES_PER_TOKEN,
     );
     expect(estimate.basis).toBe("model_artifacts");
+  });
+
+  test("does not double-charge MLX artifact overhead for a known small model", () => {
+    const artifactBytes = 3_681_742_983;
+    const descriptor = model({ backend: "mlx", artifactBytes, configuredContext: 4_096 });
+    const estimate = estimateModelLoadMemory(descriptor, undefined, {
+      physicalMemoryBytes: 18 * GIB, env: {},
+    });
+    expect(estimate).toEqual({
+      source: "estimated",
+      bytes: Math.ceil(artifactBytes * 1.15) + 512 * MIB
+        + 4_096 * CONSERVATIVE_KV_BYTES_PER_TOKEN,
+      basis: "model_artifacts",
+    });
+    expect(estimate.bytes).toBeLessThan(6 * GIB);
   });
 
   test("takes the high-water observed RSS without allowing lower updates to regress it", () => {

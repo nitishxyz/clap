@@ -90,8 +90,12 @@ function baselineEstimate(
     };
   }
   if (backend === "mlx") {
-    const weights = multiplySaturating(artifactBytes, 135, 100);
-    const margin = Math.max(GIB, multiplySaturating(artifactBytes, 15, 100));
+    // Safetensors are memory-mapped and MLX's resident weight allocation is
+    // close to artifact size. Keep independent mapping/runtime and allocator
+    // margins without charging the old overlapping 35% weight uplift plus a
+    // second 15%/1 GiB margin (50% overhead for ordinary large artifacts).
+    const weights = multiplySaturating(artifactBytes, 115, 100);
+    const margin = Math.max(512 * MIB, multiplySaturating(artifactBytes, 10, 100));
     const cache = boundedMlxCacheEstimate(model, physicalMemoryBytes);
     return {
       bytes: saturatingAddMemoryBytes(weights, margin, cache),
