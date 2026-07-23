@@ -19,6 +19,10 @@ public let structuredOutputMaxSchemaBytes = 64 * 1024
 private let structuredOutputMaxSchemaDepth = 32
 private let structuredOutputMaxSchemaProperties = 1024
 
+public func resolveGenerateModel(requestModel: String?, residentModel: String?) -> String? {
+  requestModel ?? residentModel
+}
+
 public struct V1EnvelopeDecodeError: Error, CustomStringConvertible {
   public let code: String
   public let requestID: String?

@@ -2,6 +2,7 @@ import ClapCacheBridge
 import ClapMLXCache
 import ClapMLXGeneration
 import ClapMLXModel
+import ClapMLXWorkerCore
 import ClapCachePolicy
 import Foundation
 import MLXLMCommon
@@ -26,7 +27,11 @@ extension WorkerState {
           code: "structured_output_capability_required")
         return .rejected
       }
-      guard let model = control.model else {
+      // Canonical v1 generate envelopes intentionally omit the model because
+      // the resident worker was already bound by the preceding load command.
+      // Legacy chat envelopes still carry it, so accept either source.
+      guard let model = resolveGenerateModel(requestModel: control.model,
+        residentModel: modelRuntime.modelIdentifier) else {
         emit(id: id, error: "chat.model is required")
         return .rejected
       }

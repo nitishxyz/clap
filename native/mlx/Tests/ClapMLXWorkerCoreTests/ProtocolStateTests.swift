@@ -30,6 +30,13 @@ struct ProtocolStateTests {
     #expect(requests[1].structuredOutput?.schemaJSON != nil)
   }
 
+  @Test("canonical generation uses the resident model when its envelope omits model")
+  func residentGenerateModel() {
+    #expect(resolveGenerateModel(requestModel: nil, residentModel: "resident") == "resident")
+    #expect(resolveGenerateModel(requestModel: "legacy", residentModel: "resident") == "legacy")
+    #expect(resolveGenerateModel(requestModel: nil, residentModel: nil) == nil)
+  }
+
   @Test("structured output validates typed contracts and schema bounds")
   func structuredOutputContracts() throws {
     let identity = try fixtureIdentity()
