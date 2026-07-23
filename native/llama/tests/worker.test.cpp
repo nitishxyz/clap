@@ -86,6 +86,13 @@ int main() {
     assert(events[0]["type"] == "ready");
     assert(events[1]["type"] == "accepted" && events[1]["request_id"] == "target");
     assert(events[2]["type"] == "telemetry");
+    assert(events[2]["telemetry"]["retained_bytes"].is_null());
+    assert(events[2]["telemetry"]["retained_bytes_source"] == "unavailable");
+    assert(events[2]["telemetry"]["retained_bytes_basis"] == "not_observed");
+    assert(events[2]["telemetry"]["evicted_bytes"].is_null());
+    assert(events[2]["telemetry"]["evicted_bytes_source"] == "unavailable");
+    assert(events[2]["telemetry"]["estimated_retained_bytes"].is_null());
+    assert(events[2]["telemetry"]["estimated_retained_bytes_source"] == "unavailable");
     assert(events[3]["type"] == "accepted" && events[3]["request_id"] == "cancel");
     assert(events[4]["type"] == "completed" && events[4]["request_id"] == "target");
     assert(events[4]["result"]["kind"] == "cancelled");

@@ -21,7 +21,7 @@ clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable) {
       "auto", 2, 32, 8, 32, 2, "memory_ceiling",
       nullable ? UINT64_C(0) : UINT64_C(8589934592),
       nullable ? UINT64_C(0) : UINT64_C(4294967296),
-      32768, 8, 4096, 536870912, 8, false,
+      nullable ? 0 : 32768, 8, 4096, 536870912, 8, false,
     },
     1,
     2,
@@ -66,9 +66,19 @@ int main() {
   assert(normal["active_policy"]["inputs"]["model_file_bytes"] == 4294967296);
   assert(normal["active_policy"]["inputs"]["hybrid_or_recurrent"] == false);
   assert(normal["retained_total"] == 2);
-  assert(normal["retained_bytes"] == 0);
-  assert(normal["session_bytes"] == 0);
-  assert(normal["anchor_bytes"] == 0);
+  assert(normal["retained_bytes"].is_null());
+  assert(normal["retained_bytes_source"] == "unavailable");
+  assert(normal["retained_bytes_basis"] == "not_observed");
+  assert(normal["session_bytes"].is_null());
+  assert(normal["session_bytes_source"] == "unavailable");
+  assert(normal["anchor_bytes"].is_null());
+  assert(normal["anchor_bytes_source"] == "unavailable");
+  assert(normal["evicted_bytes"].is_null());
+  assert(normal["evicted_bytes_source"] == "unavailable");
+  assert(normal["evicted_bytes_basis"] == "not_observed");
+  assert(normal["estimated_retained_bytes"] == 134217728);
+  assert(normal["estimated_retained_bytes_source"] == "estimated");
+  assert(normal["estimated_retained_bytes_basis"] == "context_configuration");
   assert(normal["budget_bytes"] == 0);
   assert(normal["high_watermark_bytes"] == 0);
   assert(normal["low_watermark_bytes"] == 0);
@@ -86,6 +96,10 @@ int main() {
   assert(nullable["active_policy"]["inputs"]["startup_available_bytes"].is_null());
   assert(nullable["active_policy"]["inputs"]["model_file_bytes"].is_null());
   assert(nullable["eviction_reason"].is_null());
+  assert(nullable["retained_bytes"].is_null());
+  assert(nullable["estimated_retained_bytes"].is_null());
+  assert(nullable["estimated_retained_bytes_source"] == "unavailable");
+  assert(nullable["estimated_retained_bytes_basis"] == "not_observed");
 
   const auto fixture_keys = keys(fixture_retention());
   const auto normal_keys = keys(normal);

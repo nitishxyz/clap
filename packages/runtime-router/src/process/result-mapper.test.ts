@@ -18,6 +18,15 @@ describe("worker result mapper", () => {
 
   test("normalizes bare retention telemetry without changing wrapped payloads", () => {
     expect(mapWorkerTelemetryPayload({ active: 1 })).toEqual({ retention: { active: 1 } });
+    expect(mapWorkerTelemetryPayload({
+      retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_observed",
+      estimated_retained_bytes: 4096, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "context_configuration",
+    })).toEqual({ retention: {
+      retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_observed",
+      estimated_retained_bytes: 4096, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "context_configuration",
+    } });
     const wrapped = { memory: { active_bytes: 1 }, retention: { active: 1 } };
     expect(mapWorkerTelemetryPayload(wrapped)).toBe(wrapped);
   });

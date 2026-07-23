@@ -32,6 +32,7 @@ export type EstimatedMemoryBasis =
   | "model_artifacts"
   | "architecture_metadata"
   | "configured_cache"
+  | "context_configuration"
   | "conservative_fallback";
 export type UnavailableMemoryBasis = "not_observed" | "not_supported" | "not_reported";
 export type MemoryBasis = MeasuredMemoryBasis | EstimatedMemoryBasis | UnavailableMemoryBasis;
@@ -63,6 +64,12 @@ export type WorkerRetentionTelemetry = {
   anchor_bytes?: number | null;
   anchor_bytes_source?: MemorySource;
   anchor_bytes_basis?: MemoryBasis;
+  evicted_bytes?: number | null;
+  evicted_bytes_source?: MemorySource;
+  evicted_bytes_basis?: MemoryBasis;
+  estimated_retained_bytes?: number | null;
+  estimated_retained_bytes_source?: MemorySource;
+  estimated_retained_bytes_basis?: MemoryBasis;
   [key: string]: unknown;
 };
 

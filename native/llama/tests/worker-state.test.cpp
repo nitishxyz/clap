@@ -23,6 +23,12 @@ int main() {
   assert(unloaded["retained_total"] == 0);
   assert(unloaded["retained_sessions"] == 0);
   assert(unloaded["retained_anchors"] == 0);
+  assert(unloaded["retained_bytes"].is_null());
+  assert(unloaded["retained_bytes_source"] == "unavailable");
+  assert(unloaded["evicted_bytes"].is_null());
+  assert(unloaded["evicted_bytes_source"] == "unavailable");
+  assert(unloaded["estimated_retained_bytes"].is_null());
+  assert(unloaded["estimated_retained_bytes_source"] == "unavailable");
 
   worker.unload();
   worker.unload();

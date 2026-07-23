@@ -47,5 +47,6 @@ struct RetentionTelemetrySnapshot {
 };
 
 nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& snapshot);
+uint64_t estimate_configured_retained_bytes(const RetentionTelemetrySnapshot& snapshot);
 
 }  // namespace clap::llama

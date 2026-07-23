@@ -59,6 +59,9 @@ describe("worker protocol validation", () => {
     } }))).toMatchObject({ telemetry: { memory: { active_bytes_source: "measured" } } });
     expect(decodeWorkerEvent(event({ retention: {
       retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_reported",
+      evicted_bytes: null, evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
+      estimated_retained_bytes: 4096, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "context_configuration",
     } }))).toMatchObject({ telemetry: { retention: { retained_bytes: null } } });
 
     for (const memory of [
@@ -68,6 +71,13 @@ describe("worker protocol validation", () => {
       { active_bytes: 1, active_bytes_source: "measured", cache_bytes: 0, peak_active_bytes: 1 },
       { active_bytes: null, cache_bytes: 0, peak_active_bytes: 1 },
     ]) expect(() => decodeWorkerEvent(event({ memory }))).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerEvent(event({ retention: {
+      retained_bytes: 0, retained_bytes_source: "measured", retained_bytes_basis: "runtime_allocator",
+    } }))).toThrow(ProtocolValidationError);
+    expect(() => decodeWorkerEvent(event({ retention: {
+      estimated_retained_bytes: 1, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "runtime_allocator",
+    } }))).toThrow(ProtocolValidationError);
   });
 
   test("requires a strict opaque cache identity on generate requests", () => {

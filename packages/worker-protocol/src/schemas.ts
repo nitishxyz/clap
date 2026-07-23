@@ -15,7 +15,8 @@ const displayLabel = z.string().min(1).max(128);
 const memoryBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const measuredMemoryBasis = z.enum(["resident_rss", "runtime_allocator", "os_available"]);
 const estimatedMemoryBasis = z.enum([
-  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "conservative_fallback",
+  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "context_configuration",
+  "conservative_fallback",
 ]);
 const unavailableMemoryBasis = z.enum(["not_observed", "not_supported", "not_reported"]);
 export const MemoryValueSchema = z.discriminatedUnion("source", [
@@ -59,7 +60,9 @@ export const WorkerRetentionTelemetrySchema = addMemoryCompanionValidation({
   retained_bytes: memoryBytes.nullable().optional(), retained_bytes_source: memorySource.optional(), retained_bytes_basis: memoryBasis.optional(),
   session_bytes: memoryBytes.nullable().optional(), session_bytes_source: memorySource.optional(), session_bytes_basis: memoryBasis.optional(),
   anchor_bytes: memoryBytes.nullable().optional(), anchor_bytes_source: memorySource.optional(), anchor_bytes_basis: memoryBasis.optional(),
-}, ["retained_bytes", "session_bytes", "anchor_bytes"]);
+  evicted_bytes: memoryBytes.nullable().optional(), evicted_bytes_source: memorySource.optional(), evicted_bytes_basis: memoryBasis.optional(),
+  estimated_retained_bytes: memoryBytes.nullable().optional(), estimated_retained_bytes_source: memorySource.optional(), estimated_retained_bytes_basis: memoryBasis.optional(),
+}, ["retained_bytes", "session_bytes", "anchor_bytes", "evicted_bytes", "estimated_retained_bytes"]);
 export const CacheIdentitySchema = z.object({
   version: z.literal(1),
   generation: z.string().min(1).max(64),

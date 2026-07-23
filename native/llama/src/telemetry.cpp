@@ -1,9 +1,46 @@
 #include "clap/llama/telemetry.h"
 
+#include <limits>
+
 namespace clap::llama {
+
+namespace {
+
+uint64_t saturating_multiply(uint64_t left, uint64_t right) {
+  if (left == 0 || right == 0) return 0;
+  if (left > std::numeric_limits<uint64_t>::max() / right) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return left * right;
+}
+
+}  // namespace
+
+uint64_t estimate_configured_retained_bytes(const RetentionTelemetrySnapshot& snapshot) {
+  if (snapshot.retained_total == 0) return 0;
+  const auto& policy = snapshot.active_policy;
+  if (snapshot.hard_ceiling <= 0 || policy.context_capacity <= 0 ||
+      policy.per_active_reserve_cells <= 0 || policy.per_active_reserve_bytes == 0) return 0;
+  // llama.cpp does not expose used KV bytes. This is a configuration estimate:
+  // divide configured context cells over retained slots and apply the explicit
+  // per-cell scheduling reserve. It must never be presented as a measurement.
+  const uint64_t cells_per_slot =
+      (static_cast<uint64_t>(policy.context_capacity) + snapshot.hard_ceiling - 1) /
+      static_cast<uint64_t>(snapshot.hard_ceiling);
+  const uint64_t bytes_per_cell =
+      (policy.per_active_reserve_bytes + policy.per_active_reserve_cells - 1) /
+      static_cast<uint64_t>(policy.per_active_reserve_cells);
+  return saturating_multiply(snapshot.retained_total,
+      saturating_multiply(cells_per_slot, bytes_per_cell));
+}
 
 nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& snapshot) {
   using json = nlohmann::json;
+  const uint64_t estimated_retained_bytes = estimate_configured_retained_bytes(snapshot);
+  const bool estimate_available = snapshot.hard_ceiling > 0 &&
+      snapshot.active_policy.context_capacity > 0 &&
+      snapshot.active_policy.per_active_reserve_cells > 0 &&
+      snapshot.active_policy.per_active_reserve_bytes > 0;
   return json{
     {"max_active", snapshot.max_active},
     {"queued", snapshot.queued},
@@ -44,8 +81,26 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
     {"retained_sessions", snapshot.retained_sessions},
     {"retained_anchors", snapshot.retained_anchors},
     // Byte pressure is intentionally disabled: pinned llama.cpp has no public
-    // authoritative KV byte or used/free-cell telemetry.
-    {"retained_bytes", 0}, {"session_bytes", 0}, {"anchor_bytes", 0},
+    // authoritative KV byte or used/free-cell telemetry. Preserve the legacy
+    // fields, but represent unavailable observations honestly.
+    {"retained_bytes", nullptr},
+    {"retained_bytes_source", "unavailable"},
+    {"retained_bytes_basis", "not_observed"},
+    {"session_bytes", nullptr},
+    {"session_bytes_source", "unavailable"},
+    {"session_bytes_basis", "not_observed"},
+    {"anchor_bytes", nullptr},
+    {"anchor_bytes_source", "unavailable"},
+    {"anchor_bytes_basis", "not_observed"},
+    {"evicted_bytes", nullptr},
+    {"evicted_bytes_source", "unavailable"},
+    {"evicted_bytes_basis", "not_observed"},
+    {"estimated_retained_bytes", estimate_available
+        ? json(estimated_retained_bytes) : json(nullptr)},
+    {"estimated_retained_bytes_source", estimate_available
+        ? json("estimated") : json("unavailable")},
+    {"estimated_retained_bytes_basis", estimate_available
+        ? json("context_configuration") : json("not_observed")},
     {"budget_bytes", 0}, {"high_watermark_bytes", 0}, {"low_watermark_bytes", 0},
     {"under_pressure", false},
     {"hard_ceiling", snapshot.hard_ceiling},

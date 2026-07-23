@@ -213,7 +213,7 @@ export const LoadedModelSchema = z.object({
     loadState: z.enum(["not_started", "starting", "loading", "resident", "closing"]).optional(),
     residency: z.object({
       estimateBytes: z.number().int().nonnegative().nullable(),
-      estimateSource: z.enum(["prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "conservative_fallback"]).nullable(),
+      estimateSource: z.enum(["prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "context_configuration", "conservative_fallback"]).nullable(),
       observedRssBytes: z.number().int().positive().nullable(),
       observedRssSource: z.literal("resident_rss").nullable(),
       reservationBytes: z.number().int().nonnegative(),
