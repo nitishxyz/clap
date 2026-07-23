@@ -11,6 +11,8 @@
     "cli": "bun run apps/cli/src/index.ts",
     "serve": "bun run apps/cli/src/index.ts serve",
     "generate:openapi": "bun run packages/api/src/openapi.ts",
+    "generated:drift:check": "bun run scripts/check-generated-drift.ts",
+    "docs:check": "bun run scripts/check-documentation.ts",
     "bundle:check": "bun run scripts/check-bundle.ts",
     "bundle:prepare": "bun run scripts/prepare-bundle.ts",
     "build:web": "bun run scripts/build-web.ts",
@@ -44,7 +46,8 @@
     "ensure:libexec": "bun run scripts/ensure-libexec.ts",
     "release:macos:validate": "CLAP_SIGNING_DRY_RUN=1 bash scripts/macos-release.sh",
     "typecheck": "bun run ensure:libexec && bunx tsc --noEmit -p tsconfig.json",
-    "test": "bun run ensure:libexec && bun test apps packages"
+    "test": "bun run ensure:libexec && bun test apps packages",
+    "hardening:verify": "bun run typecheck && bun run test && bun run native:test && bun run native:build && bun run runtime:mlx:protocol:test && bun run bundle:check && bun run generate:openapi && bun run build:web && bun run generated:drift:check && bun run docs:check"
   },
   "devDependencies": {
     "@types/bun": "latest",
