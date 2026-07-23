@@ -31,19 +31,6 @@ const fileHashCache = new Map<string, HashCacheEntry>();
 const treeHashCache = new Map<string, HashCacheEntry>();
 let contentHashComputations = 0;
 
-export function effectivePhysicalContextAllocation(
-  model: Pick<ResolvedModel, "backend" | "context">,
-  configuredContext: number,
-): number {
-  const configured = Number.isSafeInteger(configuredContext) && configuredContext > 0
-    ? configuredContext : 0;
-  if (model.backend === "mlx") return configured;
-  const declared = Number.isSafeInteger(model.context) && (model.context ?? 0) > 0
-    ? model.context! : 0;
-  if (configured && declared) return Math.min(configured, declared);
-  return configured || declared;
-}
-
 export async function derivePhysicalModelDomain(
   model: ResolvedModel,
   options: PhysicalModelDomainOptions,

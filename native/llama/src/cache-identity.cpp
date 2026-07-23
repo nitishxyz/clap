@@ -85,7 +85,11 @@ std::string display(const nlohmann::json& value, const char* key) {
 }  // namespace
 
 PhysicalCacheDescriptor physical_cache_descriptor(const ModelRuntime& runtime) {
-  return {"llama", runtime.backend_allocation_cap(), runtime.kv_format(),
+  // The control plane binds identity to the configured allocation (zero means
+  // model-derived automatic sizing), not the mutable resolved backend size.
+  // The latter becomes nonzero only after load and would reject every later
+  // request in the same resident worker when automatic sizing is used.
+  return {"llama", runtime.context_override(), runtime.kv_format(),
           runtime.unified_kv(), 1};
 }
 
