@@ -61,7 +61,7 @@ fn labels(session: u64) -> ClapCacheLabels {
         agent: 4,
         session,
         scope: 1,
-        priority: 1,
+        priority: 2,
         side_request: 0,
         reserved: [0; 7],
     }

@@ -110,7 +110,7 @@ public struct OpaqueCacheIdentityInput: Decodable, Equatable, Sendable {
     scopeFingerprint = try values.decode(String.self, forKey: .scopeFingerprint)
     namespaceFingerprint = try values.decode(String.self, forKey: .namespaceFingerprint)
     namespaceID = try values.decode(String.self, forKey: .namespaceID)
-    priority = try values.decode(String.self, forKey: .priority)
+    priority = try values.decodeIfPresent(String.self, forKey: .priority) ?? "normal"
     sideRequest = try values.decode(Bool.self, forKey: .sideRequest)
     display = try values.decode(OpaqueCacheIdentityDisplay.self, forKey: .display)
     physical = try values.decode(OpaquePhysicalCacheIdentityInput.self, forKey: .physical)
@@ -185,6 +185,7 @@ public struct CacheIdentity {
     }
     let selectedPriority: UInt32 = switch input.priority {
     case "interactive": UInt32(CC_PRIORITY_INTERACTIVE)
+    case "normal": UInt32(CC_PRIORITY_NORMAL)
     case "background": UInt32(CC_PRIORITY_BACKGROUND)
     default: throw invalid("cache_identity.priority is invalid")
     }

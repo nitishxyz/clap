@@ -492,7 +492,7 @@ export const CacheIntentSchema = z.object({
   harness: CacheIntentLabelSchema.describe("Optional non-authoritative harness display/reuse label.").optional(),
   agent: CacheIntentLabelSchema.describe("Optional non-authoritative agent display/reuse label.").optional(),
   session: CacheIntentLabelSchema.describe("Optional non-authoritative session display/reuse label.").optional(),
-  priority: z.enum(["interactive", "background"]).optional(),
+  priority: z.enum(["interactive", "normal", "background"]).optional().default("normal"),
   side_request: z.boolean().optional(),
   boundaries: z.array(CacheBoundarySchema).max(8).optional(),
 }).refine((value) => value.namespace === undefined || value.tenant === undefined || value.namespace === value.tenant, {

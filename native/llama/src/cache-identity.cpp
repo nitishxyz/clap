@@ -127,8 +127,10 @@ ParsedCacheIdentity parse_cache_identity(const nlohmann::json& value,
   else if (scope == "agent") { result.authority.scope = CLAP_CACHE_SCOPE_AGENT; if (!agent || scope_digest != *agent) throw CacheIdentityError("agent scope fingerprint mismatch"); }
   else if (scope == "session") { result.authority.scope = CLAP_CACHE_SCOPE_SESSION; if (!session || scope_digest != *session) throw CacheIdentityError("session scope fingerprint mismatch"); }
   else throw CacheIdentityError("cache_identity.scope is invalid");
-  const std::string priority = required_string(value, "priority", 16);
+  const std::string priority = value.contains("priority")
+      ? required_string(value, "priority", 16) : "normal";
   if (priority == "interactive") result.authority.priority = CLAP_CACHE_PRIORITY_INTERACTIVE;
+  else if (priority == "normal") result.authority.priority = CLAP_CACHE_PRIORITY_NORMAL;
   else if (priority == "background") result.authority.priority = CLAP_CACHE_PRIORITY_BACKGROUND;
   else throw CacheIdentityError("cache_identity.priority is invalid");
   if (!value.contains("side_request") || !value["side_request"].is_boolean()) throw CacheIdentityError("cache_identity.side_request must be boolean");

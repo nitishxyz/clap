@@ -96,7 +96,7 @@ export type CacheIdentity = {
   scope_fingerprint: string;
   namespace_fingerprint: string;
   namespace_id: string;
-  priority: "interactive" | "background";
+  priority: "interactive" | "normal" | "background";
   side_request: boolean;
   display: { namespace?: string; project?: string; harness?: string; agent?: string; session?: string };
   physical: {

@@ -60,7 +60,7 @@ struct Identity {
   uint64_t agent = 0;
   uint64_t session = 0;
   uint32_t scope = CLAP_CACHE_SCOPE_NONE;
-  uint32_t priority = CLAP_CACHE_PRIORITY_INTERACTIVE;
+  uint32_t priority = CLAP_CACHE_PRIORITY_NORMAL;
   bool side_request = false;
 };
 

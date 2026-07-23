@@ -9,7 +9,7 @@ export const testResidentChatOptions: ResidentChatOptions = {
     scope_fingerprint: "a".repeat(64),
     namespace_fingerprint: "b".repeat(64),
     namespace_id: "1",
-    priority: "interactive",
+    priority: "normal",
     side_request: false,
     display: {},
     physical: {

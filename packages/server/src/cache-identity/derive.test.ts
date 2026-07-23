@@ -18,6 +18,14 @@ const physical: PhysicalCacheDomain = {
 };
 
 describe("cache identity derivation", () => {
+  test("defaults omitted priority to normal and preserves all levels", () => {
+    expect(deriveCacheIdentity(secret, trustedLocalPrincipal(), {}, physical).priority).toBe("normal");
+    for (const priority of ["background", "normal", "interactive"] as const) {
+      expect(deriveCacheIdentity(secret, trustedLocalPrincipal(), { priority }, physical).priority)
+        .toBe(priority);
+    }
+  });
+
   test("matches a fixed deterministic vector with lowercase hex", () => {
     const identity = deriveCacheIdentity(secret, apiKeyPrincipal("api-key-record-7"), {
       namespace: "workspace",

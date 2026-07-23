@@ -114,6 +114,9 @@ describe("worker protocol validation", () => {
     expect(() => decodeWorkerRequest({ ...base, cache_identity: {
       ...identity, display: { namespace: "x".repeat(129) },
     } })).toThrow(ProtocolValidationError);
+    const { priority: _priority, ...withoutPriority } = identity;
+    expect(decodeWorkerRequest({ ...base, cache_identity: withoutPriority }))
+      .toMatchObject({ cache_identity: { priority: "normal" } });
   });
 
   test("validates strict structured-output contracts and ready capabilities", () => {
@@ -153,7 +156,7 @@ function fixtureCacheIdentity() {
     scope_fingerprint: fingerprint,
     namespace_fingerprint: "b".repeat(64),
     namespace_id: "1",
-    priority: "interactive",
+    priority: "normal",
     side_request: false,
     display: {},
     physical: {

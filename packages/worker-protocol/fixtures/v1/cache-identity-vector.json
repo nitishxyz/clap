@@ -12,7 +12,7 @@
     "scope_fingerprint": "f269f6ff4a9cae43ffb8a8a7510e1c6a63669634fb08deca7bfc6dd304959b41",
     "namespace_fingerprint": "40d51ffb8e7b5c35e3a4519b9ce017396cc5c8d6c89a2c7652d087742b216329",
     "namespace_id": "4671675353754459189",
-    "priority": "background",
+    "priority": "normal",
     "side_request": true,
     "display": {
       "namespace": "workspace",

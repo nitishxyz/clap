@@ -92,7 +92,7 @@ export type PersistedCacheDecision = {
   // records lack it; readers re-derive it reproducibly via classifyCacheOutcome.
   cacheOutcome?: CacheOutcome;
   side?: boolean;
-  priority?: "interactive" | "background";
+  priority?: "interactive" | "normal" | "background";
   cache?: {
     hit?: boolean;
     missReason?: string;

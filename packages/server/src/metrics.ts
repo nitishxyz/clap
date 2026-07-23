@@ -229,7 +229,7 @@ export type ChatLikeRequest = {
     harness?: string;
     agent?: string;
     session?: string;
-    priority?: "interactive" | "background";
+    priority?: "interactive" | "normal" | "background";
     side_request?: boolean;
   };
   temperature?: number;

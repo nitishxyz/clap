@@ -47,11 +47,12 @@ describe("clap server", () => {
 
   test("normalizes deprecated tenant display alias without treating it as authority", () => {
     const base = { model: "model", messages: [{ role: "user" as const, content: "hello" }], stream: false };
-    expect(normalizeCacheIntent({ ...base, cache: { tenant: "legacy", project: "payments" } }).cache).toEqual({
+    expect(normalizeCacheIntent({ ...base, cache: { tenant: "legacy", project: "payments", priority: "normal" } }).cache).toEqual({
       namespace: "legacy",
       project: "payments",
+      priority: "normal",
     });
-    expect(normalizeCacheIntent({ ...base, cache: { namespace: "current" } }).cache).toEqual({ namespace: "current" });
+    expect(normalizeCacheIntent({ ...base, cache: { namespace: "current", priority: "normal" } }).cache).toEqual({ namespace: "current", priority: "normal" });
     expect(normalizeCacheIntent({ ...base, cache: { priority: "background" } }).cache).toEqual({ priority: "background" });
   });
 
@@ -429,6 +430,7 @@ describe("clap server", () => {
       expect(envelopes[5].cache_identity.generation).not.toBe(envelopes[4].cache_identity.generation);
       expect(envelopes[5].cache_identity.namespace_fingerprint).not.toBe(envelopes[4].cache_identity.namespace_fingerprint);
       expect(envelopes.every((request) => request.cache_identity.scope === "tenant")).toBe(true);
+      expect(envelopes.every((request) => request.cache_identity.priority === "normal")).toBe(true);
       expect(JSON.stringify(envelopes)).not.toContain(firstKey);
       expect(JSON.stringify(envelopes)).not.toContain(secondKey);
     } finally {

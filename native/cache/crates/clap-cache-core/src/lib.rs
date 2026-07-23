@@ -45,7 +45,8 @@ pub enum Scope {
 pub enum Priority {
     Background = 0,
     #[default]
-    Interactive = 1,
+    Normal = 1,
+    Interactive = 2,
 }
 
 /// Backend abilities are explicit and may be refreshed for every request.
@@ -1175,8 +1176,8 @@ impl CacheManager {
         candidates.sort_by_key(|slot| {
             let coverage_representative = self.is_checkpoint_coverage_representative(slot);
             (
+                slot.labels.priority as u32,
                 (!slot.labels.side_request) as u8,
-                (slot.labels.priority == Priority::Interactive) as u8,
                 (slot.state == SlotState::Anchor) as u8,
                 coverage_representative as u8,
                 slot.reuse_count,
@@ -1784,10 +1785,10 @@ fn donor_rank(slot: &Slot, request: &PlanRequest<'_>) -> (u8, u8, u64) {
 
 /// Lower values are evicted first. Stable slot ID is used by callers as the
 /// final deterministic tie-breaker.
-fn eviction_value(slot: &Slot) -> (u8, u8, u8, u64, u64, u64, usize) {
+fn eviction_value(slot: &Slot) -> (u32, u8, u8, u64, u64, u64, usize) {
     (
+        slot.labels.priority as u32,
         (!slot.labels.side_request) as u8,
-        (slot.labels.priority == Priority::Interactive) as u8,
         (slot.state == SlotState::Anchor) as u8,
         slot.reuse_count,
         slot.saved_us,
@@ -1796,9 +1797,10 @@ fn eviction_value(slot: &Slot) -> (u8, u8, u8, u64, u64, u64, usize) {
     )
 }
 
-fn anchor_eviction_value(slot: &Slot) -> (u8, u64, u64, u64, usize) {
+fn anchor_eviction_value(slot: &Slot) -> (u32, u8, u64, u64, u64, usize) {
     let structural = matches!(slot.labels.scope, Scope::Harness | Scope::Tenant) as u8;
     (
+        slot.labels.priority as u32,
         structural,
         slot.reuse_count,
         slot.saved_us,

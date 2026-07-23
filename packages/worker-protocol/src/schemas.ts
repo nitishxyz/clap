@@ -76,7 +76,7 @@ export const CacheIdentitySchema = z.object({
   namespace_fingerprint: fingerprint,
   namespace_id: z.string().regex(/^[1-9][0-9]{0,19}$/)
     .refine((value) => BigInt(value) <= 0xffff_ffff_ffff_ffffn, "namespace_id must fit unsigned 64-bit"),
-  priority: z.enum(["interactive", "background"]),
+  priority: z.enum(["interactive", "normal", "background"]).default("normal"),
   side_request: z.boolean(),
   display: z.object({
     namespace: displayLabel.optional(),

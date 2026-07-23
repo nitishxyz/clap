@@ -173,6 +173,13 @@ describe("cache intent schema", () => {
       cache: { project: "payments", priority: "interactive", side_request: false },
     });
     expect(parsed.cache).toEqual({ project: "payments", priority: "interactive", side_request: false });
+    expect(ChatCompletionRequestSchema.parse({
+      model: "org/model", messages: [{ role: "user", content: "hello" }], cache: {},
+    }).cache).toEqual({ priority: "normal" });
+    expect(ChatCompletionRequestSchema.parse({
+      model: "org/model", messages: [{ role: "user", content: "hello" }],
+      cache: { priority: "normal" },
+    }).cache?.priority).toBe("normal");
   });
 
   test("bounds all public labels and rejects conflicting deprecated tenant alias", () => {

@@ -4083,8 +4083,10 @@
                 "type": "string",
                 "enum": [
                   "interactive",
+                  "normal",
                   "background"
-                ]
+                ],
+                "default": "normal"
               },
               "side_request": {
                 "type": "boolean"
@@ -4806,8 +4808,10 @@
                 "type": "string",
                 "enum": [
                   "interactive",
+                  "normal",
                   "background"
-                ]
+                ],
+                "default": "normal"
               },
               "side_request": {
                 "type": "boolean"
@@ -11497,8 +11501,10 @@
                         "type": "string",
                         "enum": [
                           "interactive",
+                          "normal",
                           "background"
-                        ]
+                        ],
+                        "default": "normal"
                       },
                       "side_request": {
                         "type": "boolean"
@@ -12295,8 +12301,10 @@
                         "type": "string",
                         "enum": [
                           "interactive",
+                          "normal",
                           "background"
-                        ]
+                        ],
+                        "default": "normal"
                       },
                       "side_request": {
                         "type": "boolean"

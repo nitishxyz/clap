@@ -10,6 +10,9 @@ struct CacheIdentityTests {
 
   @Test("shared vector reduces exact digests and enums")
   func sharedVector() throws {
+    #expect(UInt32(CC_PRIORITY_BACKGROUND) == 0)
+    #expect(UInt32(CC_PRIORITY_NORMAL) == 1)
+    #expect(UInt32(CC_PRIORITY_INTERACTIVE) == 2)
     let fixture = try sharedCacheIdentityFixture()
     let input = try decodeTestOpaqueIdentity(fixture["identity"] as! [String: Any])
     let expected = fixture["expected"] as! [String: String]
@@ -20,11 +23,17 @@ struct CacheIdentityTests {
     #expect(identity.agent == UInt64(expected["agent_u64_hex"]!, radix: 16)!)
     #expect(identity.session == UInt64(expected["session_u64_hex"]!, radix: 16)!)
     #expect(identity.scope == UInt32(CC_SCOPE_SESSION))
-    #expect(identity.priority == UInt32(CC_PRIORITY_BACKGROUND))
+    #expect(identity.priority == UInt32(CC_PRIORITY_NORMAL))
     #expect(identity.sideRequest)
     #expect(identity.fingerprint.first == 0x40)
     #expect(identity.fingerprint.last == 0x29)
     #expect(identity.exportedNamespace == "workspace")
+
+    var omittedPriority = fixture["identity"] as! [String: Any]
+    omittedPriority.removeValue(forKey: "priority")
+    let defaulted = try CacheIdentity(input: decodeTestOpaqueIdentity(omittedPriority),
+      expected: llamaPhysical)
+    #expect(defaulted.priority == UInt32(CC_PRIORITY_NORMAL))
   }
 
   @Test("display relabeling cannot change cache authority")

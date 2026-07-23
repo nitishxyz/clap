@@ -29,6 +29,9 @@ const clap::llama::PhysicalCacheDescriptor physical{"llama", 8192, "q8_0", false
 }  // namespace
 
 int main() {
+  static_assert(CLAP_CACHE_PRIORITY_BACKGROUND == 0);
+  static_assert(CLAP_CACHE_PRIORITY_NORMAL == 1);
+  static_assert(CLAP_CACHE_PRIORITY_INTERACTIVE == 2);
   const auto parsed = clap::llama::parse_cache_identity(vector_identity(), physical);
   const auto expected = vector_expected();
   assert(parsed.authority.tenant == std::stoull(expected["tenant_u64_hex"].get<std::string>(), nullptr, 16));
@@ -37,10 +40,15 @@ int main() {
   assert(parsed.authority.agent == std::stoull(expected["agent_u64_hex"].get<std::string>(), nullptr, 16));
   assert(parsed.authority.session == std::stoull(expected["session_u64_hex"].get<std::string>(), nullptr, 16));
   assert(parsed.authority.scope == CLAP_CACHE_SCOPE_SESSION);
-  assert(parsed.authority.priority == CLAP_CACHE_PRIORITY_BACKGROUND);
+  assert(parsed.authority.priority == CLAP_CACHE_PRIORITY_NORMAL);
   assert(parsed.authority.side_request);
   assert(parsed.authority.name_space[0] == 0x40 && parsed.authority.name_space[31] == 0x29);
   assert(parsed.display.name_space == "workspace");
+
+  auto omitted_priority = vector_identity();
+  omitted_priority.erase("priority");
+  assert(clap::llama::parse_cache_identity(omitted_priority, physical).authority.priority ==
+      CLAP_CACHE_PRIORITY_NORMAL);
 
   auto labels = vector_identity();
   labels["display"] = {{"namespace", "untrusted-other"}, {"session", "raw-label"}};

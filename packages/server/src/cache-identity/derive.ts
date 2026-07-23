@@ -7,7 +7,7 @@ const DOMAIN_PREFIX = "clap.cache-identity.v1";
 export const CACHE_IDENTITY_LABEL_MAX_BYTES = 128;
 
 export type CacheIdentityScope = "tenant" | "project" | "harness" | "agent" | "session";
-export type CacheIdentityPriority = "interactive" | "background";
+export type CacheIdentityPriority = "interactive" | "normal" | "background";
 
 export type CacheIdentityIntent = {
   namespace?: string;
@@ -96,7 +96,7 @@ export function deriveCacheIdentity(
       kind: selected.kind,
       fingerprint: digestHex(selected.digest),
     },
-    priority: intent.priority ?? "interactive",
+    priority: intent.priority ?? "normal",
     display,
     physical: {
       fingerprint: digestHex(physicalDigest),

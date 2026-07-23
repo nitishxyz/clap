@@ -86,6 +86,63 @@ fn seed(
     (slot, snapshot.generation)
 }
 
+fn seed_priority(
+    cache: &mut CacheManager,
+    tokens: &[i32],
+    ns: Namespace,
+    session: u64,
+    state: SlotState,
+    bytes: u64,
+    priority: Priority,
+) -> (u32, u64) {
+    let mut input = request(tokens, ns, session, state);
+    input.labels.priority = priority;
+    let plan = cache.plan(input).unwrap();
+    let slot = plan.target.slot;
+    cache.commit(plan.id, Commit { resident_tokens: tokens.len(), actual_state: state,
+        physical_bytes: bytes, prefill_us_saved: 0 }).unwrap();
+    let snapshot = cache.slot(slot).unwrap();
+    if snapshot.busy { cache.set_busy(snapshot.id, snapshot.generation, false).unwrap(); }
+    (slot, cache.slot(slot).unwrap().generation)
+}
+
+#[test]
+fn priority_ordinals_order_session_anchor_and_byte_pressure_eviction() {
+    assert_eq!(Priority::Background as u32, 0);
+    assert_eq!(Priority::Normal as u32, 1);
+    assert_eq!(Priority::Interactive as u32, 2);
+
+    let mut sessions = manager(3, 3);
+    let background = seed_priority(&mut sessions, &[1, 1], namespace(1), 1,
+        SlotState::Session, 1, Priority::Background).0;
+    seed_priority(&mut sessions, &[2, 2], namespace(2), 2,
+        SlotState::Session, 1, Priority::Normal);
+    seed_priority(&mut sessions, &[3, 3], namespace(3), 3,
+        SlotState::Session, 1, Priority::Interactive);
+    assert_eq!(sessions.plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
+        .unwrap().target.slot, background);
+
+    let mut anchors = manager(2, 2);
+    let background_anchor = seed_priority(&mut anchors, &[1, 1], namespace(1), 1,
+        SlotState::Anchor, 1, Priority::Background).0;
+    seed_priority(&mut anchors, &[2, 2], namespace(2), 2,
+        SlotState::Anchor, 1, Priority::Interactive);
+    let mut normal_anchor = request(&[3, 3], namespace(3), 3, SlotState::Anchor);
+    normal_anchor.labels.priority = Priority::Normal;
+    assert_eq!(anchors.plan(normal_anchor).unwrap().target.slot, background_anchor);
+
+    let mut pressure = manager(4, 4);
+    let pressure_background = seed_priority(&mut pressure, &[1, 1], namespace(1), 1,
+        SlotState::Session, 30, Priority::Background).0;
+    let pressure_normal = seed_priority(&mut pressure, &[2, 2], namespace(2), 2,
+        SlotState::Session, 30, Priority::Normal).0;
+    seed_priority(&mut pressure, &[3, 3], namespace(3), 3,
+        SlotState::Session, 30, Priority::Interactive);
+    let victims: Vec<_> = pressure.plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
+        .unwrap().evictions.into_iter().map(|victim| victim.slot).collect();
+    assert_eq!(victims, vec![pressure_background, pressure_normal]);
+}
+
 #[test]
 fn grows_past_one_hundred_with_stable_ids_and_hard_ceiling() {
     let mut cache = manager(2, 128);

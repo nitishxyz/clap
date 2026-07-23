@@ -170,7 +170,7 @@ describe("metrics queue accounting", () => {
       const handle = metrics.start("model-a", "/v1/chat/completions", false);
       handle.capture({
         messages: [{ role: "system", content: "same system" }, { role: "user", content: "same first user" }],
-        cache: { session, namespace: "tenant" },
+        cache: { session, namespace: "tenant", priority: "normal" },
       });
       handle.finish({ status: "ok", cacheHit: false, reusedTokens: 0, workerLaunchId: "w", cacheCandidates: [] });
       expect(handle.record.sessionIdentityKind).toBe("cache_session");

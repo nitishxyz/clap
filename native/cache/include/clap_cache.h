@@ -60,7 +60,8 @@ typedef enum clap_cache_scope {
 
 typedef enum clap_cache_priority {
   CLAP_CACHE_PRIORITY_BACKGROUND = 0,
-  CLAP_CACHE_PRIORITY_INTERACTIVE = 1
+  CLAP_CACHE_PRIORITY_NORMAL = 1,
+  CLAP_CACHE_PRIORITY_INTERACTIVE = 2
 } clap_cache_priority_t;
 
 typedef enum clap_cache_operation {

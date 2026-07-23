@@ -32,7 +32,7 @@ func testOpaqueIdentityValue(namespaceFingerprint: String =
     "scope": "session",
     "scope_fingerprint": sessionFingerprint,
     "namespace_fingerprint": namespaceFingerprint, "namespace_id": namespaceID,
-    "priority": "background", "side_request": true,
+    "priority": "normal", "side_request": true,
     "display": ["namespace": displayNamespace, "project": "payments",
       "harness": "coding-v4", "agent": "reviewer", "session": "session-99"],
     "physical": ["fingerprint": "5befd882f13033f62c62fd673e60b7758564412e14c6f18cbb799b541847ecb5",
