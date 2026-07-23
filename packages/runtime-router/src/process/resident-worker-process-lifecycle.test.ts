@@ -61,7 +61,7 @@ async function lifecycleWorker(root: string): Promise<{ path: string; commands: 
   await writeFile(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const commands = ${JSON.stringify(commands)}; const behavior = process.env.TEST_SHUTDOWN ?? "terminal";
-const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
 const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
 const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
 console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
@@ -88,7 +88,7 @@ async function staleExitWorker(root: string): Promise<string> {
 import { existsSync, writeFileSync } from "node:fs"; const first = !existsSync(${JSON.stringify(marker)});
 if (first) writeFileSync(${JSON.stringify(marker)}, "1");
 process.on("SIGTERM", async () => { await Bun.sleep(250); process.exit(9); });
-const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
 const structured = first ? { json_object: "native", json_schema: "native", post_validation: false, max_schema_bytes: 32768 } : { json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024 };
 const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: structured, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
 const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };

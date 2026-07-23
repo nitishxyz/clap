@@ -309,9 +309,7 @@ fn labels(value: ClapCacheLabels) -> Result<Labels, ClapCacheStatus> {
         _ => return Err(ClapCacheStatus::InvalidArgument),
     };
     let priority = match value.priority {
-        0 => Priority::Background,
-        1 => Priority::Normal,
-        2 => Priority::Interactive,
+        0 => Priority::Background, 1 => Priority::Normal, 2 => Priority::Interactive,
         _ => return Err(ClapCacheStatus::InvalidArgument),
     };
     Ok(Labels {

@@ -138,6 +138,7 @@ struct PreparedRequest {
   std::vector<ResolvedPromptBoundary> resolved_boundaries;
   nlohmann::json cache_candidates = nlohmann::json::array();
   bool cache_side_request = false;
+  uint32_t priority = CLAP_CACHE_PRIORITY_NORMAL;
   llama_seq_id sequence = 0;
   int32_t initial_position = 0;
   int32_t initial_anchor_at = -1;

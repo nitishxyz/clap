@@ -5,7 +5,7 @@ import { V1RequestTracker } from "./request-tracker";
 const json = (value: unknown) => JSON.stringify(value);
 const ready = {
   protocol: 1, type: "ready", worker_capabilities: { backend: "llama", streaming: true,
-    scheduling: { fused_multi_sequence_batching: true, interleaved: true } }, model_capabilities: null,
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } }, model_capabilities: null,
 } as const;
 const scoped = (type: string, requestId: string, sequence: number, fields: Record<string, unknown> = {}) =>
   json({ protocol: 1, type, request_id: requestId, sequence, ...fields });

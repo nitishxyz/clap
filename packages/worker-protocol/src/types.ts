@@ -140,6 +140,7 @@ export type WorkerCapabilities = {
   scheduling: {
     fused_multi_sequence_batching: boolean;
     interleaved: boolean;
+    priority_aware: boolean;
   };
 };
 export type CacheCapabilities = {

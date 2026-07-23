@@ -158,4 +158,27 @@ int main() {
     assert(events[0].completion->visible_tail == "hel");
     assert(events[0].completion->finish_reason == "length");
   }
+
+  {
+    FakeBackend backend;
+    std::vector<llama_token> prompt(600, 1);
+    auto interactive = request(prompt, 0);
+    auto normal = request(prompt, 1);
+    auto background = request(prompt, 2);
+    interactive.priority = CLAP_CACHE_PRIORITY_INTERACTIVE;
+    normal.priority = CLAP_CACHE_PRIORITY_NORMAL;
+    background.priority = CLAP_CACHE_PRIORITY_BACKGROUND;
+    clap::llama::GenerationStepper stepper(backend);
+    stepper.step({&interactive, &normal, &background}, 400, false);
+    assert(interactive.ingested == 192);
+    assert(normal.ingested == 96);
+    assert(background.ingested == 48);
+    assert(!interactive.cancelled && !normal.cancelled && !background.cancelled);
+
+    FakeBackend sole_backend;
+    auto sole = request(prompt, 3);
+    clap::llama::GenerationStepper sole_stepper(sole_backend);
+    sole_stepper.step({&sole}, 512, true);
+    assert(sole.ingested == 512);
+  }
 }

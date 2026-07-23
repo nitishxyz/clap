@@ -36,7 +36,8 @@ Worker::Worker(std::istream& input, std::ostream& output)
     : output_(output), v1_(std::make_unique<ProtocolWriter>(output)),
       state_(), scheduler_(scheduler_state(state_)), reader_(input) {
   v1_->ready({{"backend", "llama"}, {"streaming", true}, {"scheduling", {
-      {"fused_multi_sequence_batching", true}, {"interleaved", true}}}}, nullptr);
+      {"fused_multi_sequence_batching", true}, {"interleaved", true},
+      {"priority_aware", true}}}}, nullptr);
 }
 
 void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {

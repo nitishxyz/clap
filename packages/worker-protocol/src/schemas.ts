@@ -137,6 +137,7 @@ export const WorkerCapabilitiesSchema = z.object({
   scheduling: z.object({
     fused_multi_sequence_batching: z.boolean(),
     interleaved: z.boolean(),
+    priority_aware: z.boolean(),
   }).strict(),
 }).strict();
 export const CacheCapabilitiesSchema = z.object({

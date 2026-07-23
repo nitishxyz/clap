@@ -48,7 +48,8 @@ int main() {
     assert(events[0]["type"] == "ready");
     assert(events[0]["worker_capabilities"]["backend"] == "llama");
     assert(events[0]["worker_capabilities"]["scheduling"] == nlohmann::json({
-        {"fused_multi_sequence_batching", true}, {"interleaved", true}}));
+        {"fused_multi_sequence_batching", true}, {"interleaved", true},
+        {"priority_aware", true}}));
     assert(events[0]["model_capabilities"].is_null());
     assert(!events[0].contains("structured_output"));
     assert(!events[0].contains("request_id"));

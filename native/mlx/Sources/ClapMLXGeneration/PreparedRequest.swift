@@ -35,6 +35,7 @@ public struct PreparedRequest<Parameters> {
   public let reuseKind: String?
   public let reuseScope: String?
   public let cacheIdentity: CacheIdentity
+  public let priority: UInt32
   public let cacheDecision: CacheDecision?
   public let cacheCandidates: [CacheCandidateEvaluation]
   public let cacheEvictions: [Int]
@@ -78,6 +79,7 @@ public struct PreparedRequest<Parameters> {
     self.reuseKind = reuseKind
     self.reuseScope = reuseScope
     self.cacheIdentity = cacheIdentity
+    self.priority = cacheIdentity.priority
     self.cacheDecision = cacheDecision
     self.cacheCandidates = cacheCandidates
     self.cacheEvictions = cacheEvictions

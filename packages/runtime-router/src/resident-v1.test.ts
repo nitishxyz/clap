@@ -23,7 +23,7 @@ async function v1Worker(dir: string) {
   await executable(path, `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const log = ${JSON.stringify(log)};
-const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
 const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "native", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
 console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 const decoder = new TextDecoder(); let buffer = ""; const next = new Map();

@@ -1,14 +1,19 @@
+import ClapCachePolicy
+
 public struct PendingRequest<Payload> {
   public let id: String?
   public let model: String?
   public let receivedNs: UInt64
   public let payload: Payload
+  public let priority: SchedulingPriority
 
-  public init(id: String?, model: String?, receivedNs: UInt64, payload: Payload) {
+  public init(id: String?, model: String?, receivedNs: UInt64, payload: Payload,
+              priority: SchedulingPriority = .normal) {
     self.id = id
     self.model = model
     self.receivedNs = receivedNs
     self.payload = payload
+    self.priority = priority
   }
 }
 
@@ -20,10 +25,11 @@ public struct ActiveRequestView: Equatable, Sendable {
   public let emittedFirstToken: Bool
   public let terminal: Bool
   public let cancelled: Bool
+  public let priority: SchedulingPriority
 
   public init(id: String?, admissionOrder: UInt64, residualPrefillTokens: Int,
               decoding: Bool, emittedFirstToken: Bool, terminal: Bool,
-              cancelled: Bool) {
+              cancelled: Bool, priority: SchedulingPriority = .normal) {
     self.id = id
     self.admissionOrder = admissionOrder
     self.residualPrefillTokens = residualPrefillTokens
@@ -31,5 +37,6 @@ public struct ActiveRequestView: Equatable, Sendable {
     self.emittedFirstToken = emittedFirstToken
     self.terminal = terminal
     self.cancelled = cancelled
+    self.priority = priority
   }
 }

@@ -7,7 +7,7 @@ const ready = {
   protocol: 1,
   type: "ready",
   worker_capabilities: { backend: "llama", streaming: true,
-    scheduling: { fused_multi_sequence_batching: true, interleaved: true } },
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } },
   model_capabilities: null,
 };
 

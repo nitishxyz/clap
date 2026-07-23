@@ -64,6 +64,7 @@ if (events[0]?.type !== "ready") throw new Error("v1 ready must be the first eve
 if (events[0].worker_capabilities.backend !== "mlx" ||
     events[0].worker_capabilities.scheduling.fused_multi_sequence_batching !== false ||
     events[0].worker_capabilities.scheduling.interleaved !== true ||
+    events[0].worker_capabilities.scheduling.priority_aware !== true ||
     events[0].model_capabilities !== null) {
   throw new Error("v1 ready must advertise strict MLX worker capabilities without model facts");
 }

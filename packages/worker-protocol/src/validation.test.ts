@@ -175,7 +175,7 @@ function fixtureCacheIdentity() {
 
 function fixtureWorkerCapabilities() {
   return { backend: "llama", streaming: true,
-    scheduling: { fused_multi_sequence_batching: true, interleaved: true } } as const;
+    scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } } as const;
 }
 
   test("requires protocol exactly 1 and nonempty request IDs", () => {

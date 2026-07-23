@@ -4,6 +4,10 @@ public final class WorkerScheduler<Payload, Active> {
   public private(set) var pending: [PendingRequest<Payload>] = []
   public private(set) var active: [Active] = []
   public private(set) var nextAdmissionOrder: UInt64 = 0
+  private var priorityCursor = 0
+  private let prioritySchedule: [SchedulingPriority] = [
+    .interactive, .interactive, .interactive, .interactive, .normal, .normal, .background,
+  ]
 
   public init() {}
 
@@ -22,10 +26,19 @@ public final class WorkerScheduler<Payload, Active> {
     guard !pending.isEmpty else { return .empty }
     guard active.count < maxActive else { return .blocked(.capacity) }
     guard !cacheSaturated else { return .blocked(.cacheSaturation) }
-    let candidate = pending[0]
+    var candidateIndex = 0
+    for offset in 0..<prioritySchedule.count {
+      let index = (priorityCursor + offset) % prioritySchedule.count
+      if let found = pending.firstIndex(where: { $0.priority == prioritySchedule[index] }) {
+        candidateIndex = found
+        priorityCursor = (index + 1) % prioritySchedule.count
+        break
+      }
+    }
+    let candidate = pending[candidateIndex]
     let needsLoad = loadedModel != candidate.model || !modelLoaded
     guard !needsLoad || active.isEmpty else { return .blocked(.modelSwitch) }
-    pending.removeFirst()
+    pending.remove(at: candidateIndex)
     return .candidate(candidate, admissionOrder: reserveAdmissionOrder())
   }
 
@@ -56,7 +69,7 @@ public final class WorkerScheduler<Payload, Active> {
         admissionOrder: facts.admissionOrder,
         residualPrefillTokens: facts.residualPrefillTokens,
         decoding: facts.decoding, emittedFirstToken: facts.emittedFirstToken,
-        cancelled: facts.cancelled)
+        cancelled: facts.cancelled, priority: facts.priority)
     }).compactMap { step in
       guard let order = UInt64(step.id), let request = byOrder[order] else { return nil }
       return SchedulerTurn(request: request, prefillQuantum: step.prefillQuantum,

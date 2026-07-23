@@ -15,9 +15,9 @@ final class LatencySchedulerTests: XCTestCase {
       request("long", 1, residual: 12_877),
       request("hit", 2, residual: 25),
     ])
-    XCTAssertEqual(round.map(\.id), ["hit", "long"])
-    XCTAssertEqual(round.map(\.prefillQuantum), [96, 96])
-    XCTAssertEqual(round.map(\.turns), [3, 1])
+    XCTAssertEqual(round.map(\.id), ["hit", "long", "hit", "long"])
+    XCTAssertEqual(round.map(\.prefillQuantum), [96, 96, 96, 96])
+    XCTAssertEqual(round.map(\.turns), [1, 1, 1, 1])
   }
 
   func testLongPrefillAndTwoHundredFiftyFiveTokenHit() {
@@ -25,8 +25,8 @@ final class LatencySchedulerTests: XCTestCase {
       request("long", 1, residual: 12_877),
       request("hit", 2, residual: 255),
     ])
-    XCTAssertEqual(round.map(\.id), ["hit", "long"])
-    XCTAssertEqual(round.map(\.turns), [5, 1])
+    XCTAssertEqual(round.map(\.id), ["hit", "long", "hit", "long"])
+    XCTAssertEqual(round.map(\.turns), [1, 1, 1, 1])
   }
 
   func testMultipleLongPrefillsKeepAdmissionOrder() {
@@ -35,7 +35,7 @@ final class LatencySchedulerTests: XCTestCase {
       request("first", 1, residual: 12_000),
       request("third", 3, residual: 6_000),
     ])
-    XCTAssertEqual(round.map(\.id), ["first", "second", "third"])
+    XCTAssertEqual(round.prefix(3).map(\.id), ["first", "second", "third"])
   }
 
   func testContinuousArrivalsCannotStarveLongRequest() {
@@ -44,7 +44,7 @@ final class LatencySchedulerTests: XCTestCase {
         request("long", 1, residual: 20_000),
         request("short-\(arrival)", UInt64(arrival), residual: 25),
       ])
-      XCTAssertEqual(round.count, 2)
+      XCTAssertEqual(round.count, 4)
       XCTAssertEqual(round.last?.id, "long")
     }
   }
@@ -63,7 +63,7 @@ final class LatencySchedulerTests: XCTestCase {
       request("decode", 2, residual: 0, decoding: true, emitted: true),
       request("first-decode", 3, residual: 0, decoding: true),
     ])
-    XCTAssertEqual(round.map(\.id), ["first-decode", "decode", "long"])
+    XCTAssertEqual(round.prefix(3).map(\.id), ["first-decode", "decode", "long"])
     XCTAssertEqual(Set(round.map(\.id)).count, 3)
   }
 
@@ -73,7 +73,7 @@ final class LatencySchedulerTests: XCTestCase {
       request("other", 2, residual: 0, decoding: true, emitted: true),
       request("same", 1, residual: 25),
     ])
-    XCTAssertEqual(round.map(\.id), ["same", "other", "same"])
-    XCTAssertEqual(round.map(\.turns), [3, 1, 1])
+    XCTAssertEqual(round.prefix(3).map(\.id), ["same", "other", "same"])
+    XCTAssertTrue(round.allSatisfy { $0.turns == 1 })
   }
 }

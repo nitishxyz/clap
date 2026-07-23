@@ -111,6 +111,7 @@ public final class ActiveRequest<Cache, Iterator, Detokenizer, Parameters> {
 
   public var id: String? { prepared.id }
   public var admissionOrder: UInt64 { prepared.admissionOrder }
+  public var priority: UInt32 { prepared.priority }
   public var admittedNs: UInt64 { prepared.admittedNs }
   public var receivedToAdmittedMs: Double { prepared.receivedToAdmittedMs }
   public var templateTokenizeMs: Double { prepared.templateTokenizeMs }

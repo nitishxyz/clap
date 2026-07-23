@@ -57,6 +57,7 @@ class Scheduler {
   std::size_t queued_count() const noexcept { return waiting_.size(); }
 
  private:
+  struct WaitingRequest { std::string id; nlohmann::json request; uint32_t priority; };
   SchedulerEvent topology() const;
   std::vector<ActiveRequest*> decode_first() const;
   void admit(std::vector<SchedulerEvent>& events);
@@ -64,7 +65,8 @@ class Scheduler {
 
   SchedulerState state_;
   std::vector<std::unique_ptr<ActiveRequest>> active_;
-  std::deque<std::pair<std::string, nlohmann::json>> waiting_;
+  std::deque<WaitingRequest> waiting_;
+  std::size_t priority_cursor_ = 0;
 };
 
 }  // namespace clap::llama

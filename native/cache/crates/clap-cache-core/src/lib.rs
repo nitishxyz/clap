@@ -48,7 +48,6 @@ pub enum Priority {
     Normal = 1,
     Interactive = 2,
 }
-
 /// Backend abilities are explicit and may be refreshed for every request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Capabilities(pub u64);
@@ -85,8 +84,7 @@ impl SlotCapabilities {
     pub const WRITABLE: u8 = 1 << 1;
     pub const PARTIAL_SUFFIX_TRIM: u8 = 1 << 2;
     pub const COPY: u8 = 1 << 3;
-    pub const ALL: Self =
-        Self(Self::MATERIALIZED | Self::WRITABLE | Self::PARTIAL_SUFFIX_TRIM | Self::COPY);
+    pub const ALL: Self = Self(Self::MATERIALIZED | Self::WRITABLE | Self::PARTIAL_SUFFIX_TRIM | Self::COPY);
 
     pub const fn contains(self, flag: u8) -> bool {
         self.0 & flag == flag

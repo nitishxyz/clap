@@ -1,4 +1,5 @@
 import ClapMLXWorkerCore
+import ClapCachePolicy
 import Foundation
 
 final class ExecutableWorkerScheduler {
@@ -14,7 +15,7 @@ final class ExecutableWorkerScheduler {
                receivedNs: UInt64) -> [WorkerSchedulingEvent] {
     let chat = QueuedChat(id: id, control: control, data: data, receivedNs: receivedNs)
     core.enqueue(PendingRequest(id: id, model: control.model, receivedNs: receivedNs,
-      payload: chat))
+      payload: chat, priority: schedulingPriority(control.cache_identity?.priority)))
     return [.queueChanged(core.pending.count)]
   }
 
@@ -81,6 +82,18 @@ final class ExecutableWorkerScheduler {
       residualPrefillTokens: max(0, request.suffix.count - request.pos),
       decoding: request.iterator != nil, emittedFirstToken: request.emitted > 0,
       terminal: request.completed || request.cancelled || request.failed,
-      cancelled: request.cancelled)
+      cancelled: request.cancelled, priority: schedulingPriority(request.priority))
   }
+}
+
+private func schedulingPriority(_ value: String?) -> SchedulingPriority {
+  switch value {
+  case "interactive": .interactive
+  case "background": .background
+  default: .normal
+  }
+}
+
+private func schedulingPriority(_ value: UInt32) -> SchedulingPriority {
+  value == 2 ? .interactive : value == 0 ? .background : .normal
 }

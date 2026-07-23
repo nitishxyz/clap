@@ -13,6 +13,13 @@ const server = await read("packages/server/src/index.ts");
 const resident = await read("packages/runtime-router/src/process/resident-worker-process.ts");
 const api = await read("packages/api/src/schemas.ts");
 const dashboard = await read("apps/web/src/components/dashboard/ModelTables.tsx");
+const limiter = await read("packages/server/src/limits.ts");
+const llamaScheduler = await read("native/llama/src/scheduler.cpp");
+const llamaStepper = await read("native/llama/src/generation-stepper.cpp");
+const llamaTests = await read("native/llama/tests/scheduler.test.cpp");
+const mlxScheduler = await read("native/mlx/Sources/ClapMLXWorkerCore/WorkerScheduler.swift");
+const mlxLatency = await read("native/mlx/Sources/ClapCachePolicy/LatencyScheduler.swift");
+const mlxTests = await read("native/mlx/Tests/ClapMLXWorkerCoreTests/WorkerSchedulerTests.swift");
 
 const backendComparisons = (source: string) => source.split("\n")
   .filter((line) => /\bbackend\s*(?:===|!==)/.test(line)).map((line) => line.trim());
@@ -87,6 +94,22 @@ for (const marker of ["EffectiveCapabilitiesSchema", "effectiveCapabilities: Eff
 for (const marker of ["data-model-details=\"capabilities\"", "generation.structuredOutput",
   "generation.toolTemplateSupport", "cache.partialSuffixTrim", "modalities.input"])
   requireText(dashboard, marker, "dashboard effective capability details");
+
+for (const marker of ['"interactive", "interactive", "interactive", "interactive"',
+  '"normal", "normal", "background"', 'request.cache?.priority ?? "normal"'])
+  requireText(`${limiter}\n${server}`, marker, "server priority scheduling path");
+for (const marker of ["CLAP_CACHE_PRIORITY_INTERACTIVE", "CLAP_CACHE_PRIORITY_NORMAL",
+  "CLAP_CACHE_PRIORITY_BACKGROUND", "priority_cursor_", "request->priority", "192", "96", "48"])
+  requireText(`${llamaScheduler}\n${llamaStepper}`, marker, "llama priority scheduling path");
+for (const marker of ["prioritySchedule", ".interactive, .interactive, .interactive, .interactive",
+  "normalContendedPrefillQuantum = 96", "interactivePrefillQuantum = 192",
+  "backgroundPrefillQuantum = 48", "Every runnable request advances before extras"])
+  requireText(`${mlxScheduler}\n${mlxLatency}`, marker, "MLX priority scheduling path");
+for (const [source, label, markers] of [
+  [llamaTests, "llama starvation tests", ["i0", "n", "b", "never destructively preempts"]],
+  [mlxTests, "MLX starvation tests", ["sustained interactive work cannot starve normal or background",
+    "priority rounds preserve FIFO within class and never cancel active work"]],
+] as const) for (const marker of markers) requireText(source, marker, label);
 
 if (failures.length > 0) {
   for (const failure of failures) console.error(failure);

@@ -20,7 +20,7 @@ async function faultWorker(scenario: string) {
 const scenario = ${JSON.stringify(scenario)};
 const send = (value) => console.log(typeof value === "string" ? value : JSON.stringify(value));
 const scoped = (type, id, sequence, fields = {}) => send({ protocol: 1, type, request_id: id, sequence, ...fields });
-const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
 const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: "native", json_schema: "native", post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
 const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
 if (scenario === "exit_handshake") process.exit(17);

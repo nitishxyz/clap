@@ -30,7 +30,13 @@ Scheduler::Scheduler(SchedulerState state) : state_(std::move(state)) {
 }
 
 void Scheduler::enqueue(std::string id, nlohmann::json request) {
-  waiting_.emplace_back(std::move(id), std::move(request));
+  uint32_t priority = CLAP_CACHE_PRIORITY_NORMAL;
+  if (request.contains("cache_identity") && request["cache_identity"].is_object()) {
+    const auto value = request["cache_identity"].value("priority", "normal");
+    if (value == "interactive") priority = CLAP_CACHE_PRIORITY_INTERACTIVE;
+    else if (value == "background") priority = CLAP_CACHE_PRIORITY_BACKGROUND;
+  }
+  waiting_.push_back({std::move(id), std::move(request), priority});
 }
 
 SchedulerEvent Scheduler::topology() const {
@@ -48,7 +54,7 @@ std::vector<SchedulerEvent> Scheduler::cancel(const std::string& target) {
   }
   if (!target.empty()) {
     const auto found = std::find_if(waiting_.begin(), waiting_.end(),
-        [&target](const auto& queued) { return queued.first == target; });
+        [&target](const auto& queued) { return queued.id == target; });
     if (found != waiting_.end()) {
       SchedulerEvent event;
       event.type = SchedulerEvent::Type::QueuedCancelled;
@@ -61,41 +67,57 @@ std::vector<SchedulerEvent> Scheduler::cancel(const std::string& target) {
 }
 
 void Scheduler::admit(std::vector<SchedulerEvent>& events) {
+  static constexpr uint32_t schedule[] = {
+    CLAP_CACHE_PRIORITY_INTERACTIVE, CLAP_CACHE_PRIORITY_INTERACTIVE,
+    CLAP_CACHE_PRIORITY_INTERACTIVE, CLAP_CACHE_PRIORITY_INTERACTIVE,
+    CLAP_CACHE_PRIORITY_NORMAL, CLAP_CACHE_PRIORITY_NORMAL,
+    CLAP_CACHE_PRIORITY_BACKGROUND};
   while (!waiting_.empty()) {
-    const std::string model = waiting_.front().second.value("model", "");
+    auto selected = waiting_.begin();
+    for (std::size_t offset = 0; offset < std::size(schedule); ++offset) {
+      const uint32_t priority = schedule[(priority_cursor_ + offset) % std::size(schedule)];
+      const auto found = std::find_if(waiting_.begin(), waiting_.end(),
+          [priority](const auto& queued) { return queued.priority == priority; });
+      if (found != waiting_.end()) {
+        selected = found;
+        priority_cursor_ = (priority_cursor_ + offset + 1) % std::size(schedule);
+        break;
+      }
+    }
+    const std::string model = selected->request.value("model", "");
     if (model.empty()) {
-      events.push_back(error_event(waiting_.front().first, "chat.model is required"));
-      waiting_.pop_front();
+      events.push_back(error_event(selected->id, "chat.model is required"));
+      waiting_.erase(selected);
       continue;
     }
     if (!active_.empty() && state_.loaded() && !state_.same_path(model)) break;
     try {
       state_.load(model);
     } catch (const std::exception& error) {
-      events.push_back(error_event(waiting_.front().first, error.what()));
-      waiting_.pop_front();
+      events.push_back(error_event(selected->id, error.what()));
+      waiting_.erase(selected);
       continue;
     }
     if (state_.has_encoder() && !active_.empty()) break;
     if (active_.size() >= static_cast<std::size_t>(std::max(0, state_.max_active()))) break;
 
-    auto queued = std::move(waiting_.front());
-    waiting_.pop_front();
+    auto queued = std::move(*selected);
+    waiting_.erase(selected);
     try {
-      active_.push_back(state_.prepare(queued.first, queued.second));
+      active_.push_back(state_.prepare(queued.id, queued.request));
       SchedulerEvent started;
       started.type = SchedulerEvent::Type::Started;
-      started.id = queued.first;
+      started.id = queued.id;
       started.active = active_.size();
       started.queued = waiting_.size();
       events.push_back(std::move(started));
     } catch (const CacheBackpressure&) {
-      waiting_.emplace_front(std::move(queued));
+      waiting_.push_front(std::move(queued));
       break;
     } catch (const RequestError& error) {
-      events.push_back(error_event(queued.first, error.what(), error.code));
+      events.push_back(error_event(queued.id, error.what(), error.code));
     } catch (const std::exception& error) {
-      events.push_back(error_event(queued.first, error.what()));
+      events.push_back(error_event(queued.id, error.what()));
     }
   }
 }
@@ -103,18 +125,19 @@ void Scheduler::admit(std::vector<SchedulerEvent>& events) {
 std::vector<ActiveRequest*> Scheduler::decode_first() const {
   std::vector<ActiveRequest*> ordered;
   ordered.reserve(active_.size());
-  for (const auto& request : active_) {
-    const bool has_work = request->phase == ActiveRequest::Phase::Decode ||
-        request->prompt_tokens.size() != request->ingested;
-    if (!request->done && has_work && request->phase == ActiveRequest::Phase::Decode) {
-      ordered.push_back(request.get());
+  for (uint32_t priority : {CLAP_CACHE_PRIORITY_INTERACTIVE, CLAP_CACHE_PRIORITY_NORMAL,
+                            CLAP_CACHE_PRIORITY_BACKGROUND}) {
+    for (const auto& request : active_) {
+      const bool has_work = request->phase == ActiveRequest::Phase::Decode ||
+          request->prompt_tokens.size() != request->ingested;
+      if (!request->done && has_work && request->priority == priority &&
+          request->phase == ActiveRequest::Phase::Decode) ordered.push_back(request.get());
     }
-  }
-  for (const auto& request : active_) {
-    const bool has_work = request->phase == ActiveRequest::Phase::Decode ||
-        request->prompt_tokens.size() != request->ingested;
-    if (!request->done && has_work && request->phase == ActiveRequest::Phase::Prefill) {
-      ordered.push_back(request.get());
+    for (const auto& request : active_) {
+      const bool has_work = request->phase == ActiveRequest::Phase::Decode ||
+          request->prompt_tokens.size() != request->ingested;
+      if (!request->done && has_work && request->priority == priority &&
+          request->phase == ActiveRequest::Phase::Prefill) ordered.push_back(request.get());
     }
   }
   return ordered;
@@ -180,7 +203,7 @@ std::vector<SchedulerEvent> Scheduler::cancel_all(bool include_waiting) {
     while (!waiting_.empty()) {
       SchedulerEvent event;
       event.type = SchedulerEvent::Type::QueuedCancelled;
-      event.id = waiting_.front().first;
+      event.id = waiting_.front().id;
       events.push_back(std::move(event));
       waiting_.pop_front();
     }

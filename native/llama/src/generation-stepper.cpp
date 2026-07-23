@@ -299,14 +299,22 @@ std::vector<GenerationEvent> GenerationStepper::step(
   std::vector<DecodeContribution> batch;
   std::vector<ActiveRequest*> contributors;
   int32_t budget = batch_budget;
+  std::size_t runnable_left = std::count_if(ordered.begin(), ordered.end(),
+      [](const ActiveRequest* request) { return request && !request->done; });
   for (ActiveRequest* request : ordered) {
     if (!request || request->done || budget <= 0) continue;
+    const int32_t reserved_for_others = static_cast<int32_t>(runnable_left > 0 ? runnable_left - 1 : 0);
+    const int32_t quantum = sole_active ? batch_budget
+        : request->priority == CLAP_CACHE_PRIORITY_INTERACTIVE ? 192
+        : request->priority == CLAP_CACHE_PRIORITY_BACKGROUND ? 48 : 96;
+    const int32_t request_budget = std::max(1, std::min(quantum, budget - reserved_for_others));
     const std::size_t before = batch.size();
-    add_contribution(batch, *request, budget);
+    add_contribution(batch, *request, request_budget);
     const int32_t added = static_cast<int32_t>(batch.size() - before);
     if (added == 0) continue;
     budget -= added;
     contributors.push_back(request);
+    runnable_left -= 1;
   }
   if (contributors.empty()) return events;
   if (backend_->decode(batch) == 0) {

@@ -1236,11 +1236,15 @@
                             },
                             "interleaved": {
                               "type": "boolean"
+                            },
+                            "priority_aware": {
+                              "type": "boolean"
                             }
                           },
                           "required": [
                             "fused_multi_sequence_batching",
-                            "interleaved"
+                            "interleaved",
+                            "priority_aware"
                           ],
                           "additionalProperties": false
                         }
@@ -2039,11 +2043,15 @@
                           },
                           "interleaved": {
                             "type": "boolean"
+                          },
+                          "priority_aware": {
+                            "type": "boolean"
                           }
                         },
                         "required": [
                           "fused_multi_sequence_batching",
-                          "interleaved"
+                          "interleaved",
+                          "priority_aware"
                         ],
                         "additionalProperties": false
                       }
@@ -2830,11 +2838,15 @@
                           },
                           "interleaved": {
                             "type": "boolean"
+                          },
+                          "priority_aware": {
+                            "type": "boolean"
                           }
                         },
                         "required": [
                           "fused_multi_sequence_batching",
-                          "interleaved"
+                          "interleaved",
+                          "priority_aware"
                         ],
                         "additionalProperties": false
                       }
@@ -7425,11 +7437,15 @@
                                       },
                                       "interleaved": {
                                         "type": "boolean"
+                                      },
+                                      "priority_aware": {
+                                        "type": "boolean"
                                       }
                                     },
                                     "required": [
                                       "fused_multi_sequence_batching",
-                                      "interleaved"
+                                      "interleaved",
+                                      "priority_aware"
                                     ],
                                     "additionalProperties": false
                                   }
@@ -8843,11 +8859,15 @@
                                     },
                                     "interleaved": {
                                       "type": "boolean"
+                                    },
+                                    "priority_aware": {
+                                      "type": "boolean"
                                     }
                                   },
                                   "required": [
                                     "fused_multi_sequence_batching",
-                                    "interleaved"
+                                    "interleaved",
+                                    "priority_aware"
                                   ],
                                   "additionalProperties": false
                                 }
@@ -9709,11 +9729,15 @@
                                     },
                                     "interleaved": {
                                       "type": "boolean"
+                                    },
+                                    "priority_aware": {
+                                      "type": "boolean"
                                     }
                                   },
                                   "required": [
                                     "fused_multi_sequence_batching",
-                                    "interleaved"
+                                    "interleaved",
+                                    "priority_aware"
                                   ],
                                   "additionalProperties": false
                                 }

@@ -2759,7 +2759,7 @@ describe("clap server", () => {
       expect(loadBody.model.worker.stderrLogPath).toContain(loadBody.model.worker.launchId);
       expect(loadBody.model.worker.launchMetadataPath).toContain(loadBody.model.worker.launchId);
       expect(loadBody.model.worker.workerCapabilities).toMatchObject({
-        backend: "llama", scheduling: { fused_multi_sequence_batching: true, interleaved: true },
+        backend: "llama", scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true },
       });
       expect(loadBody.model.worker.effectiveCapabilities).toMatchObject({
         generation: { structuredOutput: { json_object: "native" }, toolTemplateSupport: false },
@@ -3358,7 +3358,7 @@ const send = (type, id, fields = {}) => {
 };
 const structuredMode = process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE ?? "native";
 const toolTemplateSupport = process.env.CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT === "1";
-const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
+const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
 const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: structuredMode, json_schema: structuredMode, post_validation: true, max_schema_bytes: 65536 }, tool_templates: toolTemplateSupport }, modalities: { input: ["text"], output: ["text"] } };
 const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
 console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));

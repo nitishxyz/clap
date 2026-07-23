@@ -1,4 +1,5 @@
 import Testing
+import ClapCachePolicy
 @testable import ClapMLXWorkerCore
 
 @Suite("Protocol-independent worker scheduler")
@@ -72,7 +73,7 @@ struct WorkerSchedulerTests {
     #expect(scheduler.active.first(where: { $0.id == "b" })?.cancelled == true)
   }
 
-  @Test("latency rounds preserve exact boosted turns and order")
+  @Test("latency rounds advance all requests before weighted extras")
   func latencyRound() {
     let scheduler = WorkerScheduler<String, TestActive>()
     scheduler.appendActive(TestActive(id: "long", order: 1, residual: 800))
@@ -80,9 +81,41 @@ struct WorkerSchedulerTests {
     scheduler.appendActive(TestActive(id: "decode", order: 3, residual: 0,
       decoding: true, emitted: true))
     let round = scheduler.latencyRound(view: view)
-    #expect(round.map { $0.request.id } == ["near", "decode", "long"])
-    #expect(round.map(\.prefillQuantum) == [96, 96, 96])
-    #expect(round.map(\.turns) == [5, 1, 1])
+    #expect(round.prefix(3).map { $0.request.id } == ["near", "decode", "long"])
+    #expect(round.prefix(3).map(\.prefillQuantum) == [96, 96, 96])
+    #expect(round.allSatisfy { $0.turns == 1 })
+  }
+
+  @Test("sustained interactive work cannot starve normal or background")
+  func priorityStarvationBound() {
+    let scheduler = WorkerScheduler<String, TestActive>()
+    for index in 0..<8 {
+      scheduler.enqueue(PendingRequest(id: "i\(index)", model: "m", receivedNs: UInt64(index),
+        payload: "i\(index)", priority: .interactive))
+    }
+    scheduler.enqueue(PendingRequest(id: "n", model: "m", receivedNs: 20, payload: "n", priority: .normal))
+    scheduler.enqueue(PendingRequest(id: "b", model: "m", receivedNs: 21, payload: "b", priority: .background))
+    var admitted: [String] = []
+    for _ in 0..<7 {
+      guard case .candidate(let candidate, _) = scheduler.decideAdmission(maxActive: 20,
+        loadedModel: "m", modelLoaded: true, cacheSaturated: false) else { break }
+      admitted.append(candidate.payload)
+    }
+    #expect(admitted == ["i0", "i1", "i2", "i3", "n", "b", "i4"])
+    #expect(scheduler.pending.filter { $0.priority == .interactive }.map(\.payload) == ["i5", "i6", "i7"])
+  }
+
+  @Test("priority rounds preserve FIFO within class and never cancel active work")
+  func priorityRoundSafety() {
+    let scheduler = WorkerScheduler<String, TestActive>()
+    scheduler.appendActive(TestActive(id: "i1", order: 1, priority: .interactive))
+    scheduler.appendActive(TestActive(id: "i2", order: 2, priority: .interactive))
+    scheduler.appendActive(TestActive(id: "n", order: 3, priority: .normal))
+    scheduler.appendActive(TestActive(id: "b", order: 4, priority: .background))
+    let round = scheduler.latencyRound(view: view)
+    #expect(round.prefix(4).map { $0.request.id } == ["i1", "i2", "n", "b"])
+    #expect(round.prefix(4).map(\.prefillQuantum) == [192, 192, 96, 48])
+    #expect(scheduler.active.allSatisfy { !$0.cancelled && !$0.terminal })
   }
 
   @Test("terminal removal returns terminal requests and keeps runnable order")
@@ -118,16 +151,18 @@ private final class TestActive {
   let residual: Int
   let decoding: Bool
   let emitted: Bool
+  let priority: SchedulingPriority
   var terminal = false
   var cancelled = false
 
   init(id: String?, order: UInt64, residual: Int = 0, decoding: Bool = false,
-       emitted: Bool = false) {
+       emitted: Bool = false, priority: SchedulingPriority = .normal) {
     self.id = id
     self.order = order
     self.residual = residual
     self.decoding = decoding
     self.emitted = emitted
+    self.priority = priority
   }
 }
 
@@ -135,5 +170,5 @@ private func view(_ request: TestActive) -> ActiveRequestView {
   ActiveRequestView(id: request.id, admissionOrder: request.order,
     residualPrefillTokens: request.residual, decoding: request.decoding,
     emittedFirstToken: request.emitted, terminal: request.terminal || request.cancelled,
-    cancelled: request.cancelled)
+    cancelled: request.cancelled, priority: request.priority)
 }

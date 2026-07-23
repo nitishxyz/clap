@@ -124,6 +124,7 @@ PreparedRequest RequestPreparer::prepare(const std::string& id, const nlohmann::
     throw RequestError("invalid_cache_identity", error.what());
   }
   prepared.cache_identity = parsed_identity.authority;
+  prepared.priority = parsed_identity.authority.priority;
   prepared.cache_side_request = prepared.cache_identity.side_request;
   if (!cache_executor_) prepared.cache_fallback = "coordinator_unavailable";
   prepared.cache_namespace = parsed_identity.display.name_space;

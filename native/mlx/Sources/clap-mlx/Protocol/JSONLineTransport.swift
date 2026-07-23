@@ -49,7 +49,8 @@ private final class V1ProtocolWriter {
   func ready() {
     write(["protocol": 1, "type": "ready",
       "worker_capabilities": ["backend": "mlx", "streaming": true,
-        "scheduling": ["fused_multi_sequence_batching": false, "interleaved": true]],
+        "scheduling": ["fused_multi_sequence_batching": false, "interleaved": true,
+          "priority_aware": true]],
       "model_capabilities": NSNull()])
   }
 

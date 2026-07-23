@@ -32,5 +32,5 @@ func workerTiming(_ facts: TimingTelemetryFacts) -> WorkerTiming {
     first_decode_ms: facts.firstDecodeMs,
     first_emit_ms: facts.firstEmitMs,
     normal_prefill_quantum: LatencyScheduler.normalPrefillQuantum,
-    contended_prefill_quantum: LatencyScheduler.contendedPrefillQuantum)
+    contended_prefill_quantum: LatencyScheduler.normalContendedPrefillQuantum)
 }

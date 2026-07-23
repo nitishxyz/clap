@@ -34,13 +34,17 @@ struct FakeState {
       },
       [&] { return encoder; },
       [&] { return capacity; },
-      [&](const std::string& id, const nlohmann::json&) {
+      [&](const std::string& id, const nlohmann::json& input) {
         if (backpressure) throw clap::llama::CacheBackpressure("busy");
         clap::llama::PreparedRequest facts;
         facts.id = id;
         facts.params.max_tokens = 4;
         facts.prompt_tokens = {1};
         facts.full_prompt_tokens = {1};
+        const std::string priority = input.value("cache_identity", nlohmann::json::object())
+            .value("priority", "normal");
+        facts.priority = priority == "interactive" ? CLAP_CACHE_PRIORITY_INTERACTIVE
+            : priority == "background" ? CLAP_CACHE_PRIORITY_BACKGROUND : CLAP_CACHE_PRIORITY_NORMAL;
         prepared.push_back(id);
         auto active = std::make_unique<clap::llama::ActiveRequest>(std::move(facts));
         if (id.find("decode") != std::string::npos) {
@@ -65,6 +69,9 @@ struct FakeState {
 };
 
 nlohmann::json request(const std::string& model) { return {{"model", model}}; }
+nlohmann::json request(const std::string& model, const std::string& priority) {
+  return {{"model", model}, {"cache_identity", {{"priority", priority}}}};
+}
 
 std::size_t count(const std::vector<clap::llama::SchedulerEvent>& events,
                   clap::llama::SchedulerEvent::Type type) {
@@ -174,5 +181,21 @@ int main() {
     const auto events = scheduler.tick();
     assert(count(events, clap::llama::SchedulerEvent::Type::Topology) == 1);
     assert(scheduler.idle());
+  }
+
+  {
+    FakeState state;
+    state.capacity = 7;
+    clap::llama::Scheduler scheduler(state.callbacks());
+    for (int index = 0; index < 8; ++index) {
+      scheduler.enqueue("i" + std::to_string(index), request("m", "interactive"));
+    }
+    scheduler.enqueue("n", request("m", "normal"));
+    scheduler.enqueue("b", request("m", "background"));
+    scheduler.tick();
+    assert(state.prepared == std::vector<std::string>({"i0", "i1", "i2", "i3", "n", "b", "i4"}));
+    assert(scheduler.queued_count() == 3);
+    assert(state.stepped == std::vector<std::string>({"i0", "i1", "i2", "i3", "i4", "n", "b"}));
+    assert(scheduler.active_count() == 7);  // Priority never destructively preempts active work.
   }
 }
