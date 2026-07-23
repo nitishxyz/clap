@@ -89,6 +89,11 @@ describe("recent request intent and cache badges", () => {
     expect(html).toContain("cache branch hit · 30 tok · 30%");
   });
 
+  test("explicit no-intent eligibility overrides raw coordinator telemetry", () => {
+    expect(row({ ...base, cacheHit: false, cacheEligibility: "no_intent",
+      cacheOutcome: outcome("isolated") })).toContain("cache n/a · no intent");
+  });
+
   test("absent telemetry renders an explicit cache n/a badge", () => {
     const html = row({ ...base });
     expect(html).toContain("cache n/a");

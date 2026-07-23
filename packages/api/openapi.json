@@ -5902,6 +5902,25 @@
           "source",
           "items"
         ]
+      },
+      "DashboardResetResponse": {
+        "type": "object",
+        "properties": {
+          "reset": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "deletedEvents": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "reset",
+          "deletedEvents"
+        ]
       }
     },
     "parameters": {}
@@ -5935,6 +5954,95 @@
                     "status",
                     "version",
                     "uptimeMs"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/dashboard": {
+      "delete": {
+        "summary": "Reset dashboard request and event history",
+        "description": "Clears persisted dashboard telemetry and in-memory dashboard counters without unloading workers, rotating cache identity, or clearing physical KV caches. Requires a valid API key or trusted local access.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reset": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "deletedEvents": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "reset",
+                    "deletedEvents"
                   ]
                 }
               }

@@ -87,6 +87,44 @@ describe("clap server", () => {
     expect(Array.isArray(body.gpus)).toBe(true);
   });
 
+  test("dashboard reset is trusted-local or authenticated and leaves runtime loaded", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-dashboard-reset-"));
+    try {
+      process.env.CLAP_HOME = home;
+      process.env.CLAP_REQUIRE_API_KEY = "0";
+      const app = createServer();
+      const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
+      const denied = await app.request("/clap/v1/dashboard", { method: "DELETE" }, remote);
+      expect(denied.status).toBe(401);
+
+      const created = await app.request("/clap/v1/keys", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "dashboard-admin" }),
+      });
+      const key = (await created.json() as { key: string }).key;
+      const authenticated = await app.request("/clap/v1/dashboard", {
+        method: "DELETE", headers: { authorization: `Bearer ${key}` },
+      }, remote);
+      expect(authenticated.status).toBe(200);
+      expect(await authenticated.json()).toEqual({ reset: true, deletedEvents: 0 });
+
+      const local = await app.request("/clap/v1/dashboard", { method: "DELETE" });
+      expect(local.status).toBe(200);
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const body = await dashboard.json() as { totals: Record<string, number>; requests: unknown[]; events: unknown[]; loaded: unknown[] };
+      expect(body.totals).toMatchObject({ requests: 0, cacheEligible: 0, cacheHits: 0, cacheMisses: 0, reusedTokens: 0 });
+      expect(body.requests).toEqual([]);
+      expect(body.events).toEqual([]);
+      expect(body.loaded).toEqual([]);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("dashboard SSE stream emits a payload and stops on abort", async () => {
     const app = createServer();
     const controller = new AbortController();

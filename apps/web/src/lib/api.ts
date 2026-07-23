@@ -42,6 +42,10 @@ export type DashboardTotals = {
   completionTokens: number;
   cacheHits: number;
   cacheMisses: number;
+  cacheEligible: number;
+  cacheNotEligible: number;
+  cacheIsolatedMisses: number;
+  cacheFreshMisses: number;
   reusedTokens: number;
 };
 
@@ -134,6 +138,8 @@ export type DashboardRequest = {
   completionTokens?: number;
   tokensPerSecond?: number;
   cacheHit?: boolean;
+  cacheIntent?: boolean;
+  cacheEligibility?: "eligible" | "no_intent" | "no_admission";
   reuseKind?: "slot" | "branch" | "anchor";
   reuseScope?: "system" | "conversation" | "session" | "agent" | "project" | "harness" | "tenant";
   reusedTokens?: number;
@@ -418,6 +424,12 @@ export async function fetchDashboard(): Promise<DashboardData> {
   const response = await fetch("/clap/v1/dashboard");
   if (!response.ok) throw new Error(`dashboard fetch failed: ${response.status}`);
   return response.json() as Promise<DashboardData>;
+}
+
+export async function resetDashboard(): Promise<{ reset: true; deletedEvents: number }> {
+  const response = await fetch("/clap/v1/dashboard", { method: "DELETE" });
+  if (!response.ok) throw new Error(`dashboard reset failed (${response.status})`);
+  return response.json() as Promise<{ reset: true; deletedEvents: number }>;
 }
 
 export async function fetchRequestDetail(id: string): Promise<DashboardRequest> {

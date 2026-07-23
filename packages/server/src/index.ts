@@ -537,6 +537,9 @@ export function createServer(
           endpoint: event.endpoint ?? "/v1/chat/completions",
           stream: false,
           status: event.status,
+          cacheIntent: event.cacheIntent,
+          cacheEligibility: event.cacheIntent !== true ? "no_intent" as const
+            : typeof event.cache?.hit !== "boolean" ? "no_admission" as const : "eligible" as const,
           phase: "done" as const,
           promptTokens: event.promptTokenCount,
           conversation: identity.promptPrefixId,
@@ -598,6 +601,16 @@ export function createServer(
 
   app.get("/clap/v1/dashboard", async (c) => c.json(await dashboardPayload()));
 
+  app.delete("/clap/v1/dashboard", (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.cachePrincipal) return invalidApiKey(c);
+    // Both operations are synchronous, so no request completion can interleave
+    // between durable deletion and the in-memory accounting epoch change.
+    const { deletedEvents } = cacheEvents.clear();
+    metrics.resetDashboard();
+    return c.json({ reset: true, deletedEvents });
+  });
+
   // Live dashboard feed: pushes the full payload every interval so the UI
   // updates without polling. Clients reconnect on drop (standard SSE).
   app.get("/clap/v1/dashboard/stream", (c) => {
@@ -643,6 +656,9 @@ export function createServer(
         endpoint: persisted.endpoint ?? "/v1/chat/completions",
         stream: false,
         status: persisted.status,
+        cacheIntent: persisted.cacheIntent,
+        cacheEligibility: persisted.cacheIntent !== true ? "no_intent"
+          : typeof persisted.cache?.hit !== "boolean" ? "no_admission" : "eligible",
         phase: "done",
         promptTokens: persisted.promptTokenCount,
         conversation: identity.promptPrefixId,

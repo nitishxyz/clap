@@ -85,6 +85,8 @@ export type PersistedCacheDecision = {
   promptTokenHash?: string;
   promptTokenCount?: number;
   status: "ok" | "error" | "cancelled";
+  /** True when the caller supplied an explicit cache intent object. */
+  cacheIntent?: boolean;
   finishReason?: string;
   errorCode?: string;
   structuredOutput?: StructuredOutputFacts;
@@ -243,6 +245,15 @@ export class CacheEventStore {
 
   get(requestId: string): PersistedCacheDecision | undefined {
     return this.readAll().reverse().find((event) => event.requestId === requestId);
+  }
+
+  /** Clears dashboard decision history while preserving the installation HMAC key. */
+  clear(): { deletedEvents: number } {
+    if (!this.enabled) return { deletedEvents: 0 };
+    const deletedEvents = this.readAll().length;
+    for (const name of eventFiles(this.directory)) unlinkSync(join(this.directory, name));
+    this.rotationSequence = 0;
+    return { deletedEvents };
   }
 
   list(filters: CacheDecisionFilters = {}, limit = 50, cursor?: string): CacheDecisionPage {

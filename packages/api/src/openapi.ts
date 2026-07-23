@@ -84,6 +84,10 @@ export function createOpenApiDocument(): object {
     items: z.array(CacheDecisionSchema),
     nextCursor: z.string().optional(),
   });
+  const DashboardResetResponseSchema = z.object({
+    reset: z.literal(true),
+    deletedEvents: z.number().int().nonnegative(),
+  });
 
   registry.register("ErrorResponse", ErrorResponseSchema);
   registry.register("HealthResponse", HealthResponseSchema);
@@ -112,12 +116,21 @@ export function createOpenApiDocument(): object {
   registry.register("CacheOutcome", CacheOutcomeSchema);
   registry.register("CacheDecision", CacheDecisionSchema);
   registry.register("CacheDecisionPage", CacheDecisionPageSchema);
+  registry.register("DashboardResetResponse", DashboardResetResponseSchema);
 
   registry.registerPath({
     method: "get",
     path: "/clap/v1/health",
     summary: "Health check",
     responses: jsonResponses(HealthResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "delete",
+    path: "/clap/v1/dashboard",
+    summary: "Reset dashboard request and event history",
+    description: "Clears persisted dashboard telemetry and in-memory dashboard counters without unloading workers, rotating cache identity, or clearing physical KV caches. Requires a valid API key or trusted local access.",
+    responses: jsonResponses(DashboardResetResponseSchema),
   });
 
   registry.registerPath({

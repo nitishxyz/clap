@@ -170,6 +170,52 @@ describe("metrics queue accounting", () => {
     expect(handle.record.cacheOutcome?.category).toBe("miss_reason_unavailable");
   });
 
+  test("counts only completed explicit cache admissions in the hit-rate denominator", () => {
+    const metrics = new MetricsCollector();
+    const finish = (captureCache: boolean, status: "ok" | "error" | "cancelled", hit?: boolean,
+      candidates?: Parameters<ReturnType<MetricsCollector["start"]>["finish"]>[0]["cacheCandidates"]) => {
+      const handle = metrics.start("model", "/v1/chat/completions", false);
+      handle.capture({ messages: [{ role: "user", content: "same" }],
+        ...(captureCache ? { cache: { session: crypto.randomUUID() } } : {}) });
+      handle.finish({ status, cacheHit: hit, reusedTokens: hit ? 12 : 0,
+        workerLaunchId: "worker", cacheCandidates: candidates });
+      return handle;
+    };
+    finish(true, "ok", true, []);
+    finish(true, "ok", false, [{ slot: 1, sharedPrefixTokens: 254, namespaceCompatible: false }]);
+    finish(true, "ok", false, []);
+    finish(false, "ok", false, []);
+    finish(true, "cancelled");
+    finish(true, "error");
+
+    expect(metrics.totals).toMatchObject({
+      requests: 6,
+      cacheEligible: 3,
+      cacheHits: 1,
+      cacheMisses: 2,
+      cacheIsolatedMisses: 1,
+      cacheNotEligible: 3,
+      reusedTokens: 12,
+    });
+  });
+
+  test("reset starts a new metrics epoch without admitting late old completions", () => {
+    const metrics = new MetricsCollector();
+    const old = metrics.start("model", "/v1/chat/completions", false);
+    old.capture({ messages: [{ role: "user", content: "old" }], cache: { session: "old" } });
+    metrics.event("server", "old event");
+    metrics.resetDashboard();
+    old.finish({ status: "ok", cacheHit: true, reusedTokens: 50 });
+    expect(metrics.totals).toMatchObject({ requests: 0, ok: 0, cacheEligible: 0, reusedTokens: 0 });
+    expect(metrics.recent()).toEqual([]);
+    expect(metrics.events()).toEqual([]);
+
+    const next = metrics.start("model", "/v1/chat/completions", false);
+    next.capture({ messages: [{ role: "user", content: "new" }], cache: { session: "new" } });
+    next.finish({ status: "ok", cacheHit: true, reusedTokens: 9 });
+    expect(metrics.totals).toMatchObject({ requests: 1, ok: 1, cacheEligible: 1, cacheHits: 1, reusedTokens: 9 });
+  });
+
   test("exposes session display identity from cache.session fingerprint", () => {
     const store = new CacheEventStore({ directory: tempDir() });
     const metrics = new MetricsCollector(store);

@@ -250,4 +250,16 @@ describe("CacheEventStore", () => {
     expect(disk).not.toContain("cacheOutcome");
     expect(disk).toContain("\"hit\":false");
   });
+
+  test("clear removes decision segments but preserves the fingerprint key", () => {
+    const root = directory();
+    const store = new CacheEventStore({ directory: root, segmentBytes: 16 * 1024 });
+    const before = store.fingerprint("identity");
+    store.append(event("one"));
+    store.append(event("two"));
+    expect(store.clear()).toEqual({ deletedEvents: 2 });
+    expect(store.list().items).toEqual([]);
+    expect(store.fingerprint("identity")).toBe(before);
+    expect(readdirSync(root)).toContain("telemetry.hmac-key");
+  });
 });

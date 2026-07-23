@@ -148,6 +148,12 @@ export function HistoricalTag({ historical }: { historical?: boolean }) {
 }
 
 export function CacheTag({ request }: { request: DashboardRequest }) {
+  if (request.cacheEligibility === "no_intent") {
+    return <Tag title="not cache-eligible: the request supplied no cache intent">cache n/a · no intent</Tag>;
+  }
+  if (request.cacheEligibility === "no_admission") {
+    return <Tag title="not cache-eligible: the request ended before a cache admission decision">cache n/a · no admission</Tag>;
+  }
   const outcome = request.cacheOutcome;
   const slot = request.slot !== undefined ? ` · s${request.slot}` : "";
   const skipped = outcome?.boundariesSkipped && outcome.boundariesSkipped > 0

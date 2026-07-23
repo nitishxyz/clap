@@ -11,6 +11,12 @@ export class Histogram {
     this.counts = new Array(buckets.length).fill(0);
   }
 
+  reset(): void {
+    this.counts.fill(0);
+    this.sum = 0;
+    this.count = 0;
+  }
+
   observe(value: number): void {
     if (!Number.isFinite(value) || value < 0) return;
     this.sum += value;
@@ -47,6 +53,10 @@ export type PromSnapshot = {
     completionTokens: number;
     cacheHits: number;
     cacheMisses: number;
+    cacheEligible: number;
+    cacheNotEligible: number;
+    cacheIsolatedMisses: number;
+    cacheFreshMisses: number;
     reusedTokens: number;
   };
   activeRequests: number;
@@ -157,6 +167,14 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   counter("clap_kv_cache_total", "KV cache lookups by outcome", [
     ['{outcome="hit"}', snapshot.totals.cacheHits],
     ['{outcome="miss"}', snapshot.totals.cacheMisses],
+  ]);
+  counter("clap_kv_cache_eligibility_total", "Completed requests by cache KPI eligibility", [
+    ['{eligibility="eligible"}', snapshot.totals.cacheEligible],
+    ['{eligibility="not_eligible"}', snapshot.totals.cacheNotEligible],
+  ]);
+  counter("clap_kv_cache_miss_class_total", "Eligible KV cache misses by selected non-failure class", [
+    ['{class="isolated"}', snapshot.totals.cacheIsolatedMisses],
+    ['{class="fresh_by_policy"}', snapshot.totals.cacheFreshMisses],
   ]);
 
   gauge("clap_requests_active", "Requests currently executing or streaming", [["", snapshot.activeRequests]]);

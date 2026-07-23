@@ -13,8 +13,8 @@ function Tile({ label, value, sub }: { label: string; value: string | number; su
 
 export function Tiles({ data }: { data: DashboardData }) {
   const totals = data.totals;
-  const decided = totals.cacheHits + totals.cacheMisses;
-  const hitRate = decided ? `${Math.round((totals.cacheHits / decided) * 100)}%` : "-";
+  const eligible = totals.cacheEligible ?? totals.cacheHits + totals.cacheMisses;
+  const hitRate = eligible ? `${Math.round((totals.cacheHits / eligible) * 100)}%` : "-";
   const cachedCount = data.models.filter((model) => model.status === "available").length;
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
@@ -22,7 +22,7 @@ export function Tiles({ data }: { data: DashboardData }) {
       <Tile label="active now" value={data.active.length} />
       <Tile label="tokens in" value={fmtTokens(totals.promptTokens)} />
       <Tile label="tokens out" value={fmtTokens(totals.completionTokens)} />
-      <Tile label="kv cache" value={hitRate} sub={`${totals.cacheHits} hit · ${totals.cacheMisses} miss`} />
+      <Tile label="kv cache" value={hitRate} sub={`${eligible} eligible · ${totals.cacheHits} hit · ${totals.cacheMisses} miss`} />
       <Tile label="kv reused" value={fmtTokens(totals.reusedTokens)} sub="prompt tokens skipped" />
       <Tile label="models loaded" value={data.loaded.length} />
       <Tile label="models cached" value={cachedCount} sub={`${data.models.length} known`} />

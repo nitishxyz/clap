@@ -8,12 +8,28 @@ import { UsagePanel } from "@/components/dashboard/Usage";
 import { useActions } from "@/hooks/useActions";
 import { useDashboard } from "@/hooks/useDashboard";
 import { fmtBytes, fmtClock, fmtDuration } from "@/lib/format";
+import { resetDashboard } from "@/lib/api";
 
 export function App() {
   const { data, connected, refreshedAt, mode } = useDashboard();
   const now = refreshedAt ?? Date.now();
   const [selectedRequest, setSelectedRequest] = useState<string>();
   const actions = useActions();
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string>();
+  const resetHistory = async () => {
+    if (!window.confirm("Reset dashboard request history and metrics? Model workers and KV caches will stay loaded.")) return;
+    setResetting(true);
+    setResetError(undefined);
+    try {
+      await resetDashboard();
+      setSelectedRequest(undefined);
+    } catch (error) {
+      setResetError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setResetting(false);
+    }
+  };
 
   return (
     <div className="mx-auto grid w-full max-w-[1280px] grid-cols-1 gap-4 p-4">
@@ -36,6 +52,10 @@ export function App() {
         ) : (
           <span className="text-[0.78rem] text-muted">{connected ? "loading..." : "connecting..."}</span>
         )}
+        <button type="button" disabled={resetting} onClick={() => void resetHistory()}
+          className="ml-auto cursor-pointer border border-border px-2 py-1 text-[0.68rem] uppercase text-muted hover:border-foreground hover:text-foreground disabled:cursor-wait disabled:opacity-50">
+          {resetting ? "resetting…" : "reset dashboard"}
+        </button>
       </header>
 
       {actions.error ? (
@@ -45,6 +65,9 @@ export function App() {
             dismiss
           </button>
         </div>
+      ) : null}
+      {resetError ? (
+        <div className="border border-err/50 bg-panel px-3 py-2 text-[0.78rem] text-err">{resetError}</div>
       ) : null}
 
       {data ? (

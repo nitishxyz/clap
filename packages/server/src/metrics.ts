@@ -92,6 +92,8 @@ export type RequestRecord = {
   completionTokens?: number;
   tokensPerSecond?: number;
   cacheHit?: boolean;
+  cacheIntent?: boolean;
+  cacheEligibility?: "eligible" | "no_intent" | "no_admission";
   reusedTokens?: number;
   reuseKind?: "slot" | "branch" | "anchor";
   reuseScope?: "system" | "conversation" | "session" | "agent" | "project" | "harness" | "tenant";
@@ -152,6 +154,10 @@ export type MetricsTotals = {
   completionTokens: number;
   cacheHits: number;
   cacheMisses: number;
+  cacheEligible: number;
+  cacheNotEligible: number;
+  cacheIsolatedMisses: number;
+  cacheFreshMisses: number;
   reusedTokens: number;
 };
 
@@ -288,6 +294,7 @@ export class MetricsCollector {
   private readonly seenCacheDomains = new Set<string>();
   private sequence = 0;
   private eventSequence = 0;
+  private resetGeneration = 0;
   readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
   readonly priorityRequestOutcomes = new Map<string, number>();
@@ -316,8 +323,31 @@ export class MetricsCollector {
     completionTokens: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    cacheEligible: 0,
+    cacheNotEligible: 0,
+    cacheIsolatedMisses: 0,
+    cacheFreshMisses: 0,
     reusedTokens: 0,
   };
+
+  resetDashboard(): void {
+    this.resetGeneration += 1;
+    this.history.length = 0;
+    this.byId.clear();
+    this.eventLog.length = 0;
+    for (const key of Object.keys(this.totals) as Array<keyof MetricsTotals>) this.totals[key] = 0;
+    this.histograms.ttftMs.reset();
+    this.histograms.durationMs.reset();
+    this.histograms.queuedMs.reset();
+    this.histograms.completionTokens.reset();
+    for (const histograms of Object.values(this.priorityDurationMs)) histograms.reset();
+    this.priorityRequestOutcomes.clear();
+    this.structuredOutputOutcomes.clear();
+    this.residency.outcomes.clear();
+    this.residency.evictions.clear();
+    this.residency.estimateObservedRatioSum = 0;
+    this.residency.estimateObservedRatioCount = 0;
+  }
 
   event(type: ServerEvent["type"], message: string, extra?: Omit<ServerEvent, "id" | "at" | "type" | "message">): void {
     this.eventSequence += 1;
@@ -370,6 +400,7 @@ export class MetricsCollector {
   }
 
   start(model: string, endpoint: string, stream: boolean): RequestHandle {
+    const requestGeneration = this.resetGeneration;
     this.sequence += 1;
     const record: RequestRecord = {
       source: "live",
@@ -417,6 +448,7 @@ export class MetricsCollector {
           tool_calls: message.tool_calls,
         }));
         const identity = request.cache;
+        record.cacheIntent = identity !== undefined;
         record.priority = identity?.priority ?? "normal";
         const promptPrefixId = promptPrefixFingerprint(record.model, messages);
         const sessionFingerprint = this.cacheEvents?.fingerprint(identity?.session);
@@ -517,6 +549,10 @@ export class MetricsCollector {
         record.durationMs = record.endedAt - record.startedAt;
         record.status = result.status ?? "ok";
         record.phase = "done";
+        // A reset establishes a new accounting epoch without cancelling work.
+        // Requests admitted before it may finish normally, but cannot repopulate
+        // the newly-cleared dashboard or its persisted decision history.
+        if (requestGeneration !== this.resetGeneration) return;
         record.promptTokens = result.promptTokens;
         record.completionTokens = result.completionTokens;
         record.cacheHit = result.cacheHit;
@@ -578,12 +614,6 @@ export class MetricsCollector {
         if (record.completionTokens !== undefined) this.histograms.completionTokens.observe(record.completionTokens);
         this.totals.promptTokens += result.promptTokens ?? 0;
         this.totals.completionTokens += result.completionTokens ?? 0;
-        if (result.cacheHit === true) {
-          this.totals.cacheHits += 1;
-          this.totals.reusedTokens += result.reusedTokens ?? 0;
-        } else if (result.cacheHit === false) {
-          this.totals.cacheMisses += 1;
-        }
         if (result.cacheHit !== undefined) {
           // Authoritative first-decision evidence requires a worker launch id so
           // the domain (model + worker launch) is known. Without it, empty
@@ -645,6 +675,7 @@ export class MetricsCollector {
             promptTokenHash: result.promptTokenHash ? this.cacheEvents?.fingerprint(result.promptTokenHash) : durableIdentity.promptTokenHash,
             promptTokenCount: result.promptTokenCount ?? result.promptTokens,
             status: record.status,
+            cacheIntent: record.cacheIntent,
             finishReason: result.finishReason,
             errorCode: result.errorCode,
             structuredOutput: record.structuredOutput,
@@ -671,6 +702,29 @@ export class MetricsCollector {
             timing: result.timing,
             durationMs: record.durationMs,
           });
+        }
+        // KPI eligibility is explicit and mechanical: the request supplied
+        // cache intent and received an admission decision. Isolation and
+        // policy-fresh outcomes are genuine eligible misses (not cache
+        // failures); no-intent requests and requests cancelled/errored before
+        // admission stay outside the denominator. A terminal request retaining
+        // a real admission decision remains eligible regardless of status.
+        record.cacheEligibility = record.cacheIntent !== true ? "no_intent"
+          : typeof result.cacheHit !== "boolean" ? "no_admission"
+          : "eligible";
+        const cacheEligible = record.cacheEligibility === "eligible";
+        if (cacheEligible) {
+          this.totals.cacheEligible += 1;
+          if (result.cacheHit) {
+            this.totals.cacheHits += 1;
+            this.totals.reusedTokens += result.reusedTokens ?? 0;
+          } else {
+            this.totals.cacheMisses += 1;
+            if (record.cacheOutcome?.category === "isolated") this.totals.cacheIsolatedMisses += 1;
+            if (record.cacheOutcome?.category === "fresh_by_policy") this.totals.cacheFreshMisses += 1;
+          }
+        } else {
+          this.totals.cacheNotEligible += 1;
         }
         this.history.push(record);
         if (this.history.length > HISTORY_LIMIT) {
