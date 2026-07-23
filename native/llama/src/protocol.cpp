@@ -184,9 +184,9 @@ bool ProtocolWriter::failed(const std::string& id, const std::string& code,
   if (!details.is_null()) error["details"] = std::move(details);
   return scoped(id, "failed", {{"error", std::move(error)}}, true);
 }
-void ProtocolWriter::telemetry(nlohmann::json value) {
+void ProtocolWriter::retention_telemetry(nlohmann::json value) {
   emit("", {{"protocol", 1}, {"type", "telemetry"},
-             {"telemetry", std::move(value)}}, output_);
+             {"telemetry", {{"retention", std::move(value)}}}}, output_);
 }
 bool ProtocolWriter::terminal(const std::string& id) const { return terminals_.count(id) != 0; }
 

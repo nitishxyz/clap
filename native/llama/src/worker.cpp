@@ -78,7 +78,7 @@ void Worker::send_v1_scheduler_events(const std::vector<SchedulerEvent>& events)
         if (event.completion) send_v1_completion(*event.completion);
         break;
       case SchedulerEvent::Type::Topology:
-        v1_->telemetry(state_.retention(event.active, event.queued));
+        v1_->retention_telemetry(state_.retention(event.active, event.queued));
         break;
       case SchedulerEvent::Type::Generation:
         if (!event.generation) break;
@@ -189,7 +189,7 @@ bool Worker::dispatch(const std::string& line) {
     body["id"] = request.request_id;
     body["type"] = "generate";
     scheduler_.enqueue(request.request_id, std::move(body));
-    v1_->telemetry(state_.retention(scheduler_.active_count(), scheduler_.queued_count()));
+    v1_->retention_telemetry(state_.retention(scheduler_.active_count(), scheduler_.queued_count()));
     return true;
   } catch (const RequestError& error) {
     v1_->failed(request.request_id, error.code, error.what(), false, false);

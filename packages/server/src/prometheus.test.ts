@@ -53,4 +53,14 @@ describe("honest Prometheus memory telemetry", () => {
     expect(output).toContain('clap_queue_outcomes_total{priority="normal",outcome="admitted"} 1');
     expect(output).toContain('clap_request_duration_ms_count{priority="interactive"} 0');
   });
+
+  test("omits numeric memory values whose provenance is absent", () => {
+    const input = snapshot();
+    const retention = input.loadedModels[0]!.retention!;
+    retention.sessionBytesSource = undefined;
+    retention.sessionBytesBasis = undefined;
+    const output = renderPrometheus(input);
+    expect(output).not.toContain("clap_retention_session_bytes{");
+    expect(output).not.toContain('source="legacy"');
+  });
 });

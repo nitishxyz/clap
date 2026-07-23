@@ -36,7 +36,7 @@ const addMemoryCompanionValidation = <T extends z.ZodRawShape>(shape: T, fields:
       const hasSource = record[sourceKey] !== undefined;
       const hasBasis = record[basisKey] !== undefined;
       if (!hasSource && !hasBasis) {
-        if (record[field] === null) context.addIssue({ code: "custom", path: [field], message: "null bytes require source and basis" });
+        if (record[field] !== undefined) context.addIssue({ code: "custom", path: [field], message: "memory bytes require source and basis" });
         continue;
       }
       if (!hasSource || !hasBasis) {

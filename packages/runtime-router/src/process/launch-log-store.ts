@@ -263,5 +263,3 @@ export class WorkerLaunchLogStore {
     return finalization;
   }
 }
-
-export { WorkerLaunchLogStore as LaunchLogStore };

@@ -84,7 +84,7 @@ class ProtocolWriter {
   bool failed(const std::string& request_id, const std::string& code,
               const std::string& message, bool retryable = false, bool fatal = false,
               nlohmann::json details = nullptr);
-  void telemetry(nlohmann::json value);
+  void retention_telemetry(nlohmann::json value);
   bool terminal(const std::string& request_id) const;
 
  private:

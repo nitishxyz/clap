@@ -55,7 +55,7 @@ describe("worker protocol validation", () => {
     expect(decodeWorkerEvent(event({ memory: {
       active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "runtime_allocator",
       cache_bytes: 0, cache_bytes_source: "estimated", cache_bytes_basis: "configured_cache",
-      peak_active_bytes: 2048,
+      peak_active_bytes: 2048, peak_active_bytes_source: "measured", peak_active_bytes_basis: "runtime_allocator",
     } }))).toMatchObject({ telemetry: { memory: { active_bytes_source: "measured" } } });
     expect(decodeWorkerEvent(event({ memory: {
       active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "worker_allocator",

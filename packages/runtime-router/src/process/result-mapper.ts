@@ -65,14 +65,6 @@ export function mapEffectiveCapabilities(capabilities: EffectiveModelCapabilitie
   };
 }
 
-export function mapWorkerTelemetryPayload(
-  telemetry: Record<string, unknown>,
-): Record<string, unknown> {
-  return "memory" in telemetry || "retention" in telemetry
-    ? telemetry
-    : { retention: telemetry };
-}
-
 function memoryCompanions(
   raw: Record<string, unknown>,
   wireName: string,

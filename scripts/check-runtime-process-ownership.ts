@@ -3,6 +3,8 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const owner = "packages/runtime-router/src/process/resident-worker-process.ts";
+const protocolDecoder = "packages/runtime-router/src/protocol/v1-decoder.ts";
+const protocolValidation = "packages/worker-protocol/src/validation.ts";
 const runtimeBackends = ["packages/runtime-llama/src/index.ts", "packages/runtime-mlx/src/index.ts"];
 
 async function typescriptFiles(directory: string): Promise<string[]> {
@@ -26,6 +28,16 @@ export async function runtimeProcessOwnershipViolations(): Promise<string[]> {
     if (path !== owner && /new\s+V1RequestTracker\s*\(/.test(source)) {
       violations.push(`${path}: V1RequestTracker outside resident process`);
     }
+    if (path !== protocolDecoder && path !== protocolValidation && /\bdecodeWorkerEvent\s*\(/.test(source)) {
+      violations.push(`${path}: worker event parsing outside the protocol decoder`);
+    }
+    if (/mapWorkerTelemetryPayload|LaunchLogStore\s+as\s+WorkerLaunchLogStore|WorkerLaunchLogStore\s+as\s+LaunchLogStore/.test(source)) {
+      violations.push(`${path}: removed protocol or process compatibility alias`);
+    }
+  }
+  const llamaProtocol = await readFile(resolve(root, "native/llama/src/protocol.cpp"), "utf8");
+  if (!/\{"telemetry",\s*\{\{"retention",\s*std::move\(value\)\}\}\}/.test(llamaProtocol)) {
+    violations.push("native/llama/src/protocol.cpp: retention telemetry must use the canonical telemetry.retention envelope");
   }
   for (const path of runtimeBackends) {
     const source = await readFile(resolve(root, path), "utf8");

@@ -16,6 +16,9 @@ describe("critical pressure eviction", () => {
         hardware_ceiling: 8, model_ceiling: 8, memory_ceiling: 1, reason: "memory_ceiling", inputs: {} },
       active: 0, retained_total: 0, retained_sessions: 0, retained_anchors: 0,
       retained_bytes: 0, session_bytes: 0, anchor_bytes: 0, budget_bytes: 1,
+      retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
+      session_bytes_source: "estimated", session_bytes_basis: "cache_components",
+      anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
       high_watermark_bytes: 1, low_watermark_bytes: 1, under_pressure: false,
       hard_ceiling: 1, eviction_count: 0,
     })!;
@@ -119,6 +122,9 @@ describe("worker retention telemetry", () => {
         inputs: { startup_available_bytes: 12_000, hybrid_or_recurrent: false } },
       active: 2, retained_total: 103, retained_sessions: 100, retained_anchors: 3,
       retained_bytes: 10_000, session_bytes: 8_000, anchor_bytes: 2_000, budget_bytes: 100_000,
+      retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
+      session_bytes_source: "estimated", session_bytes_basis: "cache_components",
+      anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
       high_watermark_bytes: 90_000, low_watermark_bytes: 75_000, under_pressure: false,
       hard_ceiling: 256, eviction_reason: "byte_pressure", eviction_count: 7,
     })).toEqual({
@@ -130,6 +136,9 @@ describe("worker retention telemetry", () => {
         inputs: { startup_available_bytes: 12_000, hybrid_or_recurrent: false } },
       active: 2, retainedTotal: 103, retainedSessions: 100, retainedAnchors: 3,
       retainedBytes: 10_000, sessionBytes: 8_000, anchorBytes: 2_000, budgetBytes: 100_000,
+      retainedBytesSource: "estimated", retainedBytesBasis: "cache_components",
+      sessionBytesSource: "estimated", sessionBytesBasis: "cache_components",
+      anchorBytesSource: "estimated", anchorBytesBasis: "cache_components",
       highWatermarkBytes: 90_000, lowWatermarkBytes: 75_000, underPressure: false,
       hardCeiling: 256, evictionReason: "byte_pressure", evictionCount: 7,
     });
@@ -155,6 +164,7 @@ describe("worker retention telemetry", () => {
       ...legacy,
       retained_bytes_source: "measured", retained_bytes_basis: "runtime_allocator",
       session_bytes_source: "estimated", session_bytes_basis: "configured_cache",
+      anchor_bytes_source: "estimated", anchor_bytes_basis: "configured_cache",
     })).toMatchObject({
       retainedBytes: 4096, retainedBytesSource: "measured", retainedBytesBasis: "runtime_allocator",
       sessionBytes: 4096, sessionBytesSource: "estimated", sessionBytesBasis: "configured_cache",

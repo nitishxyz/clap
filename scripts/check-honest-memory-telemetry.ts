@@ -20,6 +20,7 @@ const text = new Map(files);
 
 requireText("packages/worker-protocol/src/schemas.ts", "MemoryValueSchema", "shared memory schema");
 requireText("packages/worker-protocol/src/schemas.ts", "bytes: z.null(), source: z.literal(\"unavailable\")", "unavailable bytes are null");
+requireText("packages/worker-protocol/src/schemas.ts", "memory bytes require source and basis", "mandatory memory provenance");
 requireText("packages/api/src/schemas.ts", "retainedBytes: z.number().int().nonnegative().nullable()", "nullable public retained bytes");
 requireText("packages/api/src/schemas.ts", "estimatedRetainedBytes", "separate public estimate");
 requireText("native/llama/src/telemetry.cpp", "{\"retained_bytes\", nullptr}", "GGUF unavailable retained bytes");
@@ -28,7 +29,9 @@ requireText("native/llama/tests/telemetry.test.cpp", "normal[\"retained_bytes\"]
 requireText("native/mlx/Sources/clap-mlx/Telemetry/MemoryTelemetry.swift", "\"worker_allocator\"", "MLX allocator basis");
 requireText("native/mlx/Sources/clap-mlx/Telemetry/MemoryTelemetry.swift", "active == nil ? \"unavailable\"", "MLX missing allocator observation handling");
 requireText("native/mlx/Sources/clap-mlx/Telemetry/RetentionTelemetry.swift", "retained_bytes_source: \"estimated\"", "MLX cache estimates");
-requireText("packages/server/src/prometheus.ts", "source === \"unavailable\" ? []", "Prometheus unavailable omission");
+requireText("packages/server/src/prometheus.ts", "source === undefined || source === \"unavailable\" || basis === undefined ? []", "Prometheus unknown provenance omission");
+forbidText("packages/server/src/prometheus.ts", "source ?? \"legacy\"", "fabricated legacy memory source");
+forbidText("packages/server/src/prometheus.ts", "basis ?? \"not_reported\"", "fabricated memory basis");
 requireText("packages/runtime-router/src/resident.ts", "evictOneIdleForCriticalPressure", "critical pressure eviction path");
 requireText("packages/runtime-router/src/resident.test.ts", "protects unsafe residents", "critical pressure protection test");
 requireText("packages/runtime-router/src/resident.test.ts", "replans stale snapshots", "critical pressure stale replan test");
@@ -49,4 +52,8 @@ console.log("ok: honest memory telemetry boundaries");
 
 function requireText(path: string, needle: string, label: string): void {
   if (!text.get(path)?.includes(needle)) violations.push(`${path}: missing ${label}`);
+}
+
+function forbidText(path: string, needle: string, label: string): void {
+  if (text.get(path)?.includes(needle)) violations.push(`${path}: forbidden ${label}`);
 }

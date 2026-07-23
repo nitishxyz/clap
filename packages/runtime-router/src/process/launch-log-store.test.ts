@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LaunchLogStore, pruneLaunchLogs, writeLaunchMetadataAtomic } from "./launch-log-store";
+import { WorkerLaunchLogStore, pruneLaunchLogs, writeLaunchMetadataAtomic } from "./launch-log-store";
 import { WORKER_LAUNCH_METADATA_VERSION, type WorkerLaunchContext, type WorkerLaunchMetadata,
   type WorkerLaunchPaths } from "./types";
 
@@ -43,7 +43,7 @@ describe("launch log store", () => {
     const root = await mkdtemp(join(tmpdir(), "clap-finalize-"));
     const paths = { directory: join(root, "llama", "model"), metadataPath: join(root, "llama", "model", "id.json"),
       stderrPath: join(root, "llama", "model", "id.stderr.log") } as WorkerLaunchPaths;
-    const store = new LaunchLogStore();
+    const store = new WorkerLaunchLogStore();
     const context = { paths, metadata: metadata("id"), phase: "idle", protocolFault: true,
       releaseActive: store.registerActive(paths) } as WorkerLaunchContext;
     await Promise.all([store.finalize(context, 9, "protocol_fault"), store.finalize(context, 9, "idle")]);
@@ -87,7 +87,7 @@ describe("launch log store", () => {
       metadataPath: join(modelDirectory, "active.json"),
       stderrPath: join(modelDirectory, "active.stderr.log"),
     } as WorkerLaunchPaths;
-    const release = new LaunchLogStore().registerActive(paths);
+    const release = new WorkerLaunchLogStore().registerActive(paths);
     await pruneLaunchLogs(backend, { maxLaunchesPerModel: 0, maxBytesPerBackend: 0 });
     expect(await exists(paths.metadataPath)).toBe(true);
     expect(await exists(join(modelDirectory, "unfinished.json"))).toBe(true);
@@ -114,7 +114,7 @@ describe("launch log store", () => {
     await createLaunch(oldDirectory, "old", "2026-01-01T00:00:00Z", 30);
     const paths = { directory: activeDirectory, metadataPath: join(activeDirectory, "active.json"),
       stderrPath: join(activeDirectory, "active.stderr.log") } as WorkerLaunchPaths;
-    const release = new LaunchLogStore().registerActive(paths);
+    const release = new WorkerLaunchLogStore().registerActive(paths);
     await pruneLaunchLogs(backend, { maxLaunchesPerModel: 0, maxBytesPerBackend: 0 });
     expect(await exists(paths.metadataPath)).toBe(true);
     expect(await exists(join(oldDirectory, "old.json"))).toBe(false);

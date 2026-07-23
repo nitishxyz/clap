@@ -6,8 +6,7 @@ import { V1RequestTracker, type ResidentProtocolFact } from "../protocol/request
 import { WorkerProtocolFault } from "../protocol/errors";
 import { classifyWorkerCrash, classifyWorkerExitPhase } from "./crash-classification";
 import { WorkerLaunchLogStore } from "./launch-log-store";
-import { applyWorkerPayload, mapWorkerResultPayload, mapWorkerTelemetryPayload,
-  type PendingWorkerResult } from "./result-mapper";
+import { applyWorkerPayload, mapWorkerResultPayload, type PendingWorkerResult } from "./result-mapper";
 import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResult,
   type ResidentCrashListener, type ResidentMlxMemory, type ResidentMlxRetention,
   type EffectiveCapabilities, type ResidentChatOptions, type ResidentProgress, type ResidentWorkerHandle,
@@ -351,7 +350,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private handleV1Fact(launch: ActiveLaunch, fact: ResidentProtocolFact): void {
     if (fact.kind === "telemetry") {
-      if (this.active === launch) this.applyWorkerPayload(launch, mapWorkerTelemetryPayload(fact.telemetry));
+      if (this.active === launch) this.applyWorkerPayload(launch, fact.telemetry);
       return;
     }
     if (fact.kind === "diagnostic") { launch.lastDiagnostic = fact.message; return; }

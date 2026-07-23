@@ -233,8 +233,8 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
       const value = model.retention![field];
       const source = model.retention![`${field}Source`];
       const basis = model.retention![`${field}Basis`];
-      return value === null || value === undefined || source === "unavailable" ? [] : [[
-        `{backend="${esc(model.backend)}",source="${esc(source ?? "legacy")}",basis="${esc(basis ?? "not_reported")}"}`,
+      return value === null || value === undefined || source === undefined || source === "unavailable" || basis === undefined ? [] : [[
+        `{backend="${esc(model.backend)}",source="${esc(source)}",basis="${esc(basis)}"}`,
         value,
       ]];
     })));

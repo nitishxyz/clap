@@ -15,7 +15,7 @@ export { classifyMemoryPressure, retainedGrowthReserve, selectGlobalActiveLimits
   type MemoryPressure } from "./concurrency";
 export { canonicalModelPath, createWorkerLaunchPaths, fingerprintModelPath, hashModelIdentity,
   resolveClapHome } from "./process/launch-paths";
-export { DEFAULT_MAX_BYTES_PER_BACKEND, DEFAULT_MAX_LAUNCHES_PER_MODEL, LaunchLogStore, WorkerLaunchLogStore,
+export { DEFAULT_MAX_BYTES_PER_BACKEND, DEFAULT_MAX_LAUNCHES_PER_MODEL, WorkerLaunchLogStore,
   launchRetentionLimits, pruneLaunchLogs, RETENTION_BYTES_ENV, RETENTION_COUNT_ENV,
   writeLaunchMetadataAtomic } from "./process/launch-log-store";
 export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type WorkerLaunchIdentity,
@@ -24,7 +24,7 @@ export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type Worker
   type WorkerRequestPhase, type WorkerCrashClassification } from "./process/types";
 export { classifyWorkerCrash, classifyWorkerExit, classifyWorkerExitPhase, type WorkerExitClassification,
   type WorkerExitPhase } from "./process/crash-classification";
-export { mapWorkerResultPayload, mapWorkerTelemetryPayload } from "./process/result-mapper";
+export { mapWorkerResultPayload } from "./process/result-mapper";
 export * from "./residency";
 
 export function listBackends() {
