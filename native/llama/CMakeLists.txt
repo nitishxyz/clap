@@ -411,6 +411,27 @@ if(BUILD_TESTING)
   target_link_libraries(clap-llama-sampling PRIVATE llama)
   add_test(NAME clap-llama-sampling COMMAND clap-llama-sampling)
 
+  add_executable(clap-llama-structured-sampling
+    tests/structured-sampling.test.cpp
+    src/cache-executor.cpp
+    src/environment.cpp
+    src/model-runtime.cpp
+    src/protocol.cpp
+    src/request-state.cpp
+    src/sampling.cpp
+    src/stop-buffer.cpp
+    src/structured-output.cpp
+  )
+  add_dependencies(clap-llama-structured-sampling clap-cache-ffi-build)
+  target_include_directories(clap-llama-structured-sampling PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/common"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-structured-sampling PRIVATE llama llama-common clap-cache-ffi)
+  add_test(NAME clap-llama-structured-sampling COMMAND clap-llama-structured-sampling)
+
   add_executable(clap-llama-telemetry
     tests/telemetry.test.cpp
     src/telemetry.cpp
@@ -443,6 +464,7 @@ if(BUILD_TESTING)
     clap-llama-sampling
     clap-llama-scheduler
     clap-llama-stop-buffer
+    clap-llama-structured-sampling
     clap-llama-telemetry
     clap-llama-worker-state
     clap-llama-worker

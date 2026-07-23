@@ -151,7 +151,9 @@ std::unique_ptr<ActiveRequest> WorkerState::prepare(
     slot.is_anchor = false;
   }
   auto active = std::make_unique<ActiveRequest>(std::move(prepared));
-  active->sampler.reset(make_sampler(active->params));
+  active->sampler.reset(make_sampler(active->params,
+      active->structured_output ? &*active->structured_output : nullptr,
+      runtime_.vocab()));
   return active;
 }
 

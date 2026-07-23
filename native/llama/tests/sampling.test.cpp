@@ -59,6 +59,12 @@ int main() {
           std::vector<std::string>{"top-p", "temp", "dist"}));
   llama_sampler_free(default_sampler);
 
+  llama_sampler* default_sampler_unconstrained =
+      clap::llama::make_sampler(defaults, nullptr, nullptr);
+  assert((sampler_names(default_sampler_unconstrained) ==
+          std::vector<std::string>{"top-p", "temp", "dist"}));
+  llama_sampler_free(default_sampler_unconstrained);
+
   llama_sampler* configured_sampler = clap::llama::make_sampler(configured);
   assert((sampler_names(configured_sampler) ==
           std::vector<std::string>{"penalties", "top-k", "top-p", "temp", "dist"}));

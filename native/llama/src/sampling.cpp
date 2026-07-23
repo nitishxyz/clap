@@ -1,5 +1,9 @@
 #include "clap/llama/sampling.h"
 
+#include "clap/llama/structured-output.h"
+
+#include <stdexcept>
+
 namespace clap::llama {
 
 SamplingParams sampling_from_request(const nlohmann::json& request) {
@@ -27,9 +31,24 @@ SamplingParams sampling_from_request(const nlohmann::json& request) {
 }
 
 llama_sampler* make_sampler(const SamplingParams& params) {
+  return make_sampler(params, nullptr, nullptr);
+}
+
+llama_sampler* make_sampler(const SamplingParams& params,
+                            const StructuredOutputConstraint* constraint,
+                            const llama_vocab* vocab) {
   auto sparams = llama_sampler_chain_default_params();
   sparams.no_perf = true;
   llama_sampler* sampler = llama_sampler_chain_init(sparams);
+  if (constraint && !constraint->grammar.empty()) {
+    llama_sampler* grammar = llama_sampler_init_grammar(
+        vocab, constraint->grammar.c_str(), "root");
+    if (!grammar) {
+      llama_sampler_free(sampler);
+      throw std::runtime_error("failed to initialize structured output grammar sampler");
+    }
+    llama_sampler_chain_add(sampler, grammar);
+  }
   if (params.presence_penalty != 0.0 || params.frequency_penalty != 0.0) {
     llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
       64,

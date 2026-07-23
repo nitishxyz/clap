@@ -10,6 +10,8 @@
 
 namespace clap::llama {
 
+struct StructuredOutputConstraint;
+
 struct SamplingParams {
   // Zero means omitted by the caller; admission derives a safe request-local
   // default from the loaded model's remaining effective context.
@@ -25,5 +27,8 @@ struct SamplingParams {
 
 SamplingParams sampling_from_request(const nlohmann::json& request);
 llama_sampler* make_sampler(const SamplingParams& params);
+llama_sampler* make_sampler(const SamplingParams& params,
+                            const StructuredOutputConstraint* constraint,
+                            const llama_vocab* vocab);
 
 }  // namespace clap::llama
