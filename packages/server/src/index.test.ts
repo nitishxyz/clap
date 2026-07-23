@@ -837,6 +837,41 @@ describe("clap server", () => {
     }
   });
 
+  test("failed streaming model loads finalize dashboard requests", async () => {
+    const previousWorker = process.env.CLAP_MLX_WORKER;
+    const previousHome = process.env.CLAP_HOME;
+    const dir = await mkdtemp(join(tmpdir(), "clap-mlx-stream-load-failure-"));
+    const model = join(dir, "mlx-model");
+    try {
+      process.env.CLAP_MLX_WORKER = join(dir, "missing-clap-mlx");
+      process.env.CLAP_HOME = dir;
+      await mkdir(model);
+      await writeFile(join(model, "config.json"), "{}");
+      await writeFile(join(model, "tokenizer.json"), "{}");
+      await writeFile(join(model, "model.safetensors"), "fake");
+      const app = serverWithAmpleMemory();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await app.request("/v1/chat/completions", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model, stream: true,
+            messages: [{ role: "user", content: "hello mlx" }] }),
+        });
+        expect(response.status).toBe(503);
+      }
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const body = await dashboard.json() as { totals: Record<string, number>;
+        active: unknown[]; requests: Array<{ status: string; errorCode?: string }> };
+      expect(body.active).toEqual([]);
+      expect(body.requests).toHaveLength(3);
+      expect(body.requests.every((request) => request.status === "error")).toBe(true);
+      expect(body.totals).toMatchObject({ requests: 3, errors: 3 });
+    } finally {
+      restoreEnv("CLAP_MLX_WORKER", previousWorker);
+      restoreEnv("CLAP_HOME", previousHome);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("fails clearly when a local MLX directory needs an unbuilt MLX worker", async () => {
     const previousWorker = process.env.CLAP_MLX_WORKER;
     const previousHome = process.env.CLAP_HOME;

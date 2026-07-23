@@ -134,6 +134,11 @@ export type ServerEvent = {
   reason?: string;
   reservationBytes?: number;
   activeReservations?: number;
+  estimateBytes?: number;
+  availableBytes?: number;
+  reservedBytes?: number;
+  headroomBytes?: number;
+  evictableModelCount?: number;
 };
 
 export type ResidencyMetrics = {
@@ -366,6 +371,11 @@ export class MetricsCollector {
       reason: extra?.reason,
       reservationBytes: extra?.reservationBytes,
       activeReservations: extra?.activeReservations,
+      estimateBytes: extra?.estimateBytes,
+      availableBytes: extra?.availableBytes,
+      reservedBytes: extra?.reservedBytes,
+      headroomBytes: extra?.headroomBytes,
+      evictableModelCount: extra?.evictableModelCount,
     });
     if (this.eventLog.length > EVENT_LIMIT) this.eventLog.shift();
   }
@@ -391,7 +401,9 @@ export class MetricsCollector {
     }
     this.event(event.type, `${event.backend} ${event.type}${event.reason ? ` (${event.reason})` : ""}`, {
       backend: event.backend, reason: event.reason, reservationBytes: event.reservationBytes,
-      activeReservations: event.activeReservations,
+      activeReservations: event.activeReservations, estimateBytes: event.estimateBytes,
+      availableBytes: event.availableBytes, reservedBytes: event.reservedBytes,
+      headroomBytes: event.headroomBytes, evictableModelCount: event.evictableModelCount,
     });
   }
 

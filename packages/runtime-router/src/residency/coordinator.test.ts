@@ -126,7 +126,7 @@ describe("ResidencyCoordinator", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let calls = 0;
-    const setup = coordinator([memory(700 * MIB)]);
+    const setup = coordinator([memory(2 * 1024 * MIB)]);
     const operation = { performLoad: async () => { calls += 1; await gate; return { ready: true }; } };
     const first = setup.coordinator.load(model, operation);
     const second = setup.coordinator.load(model, operation);
@@ -228,6 +228,32 @@ describe("ResidencyCoordinator", () => {
         evictableModelCount: 0,
       });
     }
+    expect(setup.coordinator.reservations()).toEqual([]);
+  });
+
+  test("admits a small MLX model with no victims when measured capacity safely fits", async () => {
+    const smallMlx = { ...model, backend: "mlx", artifactBytes: 100 * MIB, configuredContext: 1,
+      kv: { bytesPerToken: 1 } };
+    const setup = coordinator([memory(2 * 1024 * MIB)]);
+    const result = await setup.coordinator.load(smallMlx, { performLoad: async () => "loaded" });
+    expect(result.decision).toMatchObject({ admitted: true, reason: "within_budget",
+      available: { source: "measured", bytes: 2 * 1024 * MIB }, reservedBytes: 0 });
+    expect(result.decision.requested.bytes).toBeLessThanOrEqual(2 * 1024 * MIB);
+    expect(setup.lifecycle.evicted).toEqual([]);
+  });
+
+  test("reports measured shortfall instead of no victims when the lifecycle is empty", async () => {
+    const setup = coordinator([memory(100 * MIB)]);
+    await expect(setup.coordinator.load(model, { performLoad: async () => "never" }))
+      .rejects.toMatchObject({ details: {
+        reason: "insufficient_available_memory", requestedBytes: 512 * MIB + 1_201,
+        availableBytes: 100 * MIB, reservedBytes: 0, headroomBytes: 0,
+        evictableModelCount: 0,
+      } });
+    expect(setup.events.at(-1)).toMatchObject({ type: "model_load_rejected",
+      reason: "insufficient_available_memory", estimateBytes: 512 * MIB + 1_201,
+      availableBytes: 100 * MIB, reservedBytes: 0, headroomBytes: 0,
+      evictableModelCount: 0, activeReservations: 0 });
     expect(setup.coordinator.reservations()).toEqual([]);
   });
 

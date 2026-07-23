@@ -1032,6 +1032,19 @@ export function createServer(
     } catch (error) {
       release();
       releaseIdentityLease();
+      // worker.load() happens before the streaming/non-streaming response
+      // helpers take ownership of the metrics handle. Admission, spawn, and
+      // handshake failures here must therefore be finalized explicitly.
+      handle.finish({
+        status: c.req.raw.signal.aborted ? "cancelled" : "error",
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: error instanceof InsufficientModelMemoryError
+          ? "insufficient_model_memory"
+          : error instanceof LlamaWorkerError || error instanceof MlxWorkerError
+            ? error.code
+            : "resident_worker_error",
+        finishReason: c.req.raw.signal.aborted ? "cancel" : undefined,
+      });
       throw error;
     }
   }

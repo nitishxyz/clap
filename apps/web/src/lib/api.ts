@@ -250,6 +250,11 @@ export type ServerEvent = {
   reason?: string;
   reservationBytes?: number;
   activeReservations?: number;
+  estimateBytes?: number;
+  availableBytes?: number;
+  reservedBytes?: number;
+  headroomBytes?: number;
+  evictableModelCount?: number;
 };
 
 export type ModelTokenCapabilities = {

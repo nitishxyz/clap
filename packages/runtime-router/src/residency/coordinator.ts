@@ -64,6 +64,10 @@ export interface ResidencyCoordinatorEvent {
   readonly reservationBytes: number;
   readonly activeReservations: number;
   readonly estimateBytes?: number;
+  readonly availableBytes?: number;
+  readonly reservedBytes?: number;
+  readonly headroomBytes?: number;
+  readonly evictableModelCount?: number;
   readonly observedRssBytes?: number;
 }
 
@@ -150,7 +154,8 @@ export class ResidencyCoordinator {
       let reason: LoadAdmissionDecision["reason"] = "within_budget";
       while (!this.fits(memory.available, reservation.bytes, reservationId)) {
         if (memory.available.source !== "measured") {
-          this.emit("model_load_rejected", model, reservation.bytes, { reason: "memory_state_unavailable" });
+          this.emitRejection("memory_state_unavailable", model, reservation.bytes,
+            requested, memory.available, reservationId, 0);
           throw this.insufficient("memory_state_unavailable", requested, memory.available, reservationId, 0);
         }
         const snapshots = this.dependencies.lifecycle.snapshotForResidency();
@@ -159,8 +164,13 @@ export class ResidencyCoordinator {
           reservedKeys: new Set([...this.activeReservations.values()].map((entry) => entry.model.modelKey)),
         });
         if (victims.length === 0) {
-          this.emit("model_load_rejected", model, reservation.bytes, { reason: "no_evictable_models" });
-          throw this.insufficient("no_evictable_models", requested, memory.available, reservationId, 0);
+          // With no resident models there is nothing to evict: the actionable
+          // failure is the measured host shortfall, not a victim-selection
+          // problem. Reserve no_evictable_models for a populated lifecycle in
+          // which every resident is protected (active, pinned, loading, etc.).
+          const reason = snapshots.length === 0 ? "insufficient_available_memory" : "no_evictable_models";
+          this.emitRejection(reason, model, reservation.bytes, requested, memory.available, reservationId, 0);
+          throw this.insufficient(reason, requested, memory.available, reservationId, 0);
         }
         const result = await this.dependencies.lifecycle.tryEvictIdle(victims[0]!);
         if (result === "changed") continue;
@@ -214,6 +224,25 @@ export class ResidencyCoordinator {
       this.totalHeadroomBytes(),
     );
     return available.bytes >= committed;
+  }
+
+  private emitRejection(
+    reason: "memory_state_unavailable" | "no_evictable_models" | "insufficient_available_memory",
+    model: ResidencyModelDescriptor,
+    reservationBytes: number,
+    requested: MemoryValue,
+    available: MemoryValue,
+    ownReservationId: string,
+    evictableModelCount: number,
+  ): void {
+    this.emit("model_load_rejected", model, reservationBytes, {
+      reason,
+      estimateBytes: requested.bytes ?? undefined,
+      availableBytes: available.bytes ?? undefined,
+      reservedBytes: this.reservedBytesExcept(ownReservationId),
+      headroomBytes: this.totalHeadroomBytes(),
+      evictableModelCount,
+    });
   }
 
   private insufficient(
