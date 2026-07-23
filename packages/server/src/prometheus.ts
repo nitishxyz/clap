@@ -85,6 +85,7 @@ export type PromSnapshot = {
     queuedMs: Histogram;
     completionTokens: Histogram;
   };
+  structuredOutputOutcomes: Map<string, number>;
   residency: {
     reservedBytes: number;
     activeReservations: number;
@@ -129,6 +130,11 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
     ['{kind="completion"}', snapshot.totals.completionTokens],
     ['{kind="kv_reused"}', snapshot.totals.reusedTokens],
   ]);
+  counter("clap_structured_output_total", "Structured output requests by bounded contract and outcome",
+    [...snapshot.structuredOutputOutcomes].map(([key, value]) => {
+      const [kind, strength, mode, outcome] = key.split("\0");
+      return [`{kind="${esc(kind!)}",strength="${esc(strength!)}",mode="${esc(mode!)}",outcome="${esc(outcome!)}"}`, value];
+    }));
   counter("clap_kv_cache_total", "KV cache lookups by outcome", [
     ['{outcome="hit"}', snapshot.totals.cacheHits],
     ['{outcome="miss"}', snapshot.totals.cacheMisses],

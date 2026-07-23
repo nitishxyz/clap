@@ -48,6 +48,18 @@ export type DetailMessage = {
   toolCalls?: Array<{ name: string; arguments: string }>;
 };
 
+export type StructuredOutputFacts = {
+  kind: "json_object" | "json_schema";
+  requestedStrength: "best_effort" | "required";
+  backendMode?: "native" | "post_validate";
+  outcome?: "native_validated" | "validated" | "repaired_validated" | "invalid" | "capability_rejected";
+  selectedParser?: string;
+  repairApplied?: boolean;
+  validationMs?: number;
+  schemaFingerprint?: string;
+  schemaSize?: number;
+};
+
 export type RequestDetail = {
   params: {
     temperature?: number;
@@ -157,6 +169,7 @@ export type DashboardRequest = {
   toolCalls?: number;
   messageCount?: number;
   error?: string;
+  structuredOutput?: StructuredOutputFacts;
   detail?: RequestDetail;
   cacheDiagnostics?: {
     serverLaunchId: string;

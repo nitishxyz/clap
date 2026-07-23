@@ -34,6 +34,15 @@ function row(request: DashboardRequest): string {
 }
 
 describe("recent request intent and cache badges", () => {
+  test("shows structured constraint mode and outcome without schema content", () => {
+    const html = row({ ...base, structuredOutput: {
+      kind: "json_schema", requestedStrength: "required", backendMode: "native",
+      outcome: "native_validated", repairApplied: false, selectedParser: "structured",
+      validationMs: 1.2, schemaFingerprint: "abc123", schemaSize: 42,
+    } });
+    expect(html).toContain("required · native · native validated");
+    expect(html).not.toContain("properties");
+  });
   test("side request with cache hit shows intent and cache as separate badges", () => {
     const html = row({
       ...base,

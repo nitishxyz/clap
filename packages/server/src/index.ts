@@ -34,7 +34,7 @@ import { InsufficientModelMemoryError, listBackends, ModelLifecycleManager, Resi
   type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { StructuredOutputError } from "./parsers/structured";
+import { parseStructuredOutput, StructuredOutputError } from "./parsers/structured";
 import { join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
@@ -454,6 +454,7 @@ export function createServer(
       uptimeMs: Date.now() - startedAt,
       histograms: metrics.histograms,
       residency: metrics.residency,
+      structuredOutputOutcomes: metrics.structuredOutputOutcomes,
     }), 200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
   });
 
@@ -553,6 +554,7 @@ export function createServer(
           timing: event.timing,
           finishReason: event.finishReason,
           cacheOutcome: persistedOutcome(event, firstIds),
+          structuredOutput: event.structuredOutput,
           historical: persistedHistorical(event, warmWorkers),
         };
       });
@@ -1466,6 +1468,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     const loadStarted = Date.now();
     entry.worker = await worker.load();
     handle?.loaded(Date.now() - loadStarted);
+    const structuredMode = structuredBackendMode(worker.info(), request);
     // The resident worker processes requests serially: mark this request as
     // queued until worker prefill progress or the first token proves it is
     // actually running.
@@ -1474,6 +1477,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
       (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"),
       { cacheIdentity, structuredOutput: structuredOutputContract(request) });
     entry.worker = worker.info();
+    const structuredOutput = validateStructuredResult(result, request, structuredMode);
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
     handle?.finish({
@@ -1503,6 +1507,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
         toolCalls: message?.tool_calls?.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
       },
       rawOutput: result.content,
+      structuredOutput,
     });
     return c.json(body);
   } catch (error) {
@@ -1514,6 +1519,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
       ...workerResultMetrics(result),
       workerLaunchId: result?.cache?.workerLaunchId ?? worker.info().launchId,
       rawOutput: result?.content,
+      structuredOutput: structuredFailureFacts(error, worker.info(), request),
     });
     throw error;
   }
@@ -1624,6 +1630,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       const loadStarted = Date.now();
       entry.worker = await worker.load();
       handle?.loaded(Date.now() - loadStarted);
+      const structuredMode = structuredBackendMode(worker.info(), request);
       handle?.phase("queued");
       const streamExtras = profileStreamExtras(request.model, request, templateInfo);
       const filter = new StreamingOutputFilter({
@@ -1671,9 +1678,11 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
           realizedReuseTokens: result.cache?.realizedReuseTokens,
           cacheFallback: result.cache?.fallback,
           finishReason: "cancel",
+          structuredOutput: structuredOutputContract(request) ? { backendMode: structuredMode } : undefined,
         });
         return;
       }
+      const structuredOutput = validateStructuredResult(result, request, structuredMode);
       const parsed = parseAssistantOutput(result.content, request, templateInfo, { truncated: result.finishReason === "length" });
       await ensureRole();
       const reasoningTail = remainingDelta(parsed.reasoning, filter.emittedReasoning);
@@ -1718,6 +1727,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
           toolCalls: parsed.toolCalls?.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
         },
         rawOutput: result.content,
+        structuredOutput,
       });
     } catch (error) {
       entry.worker = worker.info();
@@ -1733,6 +1743,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         ...workerResultMetrics(result),
         workerLaunchId: result?.cache?.workerLaunchId ?? worker.info().launchId,
         rawOutput: result?.content,
+        structuredOutput: structuredFailureFacts(error, worker.info(), request),
       });
       await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) }).catch(() => undefined);
     } finally {
@@ -1791,6 +1802,50 @@ function backendErrorBody(error: unknown) {
   return ErrorResponseSchema.parse({
     error: { message, type: "backend_error", code },
   });
+}
+
+type StructuredWorkerInfo = ReturnType<ReturnType<ResidentWorkerRegistry["getOrCreate"]>["info"]>;
+
+function structuredBackendMode(worker: StructuredWorkerInfo, request: ChatCompletionRequest): "native" | "post_validate" | undefined {
+  const contract = structuredOutputContract(request);
+  if (!contract) return undefined;
+  const mode = worker.structuredOutputCapabilities?.[contract.kind];
+  return mode === "native" || mode === "post_validate" ? mode : undefined;
+}
+
+function structuredFailureFacts(error: unknown, worker: StructuredWorkerInfo, request: ChatCompletionRequest) {
+  const contract = structuredOutputContract(request);
+  if (!contract) return undefined;
+  return {
+    backendMode: structuredBackendMode(worker, request),
+    outcome: error instanceof LlamaWorkerError || error instanceof MlxWorkerError
+      ? error.code === "structured_output_capability_required" ? "capability_rejected" as const : "invalid" as const
+      : "invalid" as const,
+    repairApplied: false,
+    validationMs: error instanceof StructuredOutputError ? error.validationMs : undefined,
+  };
+}
+
+function validateStructuredResult(result: ResidentChatResult, request: ChatCompletionRequest,
+                                  backendMode?: "native" | "post_validate") {
+  const format = request.response_format;
+  if (!format || format.type === "text" || result.finishReason === "cancel") return undefined;
+  const started = performance.now();
+  const outcome = parseStructuredOutput(result.content, format);
+  const validationMs = Math.round((performance.now() - started) * 100) / 100;
+  if (!outcome.ok) {
+    throw new StructuredOutputError(
+      outcome.error.code === "invalid_schema" ? "schema_unsupported" : "structured_output_invalid",
+      outcome.error.message, false, validationMs);
+  }
+  result.content = outcome.json;
+  return {
+    backendMode,
+    outcome: outcome.repaired ? "repaired_validated" as const
+      : backendMode === "native" ? "native_validated" as const : "validated" as const,
+    repairApplied: outcome.repaired,
+    validationMs,
+  };
 }
 
 function structuredOutputContract(request: ChatCompletionRequest): StructuredOutputContract | undefined {

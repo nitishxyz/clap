@@ -13,7 +13,7 @@ export type StructuredOutputErrorCode =
 
 export class StructuredOutputError extends Error {
   constructor(readonly code: "structured_output_invalid" | "schema_unsupported", message: string,
-              readonly repaired = false) {
+              readonly repaired = false, readonly validationMs?: number) {
     super(message);
     this.name = "StructuredOutputError";
   }

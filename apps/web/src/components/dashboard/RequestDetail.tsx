@@ -329,6 +329,16 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
                   "primary"
                 )}
               </Field>
+              <Field label="structured output">
+                {record.structuredOutput ? [
+                  `${record.structuredOutput.kind} (${record.structuredOutput.requestedStrength})`,
+                  record.structuredOutput.backendMode ? `mode ${record.structuredOutput.backendMode}` : null,
+                  record.structuredOutput.outcome?.replaceAll("_", " "),
+                  record.structuredOutput.repairApplied ? "repair applied" : null,
+                  record.structuredOutput.selectedParser ? `parser ${record.structuredOutput.selectedParser}` : null,
+                  record.structuredOutput.validationMs !== undefined ? `validation ${record.structuredOutput.validationMs}ms` : null,
+                ].filter(Boolean).join(" · ") : "none"}
+              </Field>
               <Field label="params">
                 {detail ? [
                   detail.params.temperature !== undefined ? `temp ${detail.params.temperature}` : null,

@@ -253,6 +253,7 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
               "session / prefix",
               "model",
               "status",
+              "structured output",
               { label: "queue", numeric: true },
               { label: "load", numeric: true },
               { label: "ttft", numeric: true },
@@ -286,6 +287,12 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
                   {request.model}
                 </Td>
                 <Td><StatusTag status={request.status} /></Td>
+                {request.structuredOutput ? <Td className="max-w-[150px]">
+                  <span title={`${request.structuredOutput.kind} · ${request.structuredOutput.requestedStrength}`}>
+                    {request.structuredOutput.requestedStrength} · {request.structuredOutput.backendMode ?? "pending"}
+                    {request.structuredOutput.outcome ? ` · ${request.structuredOutput.outcome.replaceAll("_", " ")}` : ""}
+                  </span>
+                </Td> : <Td>-</Td>}
                 <Td numeric>{request.queuedMs !== undefined && request.queuedMs > 500 ? fmtDuration(request.queuedMs) : "-"}</Td>
                 <Td numeric>{request.loadMs !== undefined && request.loadMs > 500 ? fmtDuration(request.loadMs) : "-"}</Td>
                 <Td numeric>{fmtDuration(request.ttftMs)}</Td>

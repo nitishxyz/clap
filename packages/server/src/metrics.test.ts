@@ -17,6 +17,26 @@ function tempDir(): string {
 }
 
 describe("metrics queue accounting", () => {
+  test("structured telemetry fingerprints schemas and uses bounded metric labels", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("secret-model-id", "/v1/chat/completions", false);
+    handle.capture({ messages: [{ role: "user", content: "x" }], response_format: {
+      type: "json_schema", constraint: "required",
+      json_schema: { schema: { type: "object", properties: { secretField: { const: "secret-value" } } } },
+    } });
+    handle.finish({ status: "ok", structuredOutput: {
+      backendMode: "native", outcome: "native_validated", repairApplied: false, validationMs: 1.25,
+    } });
+    const record = metrics.recent(1)[0]!;
+    expect(record.structuredOutput).toMatchObject({
+      kind: "json_schema", requestedStrength: "required", backendMode: "native",
+      outcome: "native_validated", schemaSize: expect.any(Number), schemaFingerprint: expect.any(String),
+    });
+    expect(JSON.stringify(record.structuredOutput)).not.toContain("secretField");
+    expect(JSON.stringify(record.structuredOutput)).not.toContain("secret-value");
+    expect([...metrics.structuredOutputOutcomes.keys()].join(" ")).not.toContain("secret-model-id");
+    expect([...metrics.structuredOutputOutcomes.keys()].join(" ")).not.toContain("secretField");
+  });
   test("time waiting in queue is tracked separately from ttft", async () => {
     const metrics = new MetricsCollector();
     const handle = metrics.start("test-model", "/v1/chat/completions", false);

@@ -2,10 +2,23 @@ import { makeRequestHistograms } from "./prometheus";
 import { CacheEventStore, type CacheCandidateDiagnostic, type PersistedCacheDecision } from "./cache-event-store";
 import { classifyCacheOutcome, type CacheOutcome } from "./cache-outcome";
 import { sessionDisplayIdentity } from "./dashboard-identity";
+import { createHash } from "node:crypto";
 
 export type RequestStatus = "active" | "ok" | "error" | "cancelled";
 
 export type RequestPhase = "queued" | "loading" | "prefill" | "decode" | "done";
+
+export type StructuredOutputFacts = {
+  kind: "json_object" | "json_schema";
+  requestedStrength: "best_effort" | "required";
+  backendMode?: "native" | "post_validate";
+  outcome?: "native_validated" | "validated" | "repaired_validated" | "invalid" | "capability_rejected";
+  selectedParser?: string;
+  repairApplied?: boolean;
+  validationMs?: number;
+  schemaFingerprint?: string;
+  schemaSize?: number;
+};
 
 export type DetailMessage = {
   role: string;
@@ -97,6 +110,7 @@ export type RequestRecord = {
   toolCalls?: number;
   messageCount?: number;
   error?: string;
+  structuredOutput?: StructuredOutputFacts;
   detail?: RequestDetail;
 };
 
@@ -191,6 +205,7 @@ export type RequestFinish = {
   error?: string;
   response?: RequestDetail["response"];
   rawOutput?: string;
+  structuredOutput?: Partial<StructuredOutputFacts>;
 };
 
 export type RequestHandle = {
@@ -221,7 +236,7 @@ export type ChatLikeRequest = {
   top_p?: number;
   max_tokens?: number;
   stop?: string | string[];
-  response_format?: { type?: string };
+  response_format?: { type?: string; constraint?: string; json_schema?: { schema?: unknown; strict?: boolean } };
 };
 
 const HISTORY_LIMIT = 200;
@@ -274,6 +289,7 @@ export class MetricsCollector {
   private eventSequence = 0;
   readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
+  readonly structuredOutputOutcomes = new Map<string, number>();
   readonly residency: ResidencyMetrics = {
     reservedBytes: 0, activeReservations: 0, outcomes: new Map(), evictions: new Map(),
     estimateObservedRatioSum: 0, estimateObservedRatioCount: 0,
@@ -443,6 +459,20 @@ export class MetricsCollector {
             return entry;
           }),
         };
+        if (request.response_format?.type === "json_object" || request.response_format?.type === "json_schema") {
+          const schema = request.response_format.type === "json_schema"
+            ? request.response_format.json_schema?.schema : undefined;
+          const encoded = schema === undefined ? undefined : JSON.stringify(schema);
+          record.structuredOutput = {
+            kind: request.response_format.type,
+            requestedStrength: request.response_format.constraint === "required"
+              || request.response_format.json_schema?.strict === true ? "required" : "best_effort",
+            selectedParser: "structured",
+            schemaFingerprint: schema === undefined ? undefined
+              : createHash("sha256").update(encoded!).digest("hex"),
+            schemaSize: encoded === undefined ? undefined : new TextEncoder().encode(encoded).byteLength,
+          };
+        }
       },
       phase: (phase) => {
         if (phase === "queued") {
@@ -498,6 +528,13 @@ export class MetricsCollector {
         record.finishReason = result.finishReason;
         record.toolCalls = result.toolCalls;
         record.error = result.error;
+        if (result.structuredOutput) {
+          record.structuredOutput = { ...record.structuredOutput, ...result.structuredOutput } as StructuredOutputFacts;
+        }
+        if (record.structuredOutput?.outcome) {
+          const key = `${record.structuredOutput.kind}\0${record.structuredOutput.requestedStrength}\0${record.structuredOutput.backendMode ?? "unknown"}\0${record.structuredOutput.outcome}`;
+          this.structuredOutputOutcomes.set(key, (this.structuredOutputOutcomes.get(key) ?? 0) + 1);
+        }
         if (record.detail) {
           if (result.response) {
             record.detail.response = {
@@ -595,6 +632,7 @@ export class MetricsCollector {
             status: record.status,
             finishReason: result.finishReason,
             errorCode: result.errorCode,
+            structuredOutput: record.structuredOutput,
             cacheOutcome: record.cacheOutcome,
             cache: {
               hit: result.cacheHit,
