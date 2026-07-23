@@ -53,6 +53,7 @@ export type PromSnapshot = {
   queue: { inflight: number; queued: number; maxInflight: number; queueDepth: number };
   loadedModels: Array<{
     id: string;
+    backend: string;
     state: string;
     crashes?: number;
     retention?: {
@@ -61,9 +62,21 @@ export type PromSnapshot = {
       retainedTotal: number;
       retainedSessions: number;
       retainedAnchors: number;
-      retainedBytes: number;
-      sessionBytes: number;
-      anchorBytes: number;
+      retainedBytes: number | null;
+      retainedBytesSource?: string;
+      retainedBytesBasis?: string;
+      sessionBytes: number | null;
+      sessionBytesSource?: string;
+      sessionBytesBasis?: string;
+      anchorBytes: number | null;
+      anchorBytesSource?: string;
+      anchorBytesBasis?: string;
+      evictedBytes?: number | null;
+      evictedBytesSource?: string;
+      evictedBytesBasis?: string;
+      estimatedRetainedBytes?: number | null;
+      estimatedRetainedBytesSource?: string;
+      estimatedRetainedBytesBasis?: string;
       budgetBytes: number;
       highWatermarkBytes: number;
       lowWatermarkBytes: number;
@@ -162,21 +175,25 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
     [["", snapshot.residency.estimateObservedRatioCount > 0
       ? snapshot.residency.estimateObservedRatioSum / snapshot.residency.estimateObservedRatioCount : 0]]);
 
-  gauge("clap_model_loaded", "Loaded models (1 per loaded model)", snapshot.loadedModels.map(
-    (model) => [`{model="${esc(model.id)}",state="${esc(model.state)}"}`, 1],
-  ));
+  const grouped = (values: Array<[string, number]>) => [...values.reduce((result, [labels, value]) =>
+    result.set(labels, (result.get(labels) ?? 0) + value), new Map<string, number>())];
+  const groupedMax = (values: Array<[string, number]>) => [...values.reduce((result, [labels, value]) =>
+    result.set(labels, Math.max(result.get(labels) ?? Number.NEGATIVE_INFINITY, value)), new Map<string, number>())];
+  gauge("clap_model_loaded", "Loaded models grouped by backend and state", grouped(snapshot.loadedModels.map(
+    (model) => [`{backend="${esc(model.backend)}",state="${esc(model.state)}"}`, 1],
+  )));
   for (const [kind, field] of [
     ["context", "effectiveContextWindow"],
     ["input", "maxInputTokens"],
     ["output", "maxOutputTokens"],
   ] as const) {
-    gauge(`clap_model_${kind}_token_limit`, `Effective model ${kind} token limit (omitted when unknown)`, snapshot.loadedModels
+    gauge(`clap_model_${kind}_token_limit`, `Maximum effective model ${kind} token limit by backend (omitted when unknown)`, groupedMax(snapshot.loadedModels
       .filter((model) => model.tokenCapabilities?.[field] !== null && model.tokenCapabilities?.[field] !== undefined)
-      .map((model) => [`{model="${esc(model.id)}"}`, model.tokenCapabilities![field]!]));
+      .map((model) => [`{backend="${esc(model.backend)}"}`, model.tokenCapabilities![field]!] as [string, number])));
   }
-  counter("clap_worker_crashes_total", "Worker crashes since server start", snapshot.loadedModels
+  counter("clap_worker_crashes_total", "Worker crashes since server start", grouped(snapshot.loadedModels
     .filter((model) => (model.crashes ?? 0) > 0)
-    .map((model) => [`{model="${esc(model.id)}"}`, model.crashes ?? 0]));
+    .map((model) => [`{backend="${esc(model.backend)}"}`, model.crashes ?? 0])));
   const retained = snapshot.loadedModels.filter((model) => model.retention !== undefined);
   for (const [name, help, field] of [
     ["clap_mlx_retention_max_active", "Maximum simultaneously active MLX retained entries", "maxActive"],
@@ -184,22 +201,36 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
     ["clap_mlx_retention_entries", "MLX retained entries", "retainedTotal"],
     ["clap_mlx_retention_session_entries", "MLX retained session entries", "retainedSessions"],
     ["clap_mlx_retention_anchor_entries", "MLX retained anchor entries", "retainedAnchors"],
-    ["clap_mlx_retention_bytes", "Physical bytes retained by MLX caches", "retainedBytes"],
-    ["clap_mlx_retention_session_bytes", "Physical bytes retained by MLX session caches", "sessionBytes"],
-    ["clap_mlx_retention_anchor_bytes", "Physical bytes retained by MLX prefix anchors", "anchorBytes"],
     ["clap_mlx_retention_budget_bytes", "MLX retained cache byte budget", "budgetBytes"],
     ["clap_mlx_retention_high_watermark_bytes", "MLX retained cache high watermark", "highWatermarkBytes"],
     ["clap_mlx_retention_low_watermark_bytes", "MLX retained cache low watermark", "lowWatermarkBytes"],
     ["clap_mlx_retention_hard_ceiling", "MLX retained entry hard ceiling", "hardCeiling"],
   ] as const) {
-    gauge(name, help, retained.map((model) => [`{model="${esc(model.id)}"}`, model.retention![field]]));
+    gauge(name, help, grouped(retained.map((model) => [`{backend="${esc(model.backend)}"}`, model.retention![field]])));
   }
-  gauge("clap_mlx_retention_under_pressure", "Whether MLX retained caches are under byte pressure", retained.map(
-    (model) => [`{model="${esc(model.id)}"}`, model.retention!.underPressure ? 1 : 0],
-  ));
-  counter("clap_mlx_retention_evictions_total", "MLX retained cache evictions", retained.map(
-    (model) => [`{model="${esc(model.id)}",reason="${esc(model.retention!.evictionReason ?? "none")}"}`, model.retention!.evictionCount],
-  ));
+  for (const [name, help, field] of [
+    ["clap_retention_bytes", "Retained cache bytes by honest source and basis", "retainedBytes"],
+    ["clap_retention_session_bytes", "Retained session cache bytes by honest source and basis", "sessionBytes"],
+    ["clap_retention_anchor_bytes", "Retained anchor cache bytes by honest source and basis", "anchorBytes"],
+    ["clap_retention_evicted_bytes", "Evicted cache bytes by honest source and basis", "evictedBytes"],
+    ["clap_retention_estimated_bytes", "Separately reported retained cache estimate", "estimatedRetainedBytes"],
+  ] as const) {
+    gauge(name, help, grouped(retained.flatMap((model) => {
+      const value = model.retention![field];
+      const source = model.retention![`${field}Source`];
+      const basis = model.retention![`${field}Basis`];
+      return value === null || value === undefined || source === "unavailable" ? [] : [[
+        `{backend="${esc(model.backend)}",source="${esc(source ?? "legacy")}",basis="${esc(basis ?? "not_reported")}"}`,
+        value,
+      ]];
+    })));
+  }
+  gauge("clap_mlx_retention_under_pressure", "Whether any retained cache is under byte pressure", groupedMax(retained.map(
+    (model) => [`{backend="${esc(model.backend)}"}`, model.retention!.underPressure ? 1 : 0],
+  )));
+  counter("clap_mlx_retention_evictions_total", "MLX retained cache evictions", grouped(retained.map(
+    (model) => [`{backend="${esc(model.backend)}",reason="${esc(model.retention!.evictionReason ?? "none")}"}`, model.retention!.evictionCount],
+  )));
 
   lines.push("# HELP clap_request_ttft_ms Time to first token (excludes queue wait)", "# TYPE clap_request_ttft_ms histogram");
   lines.push(...snapshot.histograms.ttftMs.render("clap_request_ttft_ms"));

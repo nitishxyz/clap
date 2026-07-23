@@ -446,6 +446,7 @@ export function createServer(
       queue: limiter.stats(),
       loadedModels: loaded.map((entry) => ({
         id: entry.id,
+        backend: entry.backend,
         state: entry.worker?.state ?? "not_started",
         crashes: entry.worker?.crashes,
         retention: entry.worker?.retention,

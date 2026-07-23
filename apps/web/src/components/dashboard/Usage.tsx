@@ -84,6 +84,12 @@ function shortBytes(value: number): string {
   return `${Math.round(value / 2 ** 20)}M`;
 }
 
+export function formatMemoryValue(bytes: number | null | undefined, source?: string): string | undefined {
+  if (bytes === null || bytes === undefined || source === "unavailable") return undefined;
+  const label = fmtBytes(bytes);
+  return source === "estimated" ? `~${label} estimated` : source === "measured" ? `${label} measured` : label;
+}
+
 // One geometry for every metric row: fixed label, flexible bar, fixed
 // right-aligned value slot so nothing shifts as numbers change.
 function Row({ label, pct, value, tone, title }: { label: string; pct?: number; value?: string; tone?: string; title?: string }) {
@@ -168,11 +174,12 @@ function WorkerRow({ entry, platform, systemMemoryBytes, cpuCount, gpuTotalBytes
   const rssPct = usage && systemMemoryBytes ? (usage.rssBytes / systemMemoryBytes) * 100 : undefined;
   const gpuBytes = entry.gpuMemoryBytes;
   const gpuPct = gpuBytes !== undefined && gpuTotalBytes ? (gpuBytes / gpuTotalBytes) * 100 : undefined;
-  const acceleratorBytes = unifiedMlx ? mlxMemory?.activeBytes : gpuBytes;
+  const acceleratorBytes = unifiedMlx ? mlxMemory?.activeBytes ?? undefined : gpuBytes;
   const acceleratorPct = acceleratorBytes !== undefined && (unifiedMlx ? systemMemoryBytes : gpuTotalBytes)
     ? (acceleratorBytes / (unifiedMlx ? systemMemoryBytes! : gpuTotalBytes!)) * 100
     : undefined;
-  const cachePct = mlxMemory && systemMemoryBytes ? (mlxMemory.cacheBytes / systemMemoryBytes) * 100 : undefined;
+  const cachePct = mlxMemory?.cacheBytes !== null && mlxMemory?.cacheBytes !== undefined && systemMemoryBytes
+    ? (mlxMemory.cacheBytes / systemMemoryBytes) * 100 : undefined;
   return (
     <div className="border-b border-soft-border px-3 py-2 last:border-b-0">
       <div className="mb-1.5 flex min-w-0 items-baseline justify-between gap-3">
@@ -182,8 +189,10 @@ function WorkerRow({ entry, platform, systemMemoryBytes, cpuCount, gpuTotalBytes
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
         <WorkerMetricCell label="CPU" pct={cpuPct} value={usage ? formatWorkerCpu(usage.cpuPercent) : undefined} title="Process CPU sampled by ps; values below one percent are shown as <1%" />
         <WorkerMetricCell label="RSS" pct={rssPct} value={usage ? fmtBytes(usage.rssBytes) : undefined} title={RSS_TITLE} />
-        <WorkerMetricCell label="Accelerator" pct={acceleratorPct} tone="bg-cache" value={acceleratorBytes !== undefined ? fmtBytes(acceleratorBytes) : undefined} title={unifiedMlx ? MLX_ACTIVE_TITLE : "Dedicated GPU memory used by this worker; unavailable when the platform cannot attribute GPU memory by process"} />
-        <WorkerMetricCell label="Reclaimable" pct={cachePct} tone="bg-warn" value={mlxMemory ? fmtBytes(mlxMemory.cacheBytes) : undefined} title={unifiedMlx ? MLX_CACHE_TITLE : "Backend does not expose reclaimable allocator memory"} />
+        <WorkerMetricCell label="Accelerator" pct={acceleratorPct} tone="bg-cache" value={unifiedMlx
+          ? formatMemoryValue(mlxMemory?.activeBytes, mlxMemory?.activeBytesSource)
+          : acceleratorBytes !== undefined ? fmtBytes(acceleratorBytes) : undefined} title={unifiedMlx ? `${MLX_ACTIVE_TITLE}; ${mlxMemory?.activeBytesBasis ?? "source unavailable"}` : "Dedicated GPU memory used by this worker; unavailable when the platform cannot attribute GPU memory by process"} />
+        <WorkerMetricCell label="Reclaimable" pct={cachePct} tone="bg-warn" value={formatMemoryValue(mlxMemory?.cacheBytes, mlxMemory?.cacheBytesSource)} title={unifiedMlx ? `${MLX_CACHE_TITLE}; ${mlxMemory?.cacheBytesBasis ?? "source unavailable"}` : "Backend does not expose reclaimable allocator memory"} />
       </div>
     </div>
   );

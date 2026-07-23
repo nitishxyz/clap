@@ -70,8 +70,6 @@ export function parseWorkerMemory(value: unknown): ResidentMlxMemory | undefined
   if (!parsed.success) return undefined;
   const memory = parsed.data;
   const { active_bytes: activeBytes, cache_bytes: cacheBytes, peak_active_bytes: peakActiveBytes } = memory;
-  if (typeof activeBytes !== "number" || typeof cacheBytes !== "number"
-    || typeof peakActiveBytes !== "number") return undefined;
   return {
     activeBytes,
     ...memoryCompanions(memory, "active_bytes", "activeBytes"),

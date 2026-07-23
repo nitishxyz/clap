@@ -43,13 +43,13 @@ export type ResidentWorkerResidencyInfo = {
 };
 
 export type ResidentMlxMemory = {
-  activeBytes: number;
+  activeBytes: number | null;
   activeBytesSource?: MemorySource;
   activeBytesBasis?: MemoryBasis;
-  cacheBytes: number;
+  cacheBytes: number | null;
   cacheBytesSource?: MemorySource;
   cacheBytesBasis?: MemoryBasis;
-  peakActiveBytes: number;
+  peakActiveBytes: number | null;
   peakActiveBytesSource?: MemorySource;
   peakActiveBytesBasis?: MemoryBasis;
 };
@@ -77,15 +77,21 @@ export type ResidentMlxRetention = {
   retainedTotal: number;
   retainedSessions: number;
   retainedAnchors: number;
-  retainedBytes: number;
+  retainedBytes: number | null;
   retainedBytesSource?: MemorySource;
   retainedBytesBasis?: MemoryBasis;
-  sessionBytes: number;
+  sessionBytes: number | null;
   sessionBytesSource?: MemorySource;
   sessionBytesBasis?: MemoryBasis;
-  anchorBytes: number;
+  anchorBytes: number | null;
   anchorBytesSource?: MemorySource;
   anchorBytesBasis?: MemoryBasis;
+  evictedBytes?: number | null;
+  evictedBytesSource?: MemorySource;
+  evictedBytesBasis?: MemoryBasis;
+  estimatedRetainedBytes?: number | null;
+  estimatedRetainedBytesSource?: MemorySource;
+  estimatedRetainedBytesBasis?: MemoryBasis;
   automaticCheckpointCount?: number;
   automaticCheckpointBytes?: number;
   automaticCheckpointBudgetBytes?: number;
@@ -251,6 +257,7 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     const entry = raw[key];
     return typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0 ? entry : undefined;
   };
+  const nullableInteger = (key: string): number | null | undefined => raw[key] === null ? null : integer(key);
   const maxActive = integer("max_active");
   const queued = integer("queued");
   const previousMaxActive = integer("previous_max_active");
@@ -279,9 +286,11 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
   const retainedTotal = integer("retained_total");
   const retainedSessions = integer("retained_sessions");
   const retainedAnchors = integer("retained_anchors");
-  const retainedBytes = integer("retained_bytes");
-  const sessionBytes = integer("session_bytes");
-  const anchorBytes = integer("anchor_bytes");
+  const retainedBytes = nullableInteger("retained_bytes");
+  const sessionBytes = nullableInteger("session_bytes");
+  const anchorBytes = nullableInteger("anchor_bytes");
+  const evictedBytes = nullableInteger("evicted_bytes");
+  const estimatedRetainedBytes = nullableInteger("estimated_retained_bytes");
   const automaticCheckpointCount = integer("automatic_checkpoint_count");
   const automaticCheckpointBytes = integer("automatic_checkpoint_bytes");
   const automaticCheckpointBudgetBytes = integer("automatic_checkpoint_budget_bytes");
@@ -323,6 +332,9 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     ...memoryCompanions(raw, "retained_bytes", "retainedBytes"),
     sessionBytes: sessionBytes!, ...memoryCompanions(raw, "session_bytes", "sessionBytes"),
     anchorBytes: anchorBytes!, ...memoryCompanions(raw, "anchor_bytes", "anchorBytes"),
+    ...(evictedBytes !== undefined ? { evictedBytes, ...memoryCompanions(raw, "evicted_bytes", "evictedBytes") } : {}),
+    ...(estimatedRetainedBytes !== undefined ? { estimatedRetainedBytes,
+      ...memoryCompanions(raw, "estimated_retained_bytes", "estimatedRetainedBytes") } : {}),
     budgetBytes: budgetBytes!, highWatermarkBytes: highWatermarkBytes!,
     ...(automaticCheckpointCount !== undefined ? { automaticCheckpointCount } : {}),
     ...(automaticCheckpointBytes !== undefined ? { automaticCheckpointBytes } : {}),
@@ -651,7 +663,7 @@ export class ResidentWorkerRegistry {
         const growth = this.recentRetainedGrowth.get(worker.key);
         const configuredMinimum = Number(environment.CLAP_MLX_RETAINED_GROWTH_MIN_BYTES);
         const configuredPercent = Number(environment.CLAP_MLX_RETAINED_GROWTH_RESERVE_PERCENT);
-        const fallbackResident = info.memory
+        const fallbackResident = info.memory && info.memory.activeBytes !== null && info.memory.cacheBytes !== null
           ? info.memory.activeBytes + info.memory.cacheBytes
           : inputNumber("model_active_bytes") ?? inputNumber("model_file_bytes") ?? 0;
         return [{
@@ -666,7 +678,7 @@ export class ResidentWorkerRegistry {
           retainedCeiling: retention.hardCeiling,
           perActiveReserveBytes: inputNumber("per_active_reserve_bytes") ?? 1024 ** 3,
           residentBytes: info.pid ? snapshot.residentBytesByPid.get(info.pid) ?? fallbackResident : fallbackResident,
-          retainedBytes: retention.retainedBytes,
+          retainedBytes: retention.retainedBytes ?? retention.estimatedRetainedBytes ?? 0,
           retainedBudgetBytes: retention.budgetBytes,
           recentRetainedGrowthBytes: growth && now - growth.at <= 60_000 ? growth.bytes : 0,
           growthMinimumBytes: Number.isFinite(configuredMinimum) && configuredMinimum >= 0
@@ -711,7 +723,9 @@ export class ResidentWorkerRegistry {
 
   private handleTelemetry(worker: ResidentWorkerProcess, previous: ResidentMlxRetention | undefined,
     current: ResidentMlxRetention): void {
-    const growth = previous ? Math.max(0, current.retainedBytes - previous.retainedBytes) : 0;
+    const currentBytes = current.retainedBytes ?? current.estimatedRetainedBytes ?? 0;
+    const previousBytes = previous ? previous.retainedBytes ?? previous.estimatedRetainedBytes ?? 0 : 0;
+    const growth = previous ? Math.max(0, currentBytes - previousBytes) : 0;
     if (growth > 0) {
       const recent = this.recentRetainedGrowth.get(worker.key);
       this.recentRetainedGrowth.set(worker.key, {
@@ -719,8 +733,8 @@ export class ResidentWorkerRegistry {
         at: Date.now(),
       });
     }
-    const threshold = Math.max(32 * 1024 ** 2, Math.floor((previous?.retainedBytes ?? 0) / 10));
-    const material = !previous || Math.abs(current.retainedBytes - previous.retainedBytes) >= threshold
+    const threshold = Math.max(32 * 1024 ** 2, Math.floor(previousBytes / 10));
+    const material = !previous || Math.abs(currentBytes - previousBytes) >= threshold
       || current.underPressure !== previous.underPressure;
     if (material) this.scheduleRebalance(previous ? "retained_threshold" : "model_loaded");
   }

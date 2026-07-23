@@ -68,6 +68,18 @@ describe("worker retention telemetry", () => {
     })).toMatchObject({
       retainedBytes: 0, retainedBytesSource: "estimated", retainedBytesBasis: "cache_components",
     });
+    expect(parseWorkerRetention({
+      ...legacy,
+      retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_observed",
+      session_bytes: null, session_bytes_source: "unavailable", session_bytes_basis: "not_observed",
+      anchor_bytes: null, anchor_bytes_source: "unavailable", anchor_bytes_basis: "not_observed",
+      evicted_bytes: null, evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
+      estimated_retained_bytes: 4096, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "context_configuration",
+    })).toMatchObject({
+      retainedBytes: null, retainedBytesSource: "unavailable",
+      estimatedRetainedBytes: 4096, estimatedRetainedBytesSource: "estimated",
+    });
   });
 });
 

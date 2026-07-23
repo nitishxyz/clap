@@ -276,7 +276,11 @@ export type DashboardLoadedModel = {
       lastAdmissionReason: "within_budget" | "within_budget_after_eviction" | "insufficient_available_memory" | "memory_state_unavailable" | "no_evictable_models" | null;
       lastEvictionReason: "memory_admission" | null;
     };
-    memory?: { activeBytes: number; cacheBytes: number; peakActiveBytes: number };
+    memory?: {
+      activeBytes: number | null; activeBytesSource?: "measured" | "estimated" | "unavailable"; activeBytesBasis?: string;
+      cacheBytes: number | null; cacheBytesSource?: "measured" | "estimated" | "unavailable"; cacheBytesBasis?: string;
+      peakActiveBytes: number | null; peakActiveBytesSource?: "measured" | "estimated" | "unavailable"; peakActiveBytesBasis?: string;
+    };
     retention?: {
       maxActive: number;
       queued?: number;
@@ -300,9 +304,11 @@ export type DashboardLoadedModel = {
       retainedTotal: number;
       retainedSessions: number;
       retainedAnchors: number;
-      retainedBytes: number;
-      sessionBytes: number;
-      anchorBytes: number;
+      retainedBytes: number | null; retainedBytesSource?: "measured" | "estimated" | "unavailable"; retainedBytesBasis?: string;
+      sessionBytes: number | null; sessionBytesSource?: "measured" | "estimated" | "unavailable"; sessionBytesBasis?: string;
+      anchorBytes: number | null; anchorBytesSource?: "measured" | "estimated" | "unavailable"; anchorBytesBasis?: string;
+      evictedBytes?: number | null; evictedBytesSource?: "measured" | "estimated" | "unavailable"; evictedBytesBasis?: string;
+      estimatedRetainedBytes?: number | null; estimatedRetainedBytesSource?: "measured" | "estimated" | "unavailable"; estimatedRetainedBytesBasis?: string;
       automaticCheckpointCount?: number;
       automaticCheckpointBytes?: number;
       automaticCheckpointBudgetBytes?: number;

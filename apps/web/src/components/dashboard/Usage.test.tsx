@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LoadedModels } from "./ModelTables";
-import { formatWorkerCpu, UsagePanel, WorkerMetricCell } from "./Usage";
+import { formatMemoryValue, formatWorkerCpu, UsagePanel, WorkerMetricCell } from "./Usage";
 
 const worker = {
   key: "mlx-key",
@@ -20,7 +20,9 @@ const worker = {
     pid: 42,
     state: "resident",
     crashes: 0,
-    memory: { activeBytes: 4 * 2 ** 30, cacheBytes: 0, peakActiveBytes: 5 * 2 ** 30 },
+    memory: { activeBytes: 4 * 2 ** 30, activeBytesSource: "measured", activeBytesBasis: "worker_allocator",
+      cacheBytes: null, cacheBytesSource: "unavailable", cacheBytesBasis: "not_observed",
+      peakActiveBytes: 5 * 2 ** 30, peakActiveBytesSource: "measured", peakActiveBytesBasis: "worker_allocator" },
     retention: {
       maxActive: 4, queued: 2, previousMaxActive: 2,
       lastAdjustmentReason: "global_headroom_available", lastAdjustmentAt: "2026-07-20T11:29:00.000Z",
@@ -30,7 +32,11 @@ const worker = {
         hardwareCeiling: 8, modelCeiling: 16, memoryCeiling: 4, reason: "memory_ceiling",
         inputs: { model_active_bytes: 4 * 2 ** 30 } },
       active: 1, retainedTotal: 103, retainedSessions: 100, retainedAnchors: 3,
-      retainedBytes: 10 * 2 ** 30, sessionBytes: 8 * 2 ** 30, anchorBytes: 2 * 2 ** 30,
+      retainedBytes: 10 * 2 ** 30, retainedBytesSource: "estimated", retainedBytesBasis: "cache_components",
+      estimatedRetainedBytes: 10 * 2 ** 30, estimatedRetainedBytesSource: "estimated", estimatedRetainedBytesBasis: "cache_components",
+      sessionBytes: 8 * 2 ** 30, sessionBytesSource: "estimated", sessionBytesBasis: "cache_components",
+      anchorBytes: 2 * 2 ** 30, anchorBytesSource: "estimated", anchorBytesBasis: "cache_components",
+      evictedBytes: null, evictedBytesSource: "unavailable", evictedBytesBasis: "not_observed",
       automaticCheckpointCount: 8, automaticCheckpointBytes: 512 * 2 ** 20,
       automaticCheckpointBudgetBytes: 2 * 2 ** 30, automaticCheckpointsEnabled: true,
       automaticCheckpointMinimumTokens: 2048, automaticCheckpointIntervalTokens: 2048,
@@ -50,6 +56,11 @@ const data = {
 };
 
 describe("worker resource presentation", () => {
+  test("labels measured, estimated, and unavailable memory honestly", () => {
+    expect(formatMemoryValue(1024, "measured")).toContain("measured");
+    expect(formatMemoryValue(1024, "estimated")).toContain("estimated");
+    expect(formatMemoryValue(null, "unavailable")).toBeUndefined();
+  });
   test("does not round a measured sub-percent CPU sample to zero", () => {
     expect(formatWorkerCpu(0)).toBe("0%");
     expect(formatWorkerCpu(0.1)).toBe("<1%");

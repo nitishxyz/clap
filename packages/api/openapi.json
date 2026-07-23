@@ -749,6 +749,8 @@
                             "model_artifacts",
                             "architecture_metadata",
                             "configured_cache",
+                            "cache_components",
+                            "context_configuration",
                             "conservative_fallback"
                           ]
                         },
@@ -813,15 +815,54 @@
                       "properties": {
                         "activeBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "activeBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "activeBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         },
                         "cacheBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "cacheBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "cacheBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         },
                         "peakActiveBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "peakActiveBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "peakActiveBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         }
                       },
                       "required": [
@@ -960,15 +1001,88 @@
                         },
                         "retainedBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "retainedBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "retainedBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         },
                         "sessionBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "sessionBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "sessionBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         },
                         "anchorBytes": {
                           "type": "integer",
+                          "nullable": true,
                           "minimum": 0
+                        },
+                        "anchorBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "anchorBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "evictedBytes": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0
+                        },
+                        "evictedBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "evictedBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "estimatedRetainedBytes": {
+                          "type": "integer",
+                          "nullable": true,
+                          "minimum": 0
+                        },
+                        "estimatedRetainedBytesSource": {
+                          "type": "string",
+                          "enum": [
+                            "measured",
+                            "estimated",
+                            "unavailable"
+                          ]
+                        },
+                        "estimatedRetainedBytesBasis": {
+                          "type": "string",
+                          "minLength": 1
                         },
                         "automaticCheckpointCount": {
                           "type": "integer",
@@ -1282,6 +1396,8 @@
                           "model_artifacts",
                           "architecture_metadata",
                           "configured_cache",
+                          "cache_components",
+                          "context_configuration",
                           "conservative_fallback"
                         ]
                       },
@@ -1346,15 +1462,54 @@
                     "properties": {
                       "activeBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "activeBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "activeBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "cacheBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "cacheBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "cacheBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "peakActiveBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "peakActiveBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "peakActiveBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       }
                     },
                     "required": [
@@ -1493,15 +1648,88 @@
                       },
                       "retainedBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "retainedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "retainedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "sessionBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "sessionBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "sessionBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "anchorBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "anchorBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "anchorBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "evictedBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "evictedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "evictedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "estimatedRetainedBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "estimatedRetainedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "estimatedRetainedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "automaticCheckpointCount": {
                         "type": "integer",
@@ -1803,6 +2031,8 @@
                           "model_artifacts",
                           "architecture_metadata",
                           "configured_cache",
+                          "cache_components",
+                          "context_configuration",
                           "conservative_fallback"
                         ]
                       },
@@ -1867,15 +2097,54 @@
                     "properties": {
                       "activeBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "activeBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "activeBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "cacheBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "cacheBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "cacheBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "peakActiveBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "peakActiveBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "peakActiveBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       }
                     },
                     "required": [
@@ -2014,15 +2283,88 @@
                       },
                       "retainedBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "retainedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "retainedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "sessionBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "sessionBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "sessionBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "anchorBytes": {
                         "type": "integer",
+                        "nullable": true,
                         "minimum": 0
+                      },
+                      "anchorBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "anchorBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "evictedBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "evictedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "evictedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "estimatedRetainedBytes": {
+                        "type": "integer",
+                        "nullable": true,
+                        "minimum": 0
+                      },
+                      "estimatedRetainedBytesSource": {
+                        "type": "string",
+                        "enum": [
+                          "measured",
+                          "estimated",
+                          "unavailable"
+                        ]
+                      },
+                      "estimatedRetainedBytesBasis": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "automaticCheckpointCount": {
                         "type": "integer",
@@ -6124,6 +6466,8 @@
                                       "model_artifacts",
                                       "architecture_metadata",
                                       "configured_cache",
+                                      "cache_components",
+                                      "context_configuration",
                                       "conservative_fallback"
                                     ]
                                   },
@@ -6188,15 +6532,54 @@
                                 "properties": {
                                   "activeBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "activeBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "activeBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   },
                                   "cacheBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "cacheBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "cacheBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   },
                                   "peakActiveBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "peakActiveBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "peakActiveBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   }
                                 },
                                 "required": [
@@ -6335,15 +6718,88 @@
                                   },
                                   "retainedBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "retainedBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "retainedBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   },
                                   "sessionBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "sessionBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "sessionBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   },
                                   "anchorBytes": {
                                     "type": "integer",
+                                    "nullable": true,
                                     "minimum": 0
+                                  },
+                                  "anchorBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "anchorBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "evictedBytes": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0
+                                  },
+                                  "evictedBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "evictedBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "estimatedRetainedBytes": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0
+                                  },
+                                  "estimatedRetainedBytesSource": {
+                                    "type": "string",
+                                    "enum": [
+                                      "measured",
+                                      "estimated",
+                                      "unavailable"
+                                    ]
+                                  },
+                                  "estimatedRetainedBytesBasis": {
+                                    "type": "string",
+                                    "minLength": 1
                                   },
                                   "automaticCheckpointCount": {
                                     "type": "integer",
@@ -7272,6 +7728,8 @@
                                     "model_artifacts",
                                     "architecture_metadata",
                                     "configured_cache",
+                                    "cache_components",
+                                    "context_configuration",
                                     "conservative_fallback"
                                   ]
                                 },
@@ -7336,15 +7794,54 @@
                               "properties": {
                                 "activeBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "activeBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "activeBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "cacheBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "cacheBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "cacheBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "peakActiveBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "peakActiveBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "peakActiveBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 }
                               },
                               "required": [
@@ -7483,15 +7980,88 @@
                                 },
                                 "retainedBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "retainedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "retainedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "sessionBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "sessionBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "sessionBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "anchorBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "anchorBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "anchorBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "evictedBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "evictedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "evictedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "estimatedRetainedBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "estimatedRetainedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "estimatedRetainedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "automaticCheckpointCount": {
                                   "type": "integer",
@@ -7868,6 +8438,8 @@
                                     "model_artifacts",
                                     "architecture_metadata",
                                     "configured_cache",
+                                    "cache_components",
+                                    "context_configuration",
                                     "conservative_fallback"
                                   ]
                                 },
@@ -7932,15 +8504,54 @@
                               "properties": {
                                 "activeBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "activeBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "activeBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "cacheBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "cacheBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "cacheBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "peakActiveBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "peakActiveBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "peakActiveBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 }
                               },
                               "required": [
@@ -8079,15 +8690,88 @@
                                 },
                                 "retainedBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "retainedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "retainedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "sessionBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "sessionBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "sessionBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "anchorBytes": {
                                   "type": "integer",
+                                  "nullable": true,
                                   "minimum": 0
+                                },
+                                "anchorBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "anchorBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "evictedBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "evictedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "evictedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "estimatedRetainedBytes": {
+                                  "type": "integer",
+                                  "nullable": true,
+                                  "minimum": 0
+                                },
+                                "estimatedRetainedBytesSource": {
+                                  "type": "string",
+                                  "enum": [
+                                    "measured",
+                                    "estimated",
+                                    "unavailable"
+                                  ]
+                                },
+                                "estimatedRetainedBytesBasis": {
+                                  "type": "string",
+                                  "minLength": 1
                                 },
                                 "automaticCheckpointCount": {
                                   "type": "integer",

@@ -51,7 +51,7 @@ describe("worker result mapper", () => {
     expect(parseWorkerMemory({
       active_bytes: null, active_bytes_source: "unavailable", active_bytes_basis: "not_reported",
       cache_bytes: 512, peak_active_bytes: 2048,
-    })).toBeUndefined();
+    })).toMatchObject({ activeBytes: null, activeBytesSource: "unavailable", activeBytesBasis: "not_reported" });
     expect(parseWorkerMemory({
       active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "worker_allocator",
       cache_bytes: 512, cache_bytes_source: "measured", cache_bytes_basis: "worker_allocator",

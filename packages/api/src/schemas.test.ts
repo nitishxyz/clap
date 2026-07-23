@@ -52,6 +52,13 @@ describe("loaded model retention schema", () => {
     expiresAt: null, pinned: false, always: false, worker: { state: "resident" },
   };
 
+  test("preserves nullable honest memory provenance", () => {
+    const memory = { activeBytes: 1024, activeBytesSource: "measured" as const, activeBytesBasis: "worker_allocator",
+      cacheBytes: null, cacheBytesSource: "unavailable" as const, cacheBytesBasis: "not_observed",
+      peakActiveBytes: 2048, peakActiveBytesSource: "measured" as const, peakActiveBytesBasis: "worker_allocator" };
+    expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, memory } }).worker.memory).toEqual(memory);
+  });
+
   test("accepts MLX retention telemetry and keeps it optional", () => {
     expect(LoadedModelSchema.parse(model).worker.retention).toBeUndefined();
     const retention = {

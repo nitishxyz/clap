@@ -3,7 +3,7 @@ import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unload
 import { fmtBytes, fmtDuration, fmtMaxOutputTokens, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
-import { BoxBar, formatWorkerCpu, isUnifiedMlx, MLX_ACTIVE_TITLE, MLX_CACHE_TITLE, RSS_TITLE } from "./Usage";
+import { BoxBar, formatMemoryValue, formatWorkerCpu, isUnifiedMlx, MLX_ACTIVE_TITLE, MLX_CACHE_TITLE, RSS_TITLE } from "./Usage";
 
 function ActionButton({ label, busy, danger, onClick }: { label: string; busy?: boolean; danger?: boolean; onClick: () => void }) {
   return (
@@ -178,7 +178,7 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                     : "unavailable"}
                 </DetailItem>
                 <DetailItem label="retained growth reserve">{growthReserve !== undefined ? fmtBytes(growthReserve) : "unavailable"}</DetailItem>
-                <DetailItem label="current retained">{concurrency ? fmtBytes(concurrency.retainedBytes) : "unavailable"}</DetailItem>
+                <DetailItem label="current retained">{concurrency ? formatMemoryValue(concurrency.retainedBytes, concurrency.retainedBytesSource) ?? "unavailable" : "unavailable"}</DetailItem>
                 <DetailItem label="global resident memory">{concurrency?.globalResidentMemoryBytes !== undefined ? fmtBytes(concurrency.globalResidentMemoryBytes) : "unavailable"}</DetailItem>
               </div>
             </div>
@@ -187,9 +187,9 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
               <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-3">
                 {unifiedMlx ? (
                   <>
-                    <DetailItem label="active"><span title={MLX_ACTIVE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.activeBytes) : "unavailable"}</span></DetailItem>
-                    <DetailItem label="cache"><span title={MLX_CACHE_TITLE}>{entry.worker.memory ? fmtBytes(entry.worker.memory.cacheBytes) : "unavailable"}</span></DetailItem>
-                    <DetailItem label="peak">{entry.worker.memory ? fmtBytes(entry.worker.memory.peakActiveBytes) : "unavailable"}</DetailItem>
+                    <DetailItem label="active"><span title={MLX_ACTIVE_TITLE}>{formatMemoryValue(entry.worker.memory?.activeBytes, entry.worker.memory?.activeBytesSource) ?? "unavailable"}</span></DetailItem>
+                    <DetailItem label="cache"><span title={MLX_CACHE_TITLE}>{formatMemoryValue(entry.worker.memory?.cacheBytes, entry.worker.memory?.cacheBytesSource) ?? "unavailable"}</span></DetailItem>
+                    <DetailItem label="peak">{formatMemoryValue(entry.worker.memory?.peakActiveBytes, entry.worker.memory?.peakActiveBytesSource) ?? "unavailable"}</DetailItem>
                   </>
                 ) : (
                   <DetailItem label="vram">{entry.gpuMemoryBytes !== undefined ? fmtBytes(entry.gpuMemoryBytes) : "unavailable"}</DetailItem>
@@ -216,9 +216,11 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                   <DetailItem label="retained total">{entry.worker.retention.retainedTotal}</DetailItem>
                   <DetailItem label="sessions">{entry.worker.retention.retainedSessions}</DetailItem>
                   <DetailItem label="anchors">{entry.worker.retention.retainedAnchors}</DetailItem>
-                  <DetailItem label="retained bytes">{fmtBytes(entry.worker.retention.retainedBytes)}</DetailItem>
-                  <DetailItem label="session bytes">{fmtBytes(entry.worker.retention.sessionBytes)}</DetailItem>
-                  <DetailItem label="anchor bytes">{fmtBytes(entry.worker.retention.anchorBytes)}</DetailItem>
+                  <DetailItem label="retained bytes">{formatMemoryValue(entry.worker.retention.retainedBytes, entry.worker.retention.retainedBytesSource) ?? "unavailable"}</DetailItem>
+                  <DetailItem label="estimated retained">{formatMemoryValue(entry.worker.retention.estimatedRetainedBytes, entry.worker.retention.estimatedRetainedBytesSource) ?? "unavailable"}</DetailItem>
+                  <DetailItem label="session bytes">{formatMemoryValue(entry.worker.retention.sessionBytes, entry.worker.retention.sessionBytesSource) ?? "unavailable"}</DetailItem>
+                  <DetailItem label="anchor bytes">{formatMemoryValue(entry.worker.retention.anchorBytes, entry.worker.retention.anchorBytesSource) ?? "unavailable"}</DetailItem>
+                  <DetailItem label="evicted bytes">{formatMemoryValue(entry.worker.retention.evictedBytes, entry.worker.retention.evictedBytesSource) ?? "unavailable"}</DetailItem>
                   <DetailItem label="automatic checkpoints">
                     {entry.worker.retention.automaticCheckpointCount ?? "unknown"}
                   </DetailItem>
