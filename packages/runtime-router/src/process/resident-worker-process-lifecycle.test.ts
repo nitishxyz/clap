@@ -233,11 +233,15 @@ describe.serial("resident worker lifecycle races", () => {
         json_schema: { name: "answer", schema: { type: "object", required: ["answer"] } },
       },
       structured_output: { kind: "grammar", strength: "required", schema: { caller: true } },
-    } as Parameters<ResidentWorkerProcess["chat"]>[0], undefined, undefined, undefined, undefined,
-    testResidentChatOptions);
+    } as Parameters<ResidentWorkerProcess["chat"]>[0], undefined, undefined, undefined, undefined, {
+      ...testResidentChatOptions,
+      structuredOutput: {
+        kind: "json_schema", strength: "best_effort", schema: { type: "object", required: ["answer"] },
+      },
+    });
     const generate = (await commands(path)).find((command) => command.type === "generate")!;
     expect(generate.structured_output).toEqual({
-      kind: "json_schema", strength: "required", schema: { type: "object", required: ["answer"] },
+      kind: "json_schema", strength: "best_effort", schema: { type: "object", required: ["answer"] },
     });
     expect(generate.request).not.toHaveProperty("structured_output");
     expect(JSON.parse(generate.prompt as string)).not.toHaveProperty("structured_output");

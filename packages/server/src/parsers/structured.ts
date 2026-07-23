@@ -11,6 +11,14 @@ export type StructuredOutputErrorCode =
   | "schema_validation_failed"
   | "invalid_schema";
 
+export class StructuredOutputError extends Error {
+  constructor(readonly code: "structured_output_invalid" | "schema_unsupported", message: string,
+              readonly repaired = false) {
+    super(message);
+    this.name = "StructuredOutputError";
+  }
+}
+
 export type StructuredOutputOutcome = {
   ok: true;
   value: unknown;
@@ -62,7 +70,9 @@ export function parseStructuredOutput(text: string, format: JsonResponseFormat):
 export function formatStructuredOutput(text: string, format: JsonResponseFormat): string {
   const outcome = parseStructuredOutput(text, format);
   if (outcome.ok) return outcome.json;
-  throw new Error(outcome.error.message);
+  throw new StructuredOutputError(
+    outcome.error.code === "invalid_schema" ? "schema_unsupported" : "structured_output_invalid",
+    outcome.error.message);
 }
 
 export function structuredValidatorCacheSize(): number {

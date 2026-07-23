@@ -1345,7 +1345,7 @@ describe("clap server", () => {
     try {
       await writeFile(model, "gguf bytes");
       process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
-      process.env.CLAP_FAKE_WORKER_OUTPUT = "```json\n{\"ok\":true}\n```";
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "{\"ok\":true}";
 
       const app = createServer();
       const jsonObject = await app.request("/v1/chat/completions", {
@@ -1361,9 +1361,72 @@ describe("clap server", () => {
         body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }], response_format: { type: "json_schema", json_schema: { name: "Result", schema: { type: "object" } } } }),
       });
       expect((await jsonSchema.json()).choices[0].message.content).toBe(JSON.stringify({ ok: true }));
+
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "{\"z\":1,\"a\":2}";
+      const required = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_object", constraint: "required" } }),
+      });
+
+      expect(required.status).toBe(200);
+      expect((await required.json()).choices[0].message.content).toBe('{"ok":true}');
     } finally {
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
       restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("enforces structured capabilities and never streams partial JSON", async () => {
+    const previous = Object.fromEntries([
+      "CLAP_LLAMA_WORKER", "CLAP_FAKE_WORKER_OUTPUT", "CLAP_FAKE_WORKER_TOKENS",
+      "CLAP_FAKE_WORKER_STRUCTURED_MODE",
+    ].map((key) => [key, process.env[key]]));
+    const dir = await mkdtemp(join(tmpdir(), "clap-structured-dispatch-test-"));
+    const model = join(dir, "model.Q4_K_M.gguf");
+    const streamModel = join(dir, "stream.Q4_K_M.gguf");
+    const invalidModel = join(dir, "invalid.Q4_K_M.gguf");
+    try {
+      await writeFile(model, "gguf bytes");
+      await writeFile(streamModel, "gguf bytes");
+      await writeFile(invalidModel, "gguf bytes");
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE = "post_validate";
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '{"ok":true}';
+      const app = createServer();
+      const required = await app.request("/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_object", constraint: "required" } }),
+      });
+      expect(required.status).toBe(400);
+      expect((await required.json()).error.code).toBe("structured_output_capability_required");
+
+      delete process.env.CLAP_FAKE_WORKER_OUTPUT;
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(["```json\n{", "\"ok\":true", "}\n```"]);
+      const streamed = await app.request("/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: streamModel, stream: true, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_object", constraint: "best_effort" } }),
+      });
+      const events = await sseData(streamed);
+      const content = events.flatMap((event) => event.choices ?? [])
+        .map((choice) => choice.delta?.content).filter((value) => typeof value === "string");
+      expect(content).toEqual(['{"ok":true}']);
+
+      delete process.env.CLAP_FAKE_WORKER_TOKENS;
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "not json";
+      const invalid = await app.request("/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: invalidModel, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_object", constraint: "best_effort" } }),
+      });
+      expect(invalid.status).toBe(422);
+      expect((await invalid.json()).error.code).toBe("structured_output_invalid");
+    } finally {
+      for (const [key, value] of Object.entries(previous)) restoreEnv(key, value);
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -3211,7 +3274,10 @@ const send = (type, id, fields = {}) => {
   const next = sequence.get(id) ?? 0; sequence.set(id, next + 1);
   console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields }));
 };
-console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {} }));
+const structuredMode = process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE ?? "native";
+console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: {}, model_capabilities: {},
+  structured_output: { json_object: structuredMode, json_schema: structuredMode,
+    post_validation: true, max_schema_bytes: 65536 } }));
 for await (const chunk of Bun.stdin.stream()) {
   buffer += decoder.decode(chunk, { stream: true });
   let newline;

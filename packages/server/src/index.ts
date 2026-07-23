@@ -29,10 +29,12 @@ import {
 import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
+import type { StructuredOutputContract } from "@clap/worker-protocol";
 import { InsufficientModelMemoryError, listBackends, ModelLifecycleManager, ResidentWorkerRegistry,
   type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
+import { StructuredOutputError } from "./parsers/structured";
 import { join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
@@ -299,9 +301,15 @@ export function createServer(
       }, 400);
     }
     if (error instanceof InsufficientModelMemoryError) return insufficientMemoryResponse(c, error);
+    if (error instanceof StructuredOutputError) {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: error.message, type: "invalid_request_error", code: error.code },
+      }), 422);
+    }
     if ((error instanceof LlamaWorkerError || error instanceof MlxWorkerError) &&
         (error.code === "context_length_exceeded" || error.code === "max_output_tokens_exceeded" || error.code === "token_capability_unknown" ||
-          error.code === "invalid_cache_boundary" || error.code === "unsafe_cache_boundary" || error.code === "non_prefix_cache_boundary")) {
+          error.code === "structured_output_capability_required" || error.code === "invalid_cache_boundary" ||
+          error.code === "unsafe_cache_boundary" || error.code === "non_prefix_cache_boundary")) {
       return c.json(ErrorResponseSchema.parse({
         error: { message: error.message, type: "invalid_request_error", code: error.code },
       }), 400);
@@ -1462,7 +1470,9 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     // queued until worker prefill progress or the first token proves it is
     // actually running.
     handle?.phase("queued");
-    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"), { cacheIdentity });
+    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal,
+      (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"),
+      { cacheIdentity, structuredOutput: structuredOutputContract(request) });
     entry.worker = worker.info();
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
@@ -1631,7 +1641,8 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
         enqueueWrite(async () => {
           for (const delta of deltas) await writeDelta(delta);
         });
-      }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"), { cacheIdentity });
+      }, aborter.signal, (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"),
+      { cacheIdentity, structuredOutput: structuredOutputContract(request) });
       // A disconnected client makes queued SSE writes reject before the
       // worker's cancellation result arrives. Drain that queue without
       // propagating its transport error so the final worker cache decision can
@@ -1774,9 +1785,23 @@ function workerResultMetrics(result?: ResidentChatResult) {
 function backendErrorBody(error: unknown) {
   if (error instanceof InsufficientModelMemoryError) return insufficientMemoryBody(error);
   const message = error instanceof Error ? error.message : String(error);
+  const code = error instanceof StructuredOutputError ? error.code
+    : error instanceof LlamaWorkerError || error instanceof MlxWorkerError ? error.code
+    : "resident_worker_error";
   return ErrorResponseSchema.parse({
-    error: { message, type: "backend_error", code: "resident_worker_error" },
+    error: { message, type: "backend_error", code },
   });
+}
+
+function structuredOutputContract(request: ChatCompletionRequest): StructuredOutputContract | undefined {
+  const format = request.response_format;
+  if (!format || format.type === "text") return undefined;
+  const strength = format.constraint === "required"
+    || (format.type === "json_schema" && format.json_schema.strict === true)
+    ? "required" : "best_effort";
+  return format.type === "json_object"
+    ? { kind: "json_object", strength }
+    : { kind: "json_schema", strength, schema: format.json_schema.schema };
 }
 
 function insufficientMemoryBody(error: InsufficientModelMemoryError) {

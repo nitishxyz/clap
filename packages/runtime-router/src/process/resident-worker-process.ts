@@ -139,9 +139,25 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     if (!options?.cacheIdentity) throw new Error("resident chat requires an internal cache identity");
     const { cache_identity: _untrustedIdentity, structured_output: _untrustedContract, ...publicRequest } =
       request as ChatCompletionRequest & { cache_identity?: unknown; structured_output?: unknown };
-    const structuredOutput = normalizedStructuredOutput(publicRequest.response_format);
+    const structuredOutput = options.structuredOutput;
+    this.requireStructuredOutputCapability(structuredOutput);
     return this.sendControl("chat", publicRequest, onToken, signal, onProgress, onDispatch,
       undefined, options.cacheIdentity, structuredOutput);
+  }
+
+  private requireStructuredOutputCapability(contract?: StructuredOutputContract): void {
+    if (!contract) return;
+    const capabilities = this.active?.structuredOutputCapabilities;
+    const mode = capabilities?.[contract.kind] ?? "unsupported";
+    const supported = contract.strength === "required"
+      ? mode === "native"
+      : mode === "native" || mode === "post_validate";
+    const schemaBytes = contract.kind === "json_schema"
+      ? new TextEncoder().encode(JSON.stringify(contract.schema)).byteLength : 0;
+    if (supported && schemaBytes <= (capabilities?.max_schema_bytes ?? 0)) return;
+    throw this.workerError(
+      `active worker cannot satisfy ${contract.strength} ${contract.kind} structured output`,
+      "structured_output_capability_required");
   }
 
   async setMaxActive(maxActive: number, telemetry?: ActiveLimitTelemetry): Promise<void> {
@@ -525,11 +541,4 @@ function enrichWorkerError(message: string, backend: ResidentBackend, logPath?: 
     return `${message}${logHint} For GGUF/llama.cpp Metal failures, try a smaller quant such as Q4_K_M, reduce CLAP_LLAMA_CONTEXT/CLAP_LLAMA_BATCH/CLAP_LLAMA_UBATCH, lower CLAP_LLAMA_GPU_LAYERS, or use CPU fallback with CLAP_LLAMA_GPU_LAYERS=0.`;
   }
   return `${message}${logHint}`;
-}
-
-function normalizedStructuredOutput(format: ChatCompletionRequest["response_format"]): StructuredOutputContract | undefined {
-  if (!format || format.type === "text") return undefined;
-  const strength = format.constraint === "required" ? "required" : "best_effort";
-  if (format.type === "json_object") return { kind: "json_object", strength };
-  return { kind: "json_schema", strength, schema: format.json_schema.schema };
 }
