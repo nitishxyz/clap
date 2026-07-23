@@ -15,6 +15,7 @@
     "@clap/runtime-llama": "workspace:*",
     "@clap/runtime-mlx": "workspace:*",
     "@clap/runtime-router": "workspace:*",
+    "ajv": "^8.20.0",
     "hono": "^4.6.3",
     "zod": "^3.23.8"
   }

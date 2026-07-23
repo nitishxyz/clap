@@ -30,7 +30,7 @@ import {
 
 extendZodWithOpenApi(z);
 
-export function createOpenApiDocument() {
+export function createOpenApiDocument(): object {
   const registry = new OpenAPIRegistry();
   const CacheOutcomeSchema = z.object({
     category: z.enum([

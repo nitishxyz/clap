@@ -340,18 +340,69 @@ export const ChatToolSchema = z.object({
   }),
 });
 
+const StructuredConstraintSchema = z.enum(["best_effort", "required"]);
+const MAX_JSON_SCHEMA_BYTES = 64 * 1024;
+const MAX_JSON_SCHEMA_DEPTH = 32;
+const MAX_JSON_SCHEMA_PROPERTIES = 1024;
+
+const BoundedJsonSchema = z.record(z.unknown()).superRefine((schema, context) => {
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(schema);
+  } catch {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "schema must be JSON serializable" });
+    return;
+  }
+  if (new TextEncoder().encode(encoded).byteLength > MAX_JSON_SCHEMA_BYTES) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "schema exceeds the 64 KiB limit" });
+  }
+
+  let properties = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > MAX_JSON_SCHEMA_DEPTH) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "schema exceeds the maximum depth of 32" });
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.$ref === "string" && !record.$ref.startsWith("#")) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "remote schema references are not allowed" });
+    }
+    const declaredProperties = record.properties;
+    if (declaredProperties && typeof declaredProperties === "object" && !Array.isArray(declaredProperties)) {
+      properties += Object.keys(declaredProperties).length;
+      if (properties > MAX_JSON_SCHEMA_PROPERTIES) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "schema exceeds the limit of 1024 properties" });
+        return;
+      }
+    }
+    for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(schema, 1);
+});
+
 export const ResponseFormatSchema = z.union([
   z.object({ type: z.literal("text") }),
-  z.object({ type: z.literal("json_object") }),
+  z.object({
+    type: z.literal("json_object"),
+    constraint: StructuredConstraintSchema.optional(),
+  }),
   z.object({
     type: z.literal("json_schema"),
+    constraint: StructuredConstraintSchema.optional(),
     json_schema: z.object({
       name: z.string(),
       description: z.string().optional(),
-      schema: z.record(z.unknown()).optional(),
+      schema: BoundedJsonSchema,
       strict: z.boolean().optional(),
     }),
-  }),
+  }).transform((format) => format.json_schema.strict === true
+    ? { ...format, constraint: "required" as const }
+    : format),
 ]);
 
 export const CacheBoundaryLabelSchema = z.string()
@@ -648,6 +699,7 @@ export type UnloadModelResponse = z.infer<typeof UnloadModelResponseSchema>;
 export type OpenAIModelsResponse = z.infer<typeof OpenAIModelsResponseSchema>;
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 export type ChatToolCall = z.infer<typeof ChatToolCallSchema>;
+export type ResponseFormat = z.infer<typeof ResponseFormatSchema>;
 export type CacheBoundary = z.infer<typeof CacheBoundarySchema>;
 export type CacheIntent = z.infer<typeof CacheIntentSchema>;
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;

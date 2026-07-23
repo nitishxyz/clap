@@ -1,6 +1,6 @@
 import type { ChatCompletionRequest, ChatMessage, ChatToolCall } from "@clap/api";
 import { builtinProfiles, genericProfile, loadUserProfiles, resetUserProfileCache, type CustomParserSpec, type ModelProfileDefinition } from "./model-profiles";
-import { formatStructuredContent } from "./parsers/json";
+import { formatStructuredOutput } from "./parsers/structured";
 import { hasExplicitParserMarker, runToolParsers, toolParserPrimitives } from "./parsers/native";
 import { applyProfileMarkers, applyProfileReplacements, cleanupProtocolText, suppressProtocolMarkers } from "./parsers/plain";
 import { extractReasoning, recoverToolCallsFromReasoning } from "./parsers/reasoning";
@@ -87,7 +87,9 @@ export function parseAssistantOutput(text: string, request: ChatCompletionReques
     throw new Error("model emitted a tool call that Clap could not parse; retry the request");
   }
 
-  const formatted = formatStructuredContent(normalized.content, request);
+  const formatted = request.response_format && request.response_format.type !== "text"
+    ? formatStructuredOutput(normalized.content, request.response_format)
+    : normalized.content;
   return { content: formatted, reasoning: normalized.reasoning, finishReason: "stop" };
 }
 

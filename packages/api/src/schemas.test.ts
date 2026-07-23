@@ -1,5 +1,49 @@
 import { describe, expect, test } from "bun:test";
-import { ChatCompletionRequestSchema, ErrorResponseSchema, LoadedModelSchema, ResponseRequestSchema } from "./schemas";
+import { ChatCompletionRequestSchema, ErrorResponseSchema, LoadedModelSchema, ResponseFormatSchema, ResponseRequestSchema } from "./schemas";
+
+describe("structured response format schema", () => {
+  test("accepts optional constraints and maps legacy strict schemas to required", () => {
+    expect(ResponseFormatSchema.parse({ type: "json_object" })).toEqual({ type: "json_object" });
+    expect(ResponseFormatSchema.parse({ type: "json_object", constraint: "best_effort" })).toEqual({
+      type: "json_object", constraint: "best_effort",
+    });
+    expect(ResponseFormatSchema.parse({
+      type: "json_schema",
+      json_schema: { name: "Result", strict: true, schema: { type: "object" } },
+    })).toMatchObject({ type: "json_schema", constraint: "required" });
+  });
+
+  test("requires schemas and accepts local references", () => {
+    expect(ResponseFormatSchema.safeParse({
+      type: "json_schema", json_schema: { name: "Missing" },
+    }).success).toBe(false);
+    expect(ResponseFormatSchema.safeParse({
+      type: "json_schema",
+      json_schema: {
+        name: "LocalRef",
+        schema: { $defs: { item: { type: "string" } }, type: "object", properties: { item: { $ref: "#/$defs/item" } } },
+      },
+    }).success).toBe(true);
+  });
+
+  test("rejects remote references and bounded schema violations", () => {
+    const nested: Record<string, unknown> = { type: "object" };
+    let cursor = nested;
+    for (let index = 0; index < 33; index += 1) {
+      cursor.properties = { child: { type: "object" } };
+      cursor = (cursor.properties as Record<string, Record<string, unknown>>).child!;
+    }
+    const formats = [
+      { type: "json_schema", json_schema: { name: "Remote", schema: { $ref: "https://example.com/schema.json" } } },
+      { type: "json_schema", json_schema: { name: "Large", schema: { description: "x".repeat(65_536) } } },
+      { type: "json_schema", json_schema: { name: "Deep", schema: nested } },
+      { type: "json_schema", json_schema: { name: "Wide", schema: {
+        type: "object", properties: Object.fromEntries(Array.from({ length: 1025 }, (_, index) => [`p${index}`, { type: "string" }])),
+      } } },
+    ];
+    for (const format of formats) expect(ResponseFormatSchema.safeParse(format).success).toBe(false);
+  });
+});
 
 describe("loaded model retention schema", () => {
   const model = {

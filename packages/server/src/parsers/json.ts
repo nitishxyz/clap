@@ -56,14 +56,6 @@ export function normalizeToolCall(value: unknown, index: number): ChatToolCall |
   };
 }
 
-export function formatStructuredContent(text: string, request: ChatCompletionRequest): string {
-  if (!request.response_format || request.response_format.type === "text") return text;
-  const parsed = parseJsonLike(text);
-  if (parsed === undefined) return text;
-  if (request.response_format.type === "json_object" && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) return text;
-  return JSON.stringify(parsed);
-}
-
 export function parseJsonLike(text: string): unknown {
   const trimmed = text.trim();
   for (const candidate of jsonCandidates(trimmed)) {

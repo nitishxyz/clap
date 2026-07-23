@@ -3138,6 +3138,13 @@
                     "enum": [
                       "json_object"
                     ]
+                  },
+                  "constraint": {
+                    "type": "string",
+                    "enum": [
+                      "best_effort",
+                      "required"
+                    ]
                   }
                 },
                 "required": [
@@ -3151,6 +3158,13 @@
                     "type": "string",
                     "enum": [
                       "json_schema"
+                    ]
+                  },
+                  "constraint": {
+                    "type": "string",
+                    "enum": [
+                      "best_effort",
+                      "required"
                     ]
                   },
                   "json_schema": {
@@ -3173,7 +3187,8 @@
                       }
                     },
                     "required": [
-                      "name"
+                      "name",
+                      "schema"
                     ]
                   }
                 },
@@ -3762,6 +3777,13 @@
                         "enum": [
                           "json_object"
                         ]
+                      },
+                      "constraint": {
+                        "type": "string",
+                        "enum": [
+                          "best_effort",
+                          "required"
+                        ]
                       }
                     },
                     "required": [
@@ -3775,6 +3797,13 @@
                         "type": "string",
                         "enum": [
                           "json_schema"
+                        ]
+                      },
+                      "constraint": {
+                        "type": "string",
+                        "enum": [
+                          "best_effort",
+                          "required"
                         ]
                       },
                       "json_schema": {
@@ -3797,7 +3826,8 @@
                           }
                         },
                         "required": [
-                          "name"
+                          "name",
+                          "schema"
                         ]
                       }
                     },
@@ -3834,6 +3864,13 @@
                     "enum": [
                       "json_object"
                     ]
+                  },
+                  "constraint": {
+                    "type": "string",
+                    "enum": [
+                      "best_effort",
+                      "required"
+                    ]
                   }
                 },
                 "required": [
@@ -3847,6 +3884,13 @@
                     "type": "string",
                     "enum": [
                       "json_schema"
+                    ]
+                  },
+                  "constraint": {
+                    "type": "string",
+                    "enum": [
+                      "best_effort",
+                      "required"
                     ]
                   },
                   "json_schema": {
@@ -3869,7 +3913,8 @@
                       }
                     },
                     "required": [
-                      "name"
+                      "name",
+                      "schema"
                     ]
                   }
                 },
@@ -9697,6 +9742,13 @@
                             "enum": [
                               "json_object"
                             ]
+                          },
+                          "constraint": {
+                            "type": "string",
+                            "enum": [
+                              "best_effort",
+                              "required"
+                            ]
                           }
                         },
                         "required": [
@@ -9710,6 +9762,13 @@
                             "type": "string",
                             "enum": [
                               "json_schema"
+                            ]
+                          },
+                          "constraint": {
+                            "type": "string",
+                            "enum": [
+                              "best_effort",
+                              "required"
                             ]
                           },
                           "json_schema": {
@@ -9732,7 +9791,8 @@
                               }
                             },
                             "required": [
-                              "name"
+                              "name",
+                              "schema"
                             ]
                           }
                         },
@@ -10396,6 +10456,13 @@
                                 "enum": [
                                   "json_object"
                                 ]
+                              },
+                              "constraint": {
+                                "type": "string",
+                                "enum": [
+                                  "best_effort",
+                                  "required"
+                                ]
                               }
                             },
                             "required": [
@@ -10409,6 +10476,13 @@
                                 "type": "string",
                                 "enum": [
                                   "json_schema"
+                                ]
+                              },
+                              "constraint": {
+                                "type": "string",
+                                "enum": [
+                                  "best_effort",
+                                  "required"
                                 ]
                               },
                               "json_schema": {
@@ -10431,7 +10505,8 @@
                                   }
                                 },
                                 "required": [
-                                  "name"
+                                  "name",
+                                  "schema"
                                 ]
                               }
                             },
@@ -10468,6 +10543,13 @@
                             "enum": [
                               "json_object"
                             ]
+                          },
+                          "constraint": {
+                            "type": "string",
+                            "enum": [
+                              "best_effort",
+                              "required"
+                            ]
                           }
                         },
                         "required": [
@@ -10481,6 +10563,13 @@
                             "type": "string",
                             "enum": [
                               "json_schema"
+                            ]
+                          },
+                          "constraint": {
+                            "type": "string",
+                            "enum": [
+                              "best_effort",
+                              "required"
                             ]
                           },
                           "json_schema": {
@@ -10503,7 +10592,8 @@
                               }
                             },
                             "required": [
-                              "name"
+                              "name",
+                              "schema"
                             ]
                           }
                         },
