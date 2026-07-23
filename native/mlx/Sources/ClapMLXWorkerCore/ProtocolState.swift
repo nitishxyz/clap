@@ -88,13 +88,20 @@ public func decodeV1Envelope(_ line: String) throws -> V1RequestEnvelope {
   // Convert the canonical v1 envelope into the existing internal request shape.
   // Envelope routing fields never leak through to model request decoding.
   let prompt = object["prompt"] as? String
+  let canonicalRequest = object["request"] as? [String: Any]
   object.removeValue(forKey: "protocol")
   object.removeValue(forKey: "request_id")
   object.removeValue(forKey: "target_request_id")
   object.removeValue(forKey: "prompt")
+  object.removeValue(forKey: "request")
   object["id"] = type == "cancel" ? target : id
   object["type"] = type == "generate" ? "chat" : type
-  if let prompt {
+  if type == "generate", let canonicalRequest {
+    for (key, value) in canonicalRequest where key != "cache_identity"
+        && key != "structured_output" {
+      object[key] = value
+    }
+  } else if let prompt {
     object["messages"] = [["role": "user", "content": prompt]]
   }
   let payload = try JSONSerialization.data(withJSONObject: object)

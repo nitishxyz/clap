@@ -37,6 +37,29 @@ struct ProtocolStateTests {
     #expect(resolveGenerateModel(requestModel: nil, residentModel: nil) == nil)
   }
 
+  @Test("canonical request payload reaches chat preparation without nested authority")
+  func canonicalRequestPayload() throws {
+    let identity = try fixtureIdentity()
+    let object: [String: Any] = [
+      "protocol": 1, "type": "generate", "request_id": "canonical",
+      "prompt": "serialized fallback", "cache_identity": identity,
+      "request": [
+        "model": "caller-model", "messages": [["role": "user", "content": "actual"]],
+        "max_tokens": 17, "cache": ["boundaries": [["kind": "messages",
+          "through_message": 0, "label": "stable"]]],
+        "cache_identity": ["forged": true],
+      ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object)
+    let envelope = try decodeV1Envelope(String(decoding: data, as: UTF8.self))
+    let payload = try JSONSerialization.jsonObject(with: envelope.legacyPayload) as! [String: Any]
+    #expect((payload["messages"] as? [[String: Any]])?.first?["content"] as? String == "actual")
+    #expect(payload["max_tokens"] as? Int == 17)
+    #expect(payload["cache"] != nil)
+    #expect((payload["cache_identity"] as? [String: Any])?["version"] as? Int == 1)
+    #expect(payload["request"] == nil)
+  }
+
   @Test("structured output validates typed contracts and schema bounds")
   func structuredOutputContracts() throws {
     let identity = try fixtureIdentity()
