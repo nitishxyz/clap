@@ -8,6 +8,7 @@ const packageDir = join(root, "native", "mlx");
 const cacheDir = join(root, "native", "cache");
 const libexec = join(root, "libexec");
 const buildConfig = process.env.CLAP_SWIFT_CONFIGURATION ?? "release";
+const binary = join(packageDir, ".build", "arm64-apple-macosx", buildConfig, "clap-mlx");
 
 if (process.platform !== "darwin" || process.arch !== "arm64") {
   console.error("clap-mlx can only be built on macOS arm64 with Xcode/Swift installed.");
@@ -15,9 +16,12 @@ if (process.platform !== "darwin" || process.arch !== "arm64") {
 }
 
 await run(["cargo", "build", "--release", "-p", "clap-cache-ffi"], cacheDir);
+// SwiftPM does not track changes to the Rust static archive passed through
+// unsafe linker flags. Remove the final product so every Rust cache rebuild
+// necessarily relinks clap-mlx instead of shipping stale coordinator code.
+await rm(binary, { force: true });
 await run(["swift", "build", "--package-path", packageDir, "-c", buildConfig]);
 
-const binary = join(packageDir, ".build", "arm64-apple-macosx", buildConfig, "clap-mlx");
 if (!existsSync(binary)) {
   console.error(`swift build completed but ${binary} does not exist`);
   process.exit(1);
