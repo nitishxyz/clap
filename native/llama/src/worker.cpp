@@ -55,6 +55,28 @@ void Worker::send_v1_completion(const RequestCompletion& completion) {
     result["finish_reason"] = completion.finish_reason;
     result["usage"] = {{"prompt_tokens", completion.usage.prompt_tokens},
                        {"completion_tokens", completion.usage.completion_tokens}};
+    const auto& facts = completion.cache;
+    nlohmann::json cache{{"hit", facts.hit}, {"reused_tokens", facts.reused_tokens},
+        {"target_slot", facts.target_slot}, {"target_generation", facts.target_generation},
+        {"candidates", facts.candidates}, {"prompt_token_hash", facts.prompt_token_hash},
+        {"prompt_token_count", facts.prompt_token_count}, {"evicted_slots", facts.evicted_slots},
+        {"decision_us", facts.decision_us},
+        {"planned_reuse_tokens", facts.planned_reuse_tokens},
+        {"realized_reuse_tokens", facts.realized_reuse_tokens},
+        {"side_request", facts.side_request}, {"slot", facts.slot}};
+    if (facts.reuse_kind) cache["reuse_kind"] = *facts.reuse_kind;
+    if (facts.reuse_scope) cache["reuse_scope"] = *facts.reuse_scope;
+    if (facts.name_space) cache["namespace"] = *facts.name_space;
+    if (facts.donor_slot) cache["donor_slot"] = *facts.donor_slot;
+    if (facts.donor_generation) cache["donor_generation"] = *facts.donor_generation;
+    if (facts.miss_reason) cache["miss_reason"] = *facts.miss_reason;
+    if (facts.fallback) cache["fallback"] = *facts.fallback;
+    if (facts.stable_boundary_token_hash) {
+      cache["stable_boundary_token_hash"] = *facts.stable_boundary_token_hash;
+      cache["stable_boundary_token_count"] = *facts.stable_boundary_token_count;
+      cache["stable_boundary_kind"] = *facts.stable_boundary_kind;
+    }
+    result["cache"] = std::move(cache);
   }
   v1_->completed(completion.id, std::move(result));
   generated_content_.erase(completion.id);
