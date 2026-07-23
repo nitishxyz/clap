@@ -2,7 +2,7 @@
 
 Clap is a local model server prototype with an OpenAI-compatible API.
 
-See `docs/clap-local-model-server-plan.md` for the product plan and milestone docs under `docs/` for runnable slices.
+See `docs/clap-local-model-server-plan.md` for the product plan and milestone docs under `docs/` for runnable slices. The completed inference runtime is documented in [`docs/inference-runtime-baseline.md`](docs/inference-runtime-baseline.md) and [`docs/native-runtimes.md`](docs/native-runtimes.md).
 
 ## Install
 
@@ -67,15 +67,17 @@ If `/clap/v1/health` is already healthy but no live managed PID is recorded, `se
 
 `clap chat` and `clap run` auto-start the background server when no healthy server is available.
 
-State and logs default to `~/.clap`:
+State and logs default to `~/.clap` (`$CLAP_HOME`):
 
 ```txt
 ~/.clap/server.json
 ~/.clap/server.log
 ~/.clap/server.err.log
+~/.clap/logs/workers/<backend>/<model-identity-hash>/<launch-id>.stderr.log
+~/.clap/logs/workers/<backend>/<model-identity-hash>/<launch-id>.json
 ```
 
-Set `CLAP_HOME` to move state/logs and `CLAP_BASE_URL` to change the server URL. Long local inference requests use a 240 second Bun socket idle timeout by default; set `CLAP_SERVER_IDLE_TIMEOUT_SECONDS` to another number of seconds (clamped to Bun's 255 second maximum), or `0` to disable the timeout if supported by your Bun version. `bun run cli server install` writes a per-user macOS LaunchAgent or Linux systemd user-service template with start/log commands.
+Managed server stdout/stderr stay in `server.log` / `server.err.log`. Each native worker launch writes its own stderr log and JSON sidecar (PID, protocol version, lifecycle phase, exit/crash classification); there is no shared backend-global worker log. Set `CLAP_HOME` to move state/logs and `CLAP_BASE_URL` to change the server URL. Long local inference requests use a 240 second Bun socket idle timeout by default; set `CLAP_SERVER_IDLE_TIMEOUT_SECONDS` to another number of seconds (clamped to Bun's 255 second maximum), or `0` to disable the timeout if supported by your Bun version. `bun run cli server install` writes a per-user macOS LaunchAgent or Linux systemd user-service template with start/log commands.
 
 List model IDs the server can serve with `bun run cli models` or `bun run cli models list`. Add `--aliases` to include curated aliases and their download/support status. The default output stays concise: each ID with backend, format, and status for use with `clap run`, `clap chat`, or the OpenAI-compatible API. Add `--json` to print the rich `/clap/v1/models` response with display name, provider/source, served modalities and capabilities, inferred upstream metadata, limits, architecture/model type, quantization, and local cache path.
 
@@ -98,17 +100,19 @@ bun run cli models --active
 bun run cli unload mlx-community/gemma-4-e4b-it-4bit --backend mlx
 ```
 
-Management APIs are `POST /clap/v1/models/load`, `POST /clap/v1/models/unload`, and `GET /clap/v1/runtime/models`. Keep-alive accepts durations such as `30s`, `15m`, `1h`, `1d`, or `always`; chat requests automatically load/touch the model and extend expiry. `always` pins the entry until manual unload or server shutdown. Loaded MLX and GGUF entries point at resident JSON-line worker processes (`worker.state: "resident"`, with PID when available). The MLX worker keeps its model container loaded across chats, and the GGUF worker links directly against llama.cpp APIs so it loads GGUF weights once on `load` and reuses the same model/context for subsequent chats until unload, expiry, or shutdown. The server clears lifecycle state and shuts down resident workers on `SIGINT`/`SIGTERM`.
+Management APIs are `POST /clap/v1/models/load`, `POST /clap/v1/models/unload`, and `GET /clap/v1/runtime/models`. Keep-alive accepts durations such as `30s`, `15m`, `1h`, `1d`, or `always`; chat requests automatically load/touch the model and extend expiry. `always` pins the entry until manual unload or server shutdown.
+
+Loaded entries are resident native workers under TypeScript process ownership (`ResidentWorkerProcess`). Global load admission serializes launches, reserves estimated memory, protects active/pinned/loading residents, and fails closed when available memory is unavailable or only estimated without safe headroom. Workers speak strict protocol v1 (not a legacy unversioned shape): `load`, `generate`, `cancel`, `set_max_active`, `unload`, and `shutdown`, with sequenced events after a single `ready`. Generate requests carry a server-derived authenticated `cache_identity`; structured-output contracts use `json_object` / `json_schema` with `best_effort` or `required` strength. Effective capabilities after load drive behavior (cache ops, structured-output modes, modalities, token limits); backend labels are only for binary selection and format validation. Request priority is one of `interactive`, `normal`, or `background`. Memory telemetry is honest: every value has bytes, source (`measured` / `estimated` / `unavailable`), and basis — never a measured zero for a missing observation. `GET /clap/v1/runtime/models` surfaces residency, provenance, capabilities, and per-launch log links. Details: [`docs/inference-runtime-baseline.md`](docs/inference-runtime-baseline.md). The server clears lifecycle state and shuts down resident workers on `SIGINT`/`SIGTERM`.
 
 ## OpenAI Chat Compatibility
 
-`POST /v1/chat/completions` accepts OpenAI-style text requests plus `tools`, `tool_choice`, `parallel_tool_calls`, `response_format` (`text`, `json_object`, or `json_schema`), `stop`, `seed`, `top_p`, and penalty fields. Clap serializes tool definitions and JSON-output instructions into the local text prompt, then parses generated JSON tool-call shapes back into OpenAI-compatible `tool_calls` for non-streaming responses and streaming deltas. JSON mode/schema support is best effort: valid generated JSON is normalized, while unparsable text is returned as raw assistant content. Text content parts are accepted; `image_url` parts return a precise unsupported-content error until a served multimodal runtime path exists.
+`POST /v1/chat/completions` accepts OpenAI-style text requests plus `tools`, `tool_choice`, `parallel_tool_calls`, `response_format` (`text`, `json_object`, or `json_schema`), `stop`, `seed`, `top_p`, and penalty fields. Clap serializes tool definitions and JSON-output instructions into the local text prompt, then parses generated JSON tool-call shapes back into OpenAI-compatible `tool_calls` for non-streaming responses and streaming deltas. Structured output is capability-driven: the loaded model advertises `native`, `post_validate`, or `unsupported` for each contract; `required` fails when the capability cannot satisfy the request, while `best_effort` may fall back and normalize valid JSON or return unparsable text as raw content. Text content parts are accepted; `image_url` parts return a precise unsupported-content error until a served multimodal runtime path exists.
 
 Streaming is real token streaming for both MLX and GGUF backends: resident workers emit tokens as they are generated and `stream: true` requests receive incremental SSE `delta.content` / `delta.reasoning` chunks as soon as the first token is decoded. An incremental output filter routes `<think>`/Harmony channel markers into reasoning deltas, applies `stop` sequences mid-stream, and holds back tool-call protocol markers so raw markers never appear in streamed content; parsed `tool_calls` are emitted as deltas once the model output is complete. `clap chat` and `clap run` stream by default (pass `--no-stream` to opt out).
 
 Native workers handle requests robustly: the GGUF worker parses request JSON with a real JSON parser (nlohmann/json), so message content containing JSON — tool results, tool-call histories, code — survives round trips intact. `stop` sequences halt generation inside the worker (not post-hoc), `presence_penalty`/`frequency_penalty`/`top_k` are applied in the sampler chain, and both workers report real `prompt_tokens`/`completion_tokens` plus a real `finish_reason` (`stop` or `length`) that flow into API `usage` fields (the MLX worker reads them from MLX's generation info). The MLX worker sends the full chat history (system prompts, tool instructions, multi-turn context, tool results) through the model's chat template instead of only the last user message. Tool-call parsing repairs the almost-valid JSON that small local models commonly emit — missing or extra closing brackets and truncated argument objects are balanced before parsing, so `{"tool_calls":[{...}}}` still yields a structured `tool_calls` entry instead of leaking raw JSON as content.
 
-Generation is cancellable and cache-aware: when a client disconnects mid-stream (or aborts a non-streaming request), the server sends a `cancel` message to the resident worker and both the GGUF and MLX workers stop decoding within a few tokens, freeing the GPU immediately. Both workers maintain multiple KV cache slots (default 4; `CLAP_LLAMA_SLOTS` / `CLAP_MLX_SLOTS`), so any number of concurrent sessions on the same model stay warm at once: each request picks the slot with the longest common token prefix (multi-turn conversations only ingest the new suffix — warmed first-token latency drops from seconds to ~100ms), unrelated prompts recycle the least-recently-used slot, and side requests such as agent title generation never evict an active conversation. Any number of models can be resident simultaneously (each in its own worker process, subject to RAM), and requests for one model are processed serially per worker while different models run independently.
+Generation is cancellable and cache-aware: when a client disconnects mid-stream (or aborts a non-streaming request), the server sends a protocol-v1 `cancel` to the resident worker and both backends stop decoding within a few tokens. Cache reuse is planned by the Rust coordinator against authenticated cache identity, generations, and leases; native adapters only execute validated physical KV copy/trim/clear. Priority-aware schedulers use `interactive` / `normal` / `background` with FIFO within a class. Any number of models can be resident simultaneously (each in its own worker process, subject to global admission and RAM); different models run independently.
 
 Clap uses a model/template-aware parser registry, inspired by Ollama, vLLM, SGLang, and Unsloth behavior, to normalize common local-model protocol markers without showing raw template text. It selects parser families from model ids and cached local metadata (`tokenizer_config.json`, `tokenizer.json`, `config.json`, and `generation_config.json`) such as Qwen, DeepSeek, Mistral, Llama, Gemma, Harmony/GPT-OSS, Hermes, xLAM, and Functionary, then extracts reasoning before parsing tools from remaining content. `<|channel|>thought`, `<|channel|>analysis`, commentary, and `<think>...</think>` become structured `reasoning` / `reasoning_content` fields or Responses `reasoning` output items. `<|channel|>final` becomes normal assistant content. Tool markers from Harmony/Codex, Hermes/Nous/Qwen (`<tool_call>`, `<|tool_call_start|>`), DeepSeek special tokens, Llama `<|python_tag|>`, Mistral `[TOOL_CALLS]`, FunctionGemma `call:name{...}`, and fenced JSON tool calls become OpenAI-compatible `tool_calls` / Responses `function_call` items, with raw markers removed from visible content and Ollama response text. In active tool mode, args-only JSON can be inferred as a tool call when it matches exactly one tool schema or the preceding text explicitly names that tool; JSON response-format answers are preserved. Requests without `max_tokens` default to 4096 output tokens before reaching the native runtime.
 
@@ -212,7 +216,7 @@ If an alias is not cached, chat requests return a pull instruction. Unknown mode
 
 ## Bundled Native Runtimes
 
-Packaged builds should include real native workers at:
+Packaged builds include modular resident native workers (not one-shot subprocesses or mocks). Full discovery, protocol, and log layout: [`docs/native-runtimes.md`](docs/native-runtimes.md).
 
 ```txt
 libexec/clap-llama
@@ -220,16 +224,17 @@ libexec/clap-mlx
 libexec/mlx.metallib
 ```
 
-Runtime discovery checks explicit environment variables first (`CLAP_LLAMA_WORKER`, `CLAP_MLX_WORKER`), then bundled paths relative to the installed CLI/server executable, then repo development paths under `libexec/`. `clap server status` reports backend reasons as `configured`, `bundled`, or `missing`.
-
-Build the real direct llama.cpp worker before running GGUF models:
+Runtime discovery checks `CLAP_LLAMA_WORKER` / `CLAP_MLX_WORKER` first, then bundled paths relative to the installed executable, then repo `libexec/`. `clap server status` / `GET /clap/v1/backends` report reasons such as `configured`, `bundled`, `missing`, `not_installed`, or `unsupported`.
 
 ```bash
 bun run runtime:llama:vendor
-bun run runtime:llama:build
+bun run runtime:llama:build   # GGUF: CMake + focused modules under native/llama/src
+bun run runtime:mlx:build     # MLX: macOS arm64 only
+bun run native:build          # both workers
+bun run bundle:check
 ```
 
-`runtime:llama:build` configures llama.cpp with CMake, enables Metal on macOS, builds the llama.cpp static libraries, links `native/llama/clap-llama.cpp` directly against llama.cpp APIs, and installs `libexec/clap-llama`. The worker loads GGUF weights once per resident `load` command and reuses them for subsequent `chat` commands; it does not shell out to `llama-cli`.
+`runtime:llama:build` builds the Rust cache FFI and C++ modules, links a thin `native/llama/src/main.cpp` entrypoint against llama.cpp, and installs `libexec/clap-llama`. The worker loads weights once on protocol-v1 `load` and serves subsequent `generate` requests in-process until unload/shutdown.
 
 Before packaging, copy or build real worker binaries and verify them:
 
@@ -240,7 +245,16 @@ bun run bundle:prepare
 bun run bundle:check
 ```
 
-`bundle:check` fails if `libexec/clap-llama` or `libexec/clap-mlx` is absent, empty, or not executable. It also requires `libexec/mlx.metallib`, the MLX Metal shader library loaded by the Swift MLX worker.
+`bundle:check` fails if `libexec/clap-llama` or `libexec/clap-mlx` is absent, empty, or not executable. It also requires `libexec/mlx.metallib`.
+
+Cache correctness and architecture gates (see baseline for tiers and `CLAP_CACHE_TEST_REQUIRE_ASSETS`):
+
+```bash
+bun run native:cache:tier-a
+bun run native:cache:tier-b
+bun run native:cache:tier-c
+bun run native:test
+```
 
 ## GGUF / llama.cpp Worker
 
@@ -256,16 +270,17 @@ The native worker is discovered from `CLAP_LLAMA_WORKER`, bundled `libexec/clap-
 CLAP_LLAMA_WORKER="/path/to/clap-llama" bun run cli run ./model.gguf "hello"
 ```
 
-`clap-llama` is a direct llama.cpp resident worker. It reads JSON-line `load`, `chat`, `unload`, and `shutdown` commands, keeps the loaded GGUF model/context in process, and emits JSON-line `loaded`, `token`, `done`, or `error` events. Missing workers and worker `error` events are reported as backend errors instead of successful empty assistant responses.
+`clap-llama` is a modular llama.cpp resident worker over strict protocol v1. It accepts `load` / `generate` / `cancel` / `set_max_active` / `unload` / `shutdown`, keeps the loaded GGUF model/context in process, and emits sequenced `accepted` / `started` / `token` / `content` / `completed` / `failed` events (plus unscoped `ready`, `telemetry`, `diagnostic`). There is no legacy protocol fallback and no one-shot `llama-cli` path. Missing workers and protocol/backend faults surface as errors with a per-launch log hint, never as empty successful completions.
 
-GGUF runtime knobs are available for large models or Metal memory pressure:
+GGUF runtime knobs for large models or Metal memory pressure (also via `[llama]` in `clap.toml`):
 
-- `CLAP_LLAMA_CONTEXT` controls llama.cpp context size, default `4096`.
-- `CLAP_LLAMA_BATCH` controls logical batch size, default `128`.
-- `CLAP_LLAMA_UBATCH` controls physical micro-batch size, default `64`.
-- `CLAP_LLAMA_GPU_LAYERS` controls GPU offload, default `999`; set `0` for CPU fallback.
+- `CLAP_LLAMA_CONTEXT` — context size (default `4096`)
+- `CLAP_LLAMA_MAX_SESSION_CTX` / `CLAP_LLAMA_MAX_OUTPUT` — session and output bounds
+- `CLAP_LLAMA_BATCH` / `CLAP_LLAMA_UBATCH` — logical batch and micro-batch (defaults `128` / `64`)
+- `CLAP_LLAMA_GPU_LAYERS` — GPU offload (default `999`; `0` for CPU)
+- `CLAP_LLAMA_KV_TYPE` / `CLAP_LLAMA_RETAINED_MAX` — KV type and retention
 
-If a model fails with `prompt exceeds context window`, reduce the prompt/tool history or increase `CLAP_LLAMA_CONTEXT` if your machine has enough memory. If a model fails with `llama_decode failed` or the worker log contains `kIOGPUCommandBufferCallbackErrorOutOfMemory`, try a smaller quant such as `Q4_K_M`, lower context/batch/micro-batch, reduce GPU layers, or run with `CLAP_LLAMA_GPU_LAYERS=0`.
+If a model fails with `prompt exceeds context window`, reduce history or raise `CLAP_LLAMA_CONTEXT` when memory allows. On `llama_decode failed` or Metal OOM in the per-launch stderr log, try a smaller quant (`Q4_K_M`), lower context/batch, fewer GPU layers, or `CLAP_LLAMA_GPU_LAYERS=0`.
 
 Real GGUF residency smoke test:
 
@@ -299,7 +314,7 @@ bun run bundle:check
 
 `runtime:mlx:build` builds `native/mlx`, installs `libexec/clap-mlx`, compiles the generated MLX Metal kernels from the `mlx-swift` checkout with `xcrun metal`, and installs `libexec/mlx.metallib` next to the worker. Keep those two files together when packaging or when setting `CLAP_MLX_WORKER`.
 
-The Swift package in `native/mlx` uses `mlx-swift-lm` with Hugging Face tokenizer integration to load local MLX model directories and emit Clap JSON-line token/content messages. Cached Hugging Face MLX repos can be run by repo id after pulling/downloading:
+The Swift package in `native/mlx` uses `mlx-swift-lm` with Hugging Face tokenizer integration. Focused modules under `native/mlx/Sources/clap-mlx` implement the same protocol-v1 transport as GGUF (stdout is protocol-only; diagnostics go to the per-launch stderr log). Cached Hugging Face MLX repos can be run by repo id after pulling:
 
 ```bash
 bun run cli pull mlx-community/gemma-4-e4b-it-4bit --backend mlx
