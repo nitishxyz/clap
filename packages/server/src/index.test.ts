@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
 import { createServer, idleTimeoutFromEnv, inferParserFamilies, normalizeCacheIntent } from "./index";
 import { mapInsufficientModelMemoryError } from "./index";
-import { InsufficientModelMemoryError } from "@clap/runtime-router";
+import { InsufficientModelMemoryError, ResidentWorkerRegistry } from "@clap/runtime-router";
 
 // Tests mutate fake model cache directories directly; disable the model list
 // memo so every request observes the current directory state.
@@ -19,6 +19,16 @@ process.env.CLAP_MODEL_OS_HEADROOM_BYTES = "0";
 process.env.CLAP_MODEL_RUNTIME_HEADROOM_BYTES = "0";
 
 const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
+
+function ampleMemoryResidents(): ResidentWorkerRegistry {
+  const residents = new ResidentWorkerRegistry();
+  residents.memorySnapshot = async () => ({
+    physicalMemoryBytes: 1_000_000_000_000,
+    availableMemoryBytes: 1_000_000_000_000,
+    residentBytesByPid: new Map(),
+  });
+  return residents;
+}
 
 describe("clap server", () => {
   test("maps memory admission failures to a safe retryable model error", () => {
@@ -801,7 +811,7 @@ describe("clap server", () => {
       await writeFile(join(model, "tokenizer.json"), "{}");
       await writeFile(join(model, "model.safetensors"), "fake");
 
-      const response = await createServer().request("/v1/chat/completions", {
+      const response = await createServer(ampleMemoryResidents()).request("/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -3206,7 +3216,7 @@ describe("clap server", () => {
       await writeFile(join(repoDir, "tokenizer.json"), "{}");
       await writeFile(join(repoDir, "model.safetensors"), "weights");
 
-      const response = await createServer().request("/v1/chat/completions", {
+      const response = await createServer(ampleMemoryResidents()).request("/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
