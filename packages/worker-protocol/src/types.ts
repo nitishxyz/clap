@@ -26,12 +26,13 @@ export type StructuredOutputStrength = typeof STRUCTURED_OUTPUT_STRENGTHS[number
 export type StructuredOutputMode = typeof STRUCTURED_OUTPUT_MODES[number];
 
 export type MemorySource = "measured" | "estimated" | "unavailable";
-export type MeasuredMemoryBasis = "resident_rss" | "runtime_allocator" | "os_available";
+export type MeasuredMemoryBasis = "resident_rss" | "runtime_allocator" | "worker_allocator" | "os_available";
 export type EstimatedMemoryBasis =
   | "prior_observation"
   | "model_artifacts"
   | "architecture_metadata"
   | "configured_cache"
+  | "cache_components"
   | "context_configuration"
   | "conservative_fallback";
 export type UnavailableMemoryBasis = "not_observed" | "not_supported" | "not_reported";

@@ -94,10 +94,25 @@ struct WorkerTiming: Encodable {
   let contended_prefill_quantum: Int
 }
 
+struct WorkerMemoryBytes: Encodable {
+  let value: UInt64?
+
+  func encode(to encoder: any Encoder) throws {
+    var container = encoder.singleValueContainer()
+    if let value { try container.encode(value) } else { try container.encodeNil() }
+  }
+}
+
 struct WorkerMemory: Encodable {
-  let active_bytes: Int
-  let cache_bytes: Int
-  let peak_active_bytes: Int
+  let active_bytes: WorkerMemoryBytes
+  let active_bytes_source: String
+  let active_bytes_basis: String
+  let cache_bytes: WorkerMemoryBytes
+  let cache_bytes_source: String
+  let cache_bytes_basis: String
+  let peak_active_bytes: WorkerMemoryBytes
+  let peak_active_bytes_source: String
+  let peak_active_bytes_basis: String
 }
 
 struct WorkerActivePolicyInputs: Encodable {
@@ -139,9 +154,21 @@ struct WorkerRetention: Encodable {
   let retained_total: Int
   let retained_sessions: Int
   let retained_anchors: Int
-  let retained_bytes: UInt64
-  let session_bytes: UInt64
-  let anchor_bytes: UInt64
+  let retained_bytes: WorkerMemoryBytes
+  let retained_bytes_source: String
+  let retained_bytes_basis: String
+  let session_bytes: WorkerMemoryBytes
+  let session_bytes_source: String
+  let session_bytes_basis: String
+  let anchor_bytes: WorkerMemoryBytes
+  let anchor_bytes_source: String
+  let anchor_bytes_basis: String
+  let evicted_bytes: WorkerMemoryBytes
+  let evicted_bytes_source: String
+  let evicted_bytes_basis: String
+  let estimated_retained_bytes: WorkerMemoryBytes
+  let estimated_retained_bytes_source: String
+  let estimated_retained_bytes_basis: String
   let automatic_checkpoint_count: Int
   let automatic_checkpoint_bytes: UInt64
   let automatic_checkpoint_budget_bytes: UInt64

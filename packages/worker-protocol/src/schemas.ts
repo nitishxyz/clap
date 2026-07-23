@@ -13,9 +13,9 @@ const requestBase = { protocol, request_id: requestId };
 const fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
 const displayLabel = z.string().min(1).max(128);
 const memoryBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const measuredMemoryBasis = z.enum(["resident_rss", "runtime_allocator", "os_available"]);
+const measuredMemoryBasis = z.enum(["resident_rss", "runtime_allocator", "worker_allocator", "os_available"]);
 const estimatedMemoryBasis = z.enum([
-  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "context_configuration",
+  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "cache_components", "context_configuration",
   "conservative_fallback",
 ]);
 const unavailableMemoryBasis = z.enum(["not_observed", "not_supported", "not_reported"]);

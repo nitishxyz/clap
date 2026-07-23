@@ -34,6 +34,32 @@ const status = await process.exited;
 if (status !== 0) throw new Error(`clap-mlx exited ${status}: ${stderr}`);
 const events = output.trim().split("\n").filter(Boolean).map((line) =>
   WorkerEventSchema.parse(JSON.parse(line)));
+const telemetryVector = WorkerEventSchema.parse({
+  protocol: 1,
+  type: "telemetry",
+  telemetry: {
+    memory: {
+      active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "worker_allocator",
+      cache_bytes: null, cache_bytes_source: "unavailable", cache_bytes_basis: "not_observed",
+      peak_active_bytes: 2048, peak_active_bytes_source: "measured",
+      peak_active_bytes_basis: "worker_allocator",
+    },
+    retention: {
+      retained_bytes: 0, retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
+      session_bytes: 0, session_bytes_source: "estimated", session_bytes_basis: "cache_components",
+      anchor_bytes: 0, anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
+      evicted_bytes: null, evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
+      estimated_retained_bytes: 0, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "cache_components",
+    },
+  },
+});
+if (telemetryVector.type !== "telemetry" ||
+    telemetryVector.telemetry.memory?.active_bytes_basis !== "worker_allocator" ||
+    telemetryVector.telemetry.retention?.retained_bytes_source !== "estimated" ||
+    telemetryVector.telemetry.retention?.evicted_bytes !== null) {
+  throw new Error("MLX telemetry must preserve honest allocator and cache provenance");
+}
 if (events[0]?.type !== "ready") throw new Error("v1 ready must be the first event");
 if (events[0].structured_output?.json_object !== "post_validate" ||
     events[0].structured_output?.json_schema !== "post_validate" ||

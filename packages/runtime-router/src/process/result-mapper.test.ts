@@ -52,5 +52,14 @@ describe("worker result mapper", () => {
       active_bytes: null, active_bytes_source: "unavailable", active_bytes_basis: "not_reported",
       cache_bytes: 512, peak_active_bytes: 2048,
     })).toBeUndefined();
+    expect(parseWorkerMemory({
+      active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "worker_allocator",
+      cache_bytes: 512, cache_bytes_source: "measured", cache_bytes_basis: "worker_allocator",
+      peak_active_bytes: 2048, peak_active_bytes_source: "measured",
+      peak_active_bytes_basis: "worker_allocator",
+    })).toMatchObject({
+      activeBytesSource: "measured", activeBytesBasis: "worker_allocator",
+      cacheBytesSource: "measured", cacheBytesBasis: "worker_allocator",
+    });
   });
 });

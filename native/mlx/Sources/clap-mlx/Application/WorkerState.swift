@@ -98,7 +98,7 @@ final class WorkerState {
     let metadata = modelRuntime.metadata!
     Memory.clearCache()
     let memory = memorySnapshot()
-    activePolicyModelBytes = memory.active_bytes > 0 ? UInt64(memory.active_bytes) : nil
+    activePolicyModelBytes = memory.active_bytes.value
     activePolicy = ActiveConcurrencyPolicy.selectMLX(ActiveConcurrencyInputs(
       explicitMax: configuration.explicitMaxActive,
       physicalMemoryBytes: physicalMemoryBytes,
@@ -126,7 +126,7 @@ final class WorkerState {
     debugLog("context length: \(modelRuntime.tokenCapabilities.effectiveContextLength > 0 ? String(modelRuntime.tokenCapabilities.effectiveContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
     debugLog("model loaded; eos token ids: \(modelRuntime.eosTokenIds.sorted())")
     debugLog("active concurrency: mode=\(activePolicy.mode) selected=\(activePolicy.selectedMax) reason=\(activePolicy.reason) memory_ceiling=\(activePolicy.memoryCeiling)")
-    debugLog("mlx memory after load: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
+    debugLog("mlx memory after load: active=\(memory.active_bytes.value.map(String.init) ?? "unavailable") cache=\(memory.cache_bytes.value.map(String.init) ?? "unavailable") peak=\(memory.peak_active_bytes.value.map(String.init) ?? "unavailable")")
   }
 
   func updateMaxActive(_ requested: Int, control: ControlRequest) {
@@ -147,7 +147,7 @@ final class WorkerState {
     guard activeEmpty, pendingEmpty, allocatorNeedsIdleClear else { return }
     Memory.clearCache()
     let memory = memorySnapshot()
-    debugLog("mlx memory after idle clear: active=\(memory.active_bytes) cache=\(memory.cache_bytes) peak=\(memory.peak_active_bytes)")
+    debugLog("mlx memory after idle clear: active=\(memory.active_bytes.value.map(String.init) ?? "unavailable") cache=\(memory.cache_bytes.value.map(String.init) ?? "unavailable") peak=\(memory.peak_active_bytes.value.map(String.init) ?? "unavailable")")
     emit(memory: memory, retention: retentionSnapshot())
     allocatorNeedsIdleClear = false
   }

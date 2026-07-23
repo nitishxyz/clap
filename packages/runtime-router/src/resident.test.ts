@@ -59,6 +59,15 @@ describe("worker retention telemetry", () => {
     expect(parseWorkerRetention({
       ...legacy, retained_bytes_source: "unavailable", retained_bytes_basis: "not_reported",
     })).toBeUndefined();
+    expect(parseWorkerRetention({
+      ...legacy,
+      retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
+      session_bytes_source: "estimated", session_bytes_basis: "cache_components",
+      anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
+      retained_bytes: 0, session_bytes: 0, anchor_bytes: 0,
+    })).toMatchObject({
+      retainedBytes: 0, retainedBytesSource: "estimated", retainedBytesBasis: "cache_components",
+    });
   });
 });
 

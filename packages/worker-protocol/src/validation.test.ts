@@ -57,12 +57,26 @@ describe("worker protocol validation", () => {
       cache_bytes: 0, cache_bytes_source: "estimated", cache_bytes_basis: "configured_cache",
       peak_active_bytes: 2048,
     } }))).toMatchObject({ telemetry: { memory: { active_bytes_source: "measured" } } });
+    expect(decodeWorkerEvent(event({ memory: {
+      active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "worker_allocator",
+      cache_bytes: null, cache_bytes_source: "unavailable", cache_bytes_basis: "not_observed",
+      peak_active_bytes: 2048, peak_active_bytes_source: "measured",
+      peak_active_bytes_basis: "worker_allocator",
+    } }))).toMatchObject({ telemetry: { memory: { cache_bytes: null } } });
     expect(decodeWorkerEvent(event({ retention: {
       retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_reported",
       evicted_bytes: null, evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
       estimated_retained_bytes: 4096, estimated_retained_bytes_source: "estimated",
       estimated_retained_bytes_basis: "context_configuration",
     } }))).toMatchObject({ telemetry: { retention: { retained_bytes: null } } });
+    expect(decodeWorkerEvent(event({ retention: {
+      retained_bytes: 0, retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
+      session_bytes: 0, session_bytes_source: "estimated", session_bytes_basis: "cache_components",
+      anchor_bytes: 0, anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
+      evicted_bytes: null, evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
+      estimated_retained_bytes: 0, estimated_retained_bytes_source: "estimated",
+      estimated_retained_bytes_basis: "cache_components",
+    } }))).toMatchObject({ telemetry: { retention: { retained_bytes_source: "estimated" } } });
 
     for (const memory of [
       { active_bytes: null, active_bytes_source: "measured", active_bytes_basis: "runtime_allocator", cache_bytes: 0, peak_active_bytes: 1 },
