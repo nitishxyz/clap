@@ -2,7 +2,7 @@ import type { ModelTokenCapabilities } from "@clap/api";
 import { EffectiveModelCapabilitiesSchema, WorkerMemoryTelemetrySchema, type EffectiveModelCapabilities,
   type MemoryBasis, type MemorySource } from "@clap/worker-protocol";
 import { parseWorkerRetention, parseWorkerTokenCapabilities, type ResidentCacheInfo,
-  type ResidentChatResult, type ResidentMlxMemory, type ResidentMlxRetention,
+  type EffectiveCapabilities, type ResidentChatResult, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentProgress, type ResidentTiming, type ResidentUsage } from "../resident";
 import type { WorkerLaunchPaths, WorkerRequestPhase } from "./types";
 
@@ -18,7 +18,7 @@ export type PendingWorkerResult = {
   cache?: ResidentCacheInfo;
   timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
-  effectiveModelCapabilities?: EffectiveModelCapabilities;
+  effectiveCapabilities?: EffectiveCapabilities;
   launchPaths?: WorkerLaunchPaths;
   phase: WorkerRequestPhase;
   cleanup?: () => void;
@@ -31,7 +31,7 @@ export type WorkerPayloadContext = {
   setMemory: (memory: ResidentMlxMemory) => void;
   setRetention: (retention: ResidentMlxRetention) => void;
   setTokenCapabilities: (capabilities: ModelTokenCapabilities) => void;
-  setEffectiveModelCapabilities: (capabilities: EffectiveModelCapabilities) => void;
+  setEffectiveCapabilities: (capabilities: EffectiveCapabilities) => void;
   onRetention: (previous: ResidentMlxRetention | undefined, current: ResidentMlxRetention) => void;
   workerError: (message: string, code?: string) => Error;
 };
@@ -46,6 +46,23 @@ export function mapWorkerResultPayload(
     ? { content: resultContent }
     : {};
   return { ...resultWithoutContent, ...content, id: requestId, done: true };
+}
+
+export function mapEffectiveCapabilities(capabilities: EffectiveModelCapabilities): EffectiveCapabilities {
+  return {
+    cache: {
+      partialSuffixTrim: capabilities.cache.partial_suffix_trim,
+      partialPrefixBranch: capabilities.cache.partial_prefix_branch,
+      wholeStateCopy: capabilities.cache.whole_state_copy,
+      promptBoundarySnapshots: capabilities.cache.prompt_boundary_snapshots,
+      quantizedKv: capabilities.cache.quantized_kv,
+    },
+    generation: {
+      structuredOutput: capabilities.generation.structured_output,
+      toolTemplateSupport: capabilities.generation.tool_templates,
+    },
+    modalities: capabilities.modalities,
+  };
 }
 
 export function mapWorkerTelemetryPayload(
@@ -101,7 +118,9 @@ export function applyWorkerPayload(
     const parsedCapabilities = parseWorkerTokenCapabilities(message.token_capabilities);
     if (parsedCapabilities) context.setTokenCapabilities(parsedCapabilities);
     const parsedEffectiveCapabilities = EffectiveModelCapabilitiesSchema.safeParse(message.effective_model_capabilities);
-    if (parsedEffectiveCapabilities.success) context.setEffectiveModelCapabilities(parsedEffectiveCapabilities.data);
+    const effectiveCapabilities = parsedEffectiveCapabilities.success
+      ? mapEffectiveCapabilities(parsedEffectiveCapabilities.data) : undefined;
+    if (effectiveCapabilities) context.setEffectiveCapabilities(effectiveCapabilities);
     const pending = id ? context.pending.get(id) : undefined;
     if (!pending) return;
     if (message.started === true) {
@@ -255,11 +274,11 @@ export function applyWorkerPayload(
       pending.finishReason = message.finish_reason;
     }
     if (parsedCapabilities) pending.tokenCapabilities = parsedCapabilities;
-    if (parsedEffectiveCapabilities.success) pending.effectiveModelCapabilities = parsedEffectiveCapabilities.data;
+    if (effectiveCapabilities) pending.effectiveCapabilities = effectiveCapabilities;
     if (message.loaded === true || message.unloaded === true || message.done === true) {
       if (id) context.pending.delete(id);
       pending.cleanup?.();
       if (pending.cache && !pending.cache.workerLaunchId) pending.cache.workerLaunchId = context.workerLaunchId;
-      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities, effectiveModelCapabilities: pending.effectiveModelCapabilities });
+      pending.resolve({ content: pending.content.join(""), usage: pending.usage, finishReason: pending.finishReason, cache: pending.cache, timing: pending.timing, tokenCapabilities: pending.tokenCapabilities, effectiveCapabilities: pending.effectiveCapabilities });
     }
   }

@@ -325,6 +325,25 @@ export type DashboardLoadedModel = {
       evictionCount: number;
     };
     tokenCapabilities?: ModelTokenCapabilities;
+    effectiveCapabilities?: {
+      cache: {
+        partialSuffixTrim: boolean;
+        partialPrefixBranch: boolean;
+        wholeStateCopy: boolean;
+        promptBoundarySnapshots: boolean;
+        quantizedKv: boolean;
+      };
+      generation: {
+        structuredOutput: {
+          json_object: "native" | "post_validate" | "unsupported";
+          json_schema: "native" | "post_validate" | "unsupported";
+          post_validation: boolean;
+          max_schema_bytes: number;
+        };
+        toolTemplateSupport: boolean;
+      };
+      modalities: { input: ["text"]; output: ["text"] };
+    };
   };
   usage?: { rssBytes: number; cpuPercent: number };
   gpuMemoryBytes?: number;

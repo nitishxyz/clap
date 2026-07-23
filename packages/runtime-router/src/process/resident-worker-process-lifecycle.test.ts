@@ -159,7 +159,7 @@ describe.serial("resident worker lifecycle races", () => {
         json_object: "native", json_schema: "post_validate", post_validation: true, max_schema_bytes: 65_536,
       },
       workerCapabilities: { backend: "llama", scheduling: { interleaved: true } },
-      effectiveModelCapabilities: { modalities: { input: ["text"], output: ["text"] } },
+      effectiveCapabilities: { modalities: { input: ["text"], output: ["text"] } },
     });
 
     const close = worker.shutdownAsync();
@@ -167,7 +167,7 @@ describe.serial("resident worker lifecycle races", () => {
     await close;
     expect(worker.info()).toMatchObject({ state: "not_started", loadState: "not_started" });
     expect(worker.info().structuredOutputCapabilities).toBeUndefined();
-    expect(worker.info().effectiveModelCapabilities).toBeUndefined();
+    expect(worker.info().effectiveCapabilities).toBeUndefined();
     expect(events.map((event) => event.loadState)).toEqual([
       "starting", "loading", "resident", "closing", "not_started",
     ]);
@@ -270,15 +270,18 @@ describe.serial("resident worker lifecycle races", () => {
     const model = join(root, "model.gguf"); await writeFile(model, "model");
     const worker = new ResidentWorkerProcess("key", "llama", model);
     await worker.load();
+    expect(worker.info().effectiveCapabilities?.generation.structuredOutput.json_schema).toBe("native");
     expect(worker.info().structuredOutputCapabilities?.json_schema).toBe("native");
     await expect(worker.chat({ model: "key", messages: [{ role: "user", content: "x" }], stream: false }, undefined, undefined, undefined, undefined, testResidentChatOptions))
       .rejects.toMatchObject({ code: "worker_protocol_error" });
     expect(worker.info().structuredOutputCapabilities).toBeUndefined();
+    expect(worker.info().effectiveCapabilities).toBeUndefined();
     await worker.load();
     const replacement = worker.info().launchId;
     expect(worker.info().structuredOutputCapabilities).toEqual({
       json_object: "post_validate", json_schema: "unsupported", post_validation: true, max_schema_bytes: 1024,
     });
+    expect(worker.info().effectiveCapabilities?.generation.structuredOutput.json_schema).toBe("unsupported");
     await Bun.sleep(350);
     expect(worker.info()).toMatchObject({ state: "resident", launchId: replacement });
     expect(worker.info().structuredOutputCapabilities?.json_schema).toBe("unsupported");

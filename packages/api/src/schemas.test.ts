@@ -108,6 +108,21 @@ describe("loaded model retention schema", () => {
       worker: { ...model.worker, residency: { ...residency, observedRssBytes: 1_000, observedRssSource: null } },
     })).toThrow();
   });
+
+  test("exposes strict effective capability groups on loaded workers", () => {
+    const effectiveCapabilities = {
+      cache: { partialSuffixTrim: true, partialPrefixBranch: false, wholeStateCopy: true,
+        promptBoundarySnapshots: true, quantizedKv: false },
+      generation: { structuredOutput: { json_object: "native" as const, json_schema: "post_validate" as const,
+        post_validation: true, max_schema_bytes: 65_536 }, toolTemplateSupport: true },
+      modalities: { input: ["text"] as ["text"], output: ["text"] as ["text"] },
+    };
+    expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, effectiveCapabilities } })
+      .worker.effectiveCapabilities).toEqual(effectiveCapabilities);
+    expect(() => LoadedModelSchema.parse({ ...model, worker: { ...model.worker,
+      effectiveCapabilities: { ...effectiveCapabilities, generation: { toolTemplateSupport: true } },
+    } })).toThrow();
+  });
 });
 
 describe("structured model memory errors", () => {

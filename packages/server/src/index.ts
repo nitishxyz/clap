@@ -886,22 +886,6 @@ export function createServer(
     if (!principal) throw new Error("Authenticated cache principal is unavailable");
 
     const templateInfo = await resolveParserTemplateInfo(resolved.model);
-    let routedRequest: ChatCompletionRequest;
-    try {
-      routedRequest = prepareChatRequest(
-        { ...request, model: resolved.model.modelPath ?? request.model },
-        { nativeTools: resolved.model.backend === "mlx" && Boolean(templateInfo?.hasToolCalls) },
-      );
-    } catch (error) {
-      handle.finish({
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-        errorCode: "unsupported_content_part",
-      });
-      return c.json(ErrorResponseSchema.parse({
-        error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
-      }), 400);
-    }
     const secretLease = await installationSecrets.acquireSecret();
     let derivedIdentity: DerivedCacheIdentity;
     try {
@@ -919,12 +903,13 @@ export function createServer(
       throw error;
     }
     const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
-    if (isGgufModel(routedRequest.model)) {
-      await assertGgufModelPath(routedRequest.model);
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity, secretLease.release);
+    const localModelPath = resolved.model.modelPath ?? request.model;
+    if (isGgufModel(localModelPath)) {
+      await assertGgufModelPath(localModelPath);
+      return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity, secretLease.release);
     }
-    if (await isMlxModelDirectory(routedRequest.model)) {
-      return dispatchWithLimit(c, resolved.model, routedRequest, templateInfo, handle, cacheIdentity, secretLease.release);
+    if (await isMlxModelDirectory(localModelPath)) {
+      return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity, secretLease.release);
     }
 
     secretLease.release();
@@ -966,7 +951,7 @@ export function createServer(
   async function dispatchWithLimit(
     c: Parameters<typeof streamSSE>[0],
     model: ResolvedModel,
-    routedRequest: ChatCompletionRequest,
+    request: ChatCompletionRequest,
     templateInfo: ParserTemplateInfo | undefined,
     handle: RequestHandle,
     cacheIdentity: CacheIdentity,
@@ -990,7 +975,26 @@ export function createServer(
     try {
       const worker = residents.getOrCreate(lifecycleKey(model), model.backend, model.modelPath ?? model.input,
         workerDescriptor(model));
-      await worker.load();
+      const workerInfo = await worker.load();
+      let routedRequest: ChatCompletionRequest;
+      try {
+        routedRequest = prepareChatRequest(
+          { ...request, model: model.modelPath ?? request.model },
+          { nativeTools: workerInfo.effectiveCapabilities?.generation.toolTemplateSupport === true
+              && templateInfo?.hasToolCalls === true },
+        );
+      } catch (error) {
+        release();
+        releaseIdentityLease();
+        handle.finish({
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+          errorCode: "unsupported_content_part",
+        });
+        return c.json(ErrorResponseSchema.parse({
+          error: { message: error instanceof Error ? error.message : String(error), type: "invalid_request_error", code: "unsupported_content_part" },
+        }), 400);
+      }
       if (routedRequest.stream) {
         const loaded = lifecycle.beginUsage(model);
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
@@ -1810,7 +1814,7 @@ type StructuredWorkerInfo = ReturnType<ReturnType<ResidentWorkerRegistry["getOrC
 function structuredBackendMode(worker: StructuredWorkerInfo, request: ChatCompletionRequest): "native" | "post_validate" | undefined {
   const contract = structuredOutputContract(request);
   if (!contract) return undefined;
-  const mode = worker.structuredOutputCapabilities?.[contract.kind];
+  const mode = worker.effectiveCapabilities?.generation.structuredOutput[contract.kind];
   return mode === "native" || mode === "post_validate" ? mode : undefined;
 }
 

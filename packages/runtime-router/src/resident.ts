@@ -1,6 +1,6 @@
 import type { ChatCompletionRequest, LoadedModel, ModelTokenCapabilities } from "@clap/api";
 import { WorkerRetentionTelemetrySchema, type CacheIdentity, type MemoryBasis, type MemorySource,
-  type EffectiveModelCapabilities, type StructuredOutputCapabilities, type StructuredOutputContract,
+  type StructuredOutputCapabilities, type StructuredOutputContract,
   type WorkerCapabilities } from "@clap/worker-protocol";
 import { freemem, totalmem } from "node:os";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
@@ -18,6 +18,21 @@ export { ResidentWorkerProcess } from "./process/resident-worker-process";
 export type { ResidentCacheInfo } from "./process/types";
 export type ResidentBackend = LoadedModel["backend"];
 
+export type EffectiveCapabilities = {
+  cache: {
+    partialSuffixTrim: boolean;
+    partialPrefixBranch: boolean;
+    wholeStateCopy: boolean;
+    promptBoundarySnapshots: boolean;
+    quantizedKv: boolean;
+  };
+  generation: {
+    structuredOutput: StructuredOutputCapabilities;
+    toolTemplateSupport: boolean;
+  };
+  modalities: { input: ["text"]; output: ["text"] };
+};
+
 export type ResidentWorkerInfo = {
   pid?: number;
   launchId?: string;
@@ -32,7 +47,7 @@ export type ResidentWorkerInfo = {
   retention?: ResidentMlxRetention;
   tokenCapabilities?: ModelTokenCapabilities;
   workerCapabilities?: WorkerCapabilities;
-  effectiveModelCapabilities?: EffectiveModelCapabilities;
+  effectiveCapabilities?: EffectiveCapabilities;
   structuredOutputCapabilities?: StructuredOutputCapabilities;
 };
 
@@ -142,7 +157,7 @@ export type ResidentChatResult = {
   cache?: ResidentCacheInfo;
   timing?: ResidentTiming;
   tokenCapabilities?: ModelTokenCapabilities;
-  effectiveModelCapabilities?: EffectiveModelCapabilities;
+  effectiveCapabilities?: EffectiveCapabilities;
 };
 
 export type ResidentProgress = (done: number, total: number) => void;

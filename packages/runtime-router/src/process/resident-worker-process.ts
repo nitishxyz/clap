@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, ModelTokenCapabilities } from "@clap/api";
-import type { EffectiveModelCapabilities, StructuredOutputContract, WorkerCapabilities } from "@clap/worker-protocol";
+import type { StructuredOutputContract, WorkerCapabilities } from "@clap/worker-protocol";
 import { getLlamaWorkerStatus, LlamaWorkerError } from "@clap/runtime-llama";
 import { getMlxWorkerStatus, MlxWorkerError } from "@clap/runtime-mlx";
 import { V1RequestTracker, type ResidentProtocolFact } from "../protocol/request-tracker";
@@ -10,7 +10,8 @@ import { applyWorkerPayload, mapWorkerResultPayload, mapWorkerTelemetryPayload,
   type PendingWorkerResult } from "./result-mapper";
 import { type ActiveLimitTelemetry, type ResidentBackend, type ResidentChatResult,
   type ResidentCrashListener, type ResidentMlxMemory, type ResidentMlxRetention,
-  type ResidentChatOptions, type ResidentProgress, type ResidentWorkerHandle, type ResidentWorkerInfo } from "../resident";
+  type EffectiveCapabilities, type ResidentChatOptions, type ResidentProgress, type ResidentWorkerHandle,
+  type ResidentWorkerInfo } from "../resident";
 import type { WorkerLaunchContext, WorkerLaunchPaths, WorkerLoadState, WorkerLoadStateEvent,
   WorkerModelDescriptor, WorkerRssSampler } from "./types";
 import { measuredMemory, unavailableMemory, type MemoryValue } from "../residency/types";
@@ -50,7 +51,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
   private memory?: ResidentMlxMemory;
   private retention?: ResidentMlxRetention;
   private tokenCapabilities?: ModelTokenCapabilities;
-  private effectiveModelCapabilities?: EffectiveModelCapabilities;
+  private effectiveCapabilities?: EffectiveCapabilities;
   private workerLaunchId?: string;
   private lastLaunchPaths?: WorkerLaunchPaths;
   private crashClassification?: string;
@@ -84,8 +85,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       retention: this.retention,
       tokenCapabilities: this.tokenCapabilities,
       workerCapabilities: this.active?.workerCapabilities,
-      effectiveModelCapabilities: this.effectiveModelCapabilities,
-      structuredOutputCapabilities: this.effectiveModelCapabilities?.generation.structured_output,
+      effectiveCapabilities: this.effectiveCapabilities,
+      structuredOutputCapabilities: this.effectiveCapabilities?.generation.structuredOutput,
     };
   }
 
@@ -125,7 +126,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
           undefined, undefined, launch);
         if (this.active !== launch || launch.closePromise) throw this.workerError("resident worker shut down");
         this.tokenCapabilities = result.tokenCapabilities;
-        this.effectiveModelCapabilities = result.effectiveModelCapabilities;
+        this.effectiveCapabilities = result.effectiveCapabilities;
         this.loaded = true;
         this.setLoadState("resident", launch);
         this.consecutiveCrashes = 0;
@@ -151,7 +152,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
 
   private requireStructuredOutputCapability(contract?: StructuredOutputContract): void {
     if (!contract) return;
-    const capabilities = this.effectiveModelCapabilities?.generation.structured_output;
+    const capabilities = this.effectiveCapabilities?.generation.structuredOutput;
     const mode = capabilities?.[contract.kind] ?? "unsupported";
     const supported = contract.strength === "required"
       ? mode === "native"
@@ -227,7 +228,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
     this.memory = undefined;
     this.retention = undefined;
     this.tokenCapabilities = undefined;
-    this.effectiveModelCapabilities = undefined;
+    this.effectiveCapabilities = undefined;
     const status = this.backend === "mlx" ? getMlxWorkerStatus() : getLlamaWorkerStatus();
     if (!status.command) {
       const message = status.reason ?? `${this.backend} worker is not available`;
@@ -319,7 +320,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
-      this.effectiveModelCapabilities = undefined;
+      this.effectiveCapabilities = undefined;
       this.setLoadState("not_started");
     }
     await this.ignoreMetadataFailure(() => this.launchLogs.finalize(launch.context, exitCode, classification));
@@ -383,7 +384,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.pending.delete(fact.requestId); pending.cleanup?.();
       if (pending.phase === "load" && this.active === launch && !launch.closePromise) {
         this.tokenCapabilities = undefined;
-        this.effectiveModelCapabilities = undefined;
+        this.effectiveCapabilities = undefined;
         this.setLoadState("starting", launch);
       }
       pending.reject(this.workerError(fact.error.message, fact.error.code, pending.launchPaths?.stderrPath)); return;
@@ -401,8 +402,8 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       setMemory: (memory) => { if (this.active === launch) this.memory = memory; },
       setRetention: (retention) => { if (this.active === launch) this.retention = retention; },
       setTokenCapabilities: (capabilities) => { if (this.active === launch) this.tokenCapabilities = capabilities; },
-      setEffectiveModelCapabilities: (capabilities) => {
-        if (this.active === launch) this.effectiveModelCapabilities = capabilities;
+      setEffectiveCapabilities: (capabilities) => {
+        if (this.active === launch) this.effectiveCapabilities = capabilities;
       },
       onRetention: (previous, current) => { if (this.active === launch) this.onTelemetry?.(this, previous, current); },
       workerError: (detail, code) => this.workerError(detail, code, launch.context.paths.stderrPath),
@@ -425,7 +426,7 @@ export class ResidentWorkerProcess implements ResidentWorkerHandle {
       this.memory = undefined;
       this.retention = undefined;
       this.tokenCapabilities = undefined;
-      this.effectiveModelCapabilities = undefined;
+      this.effectiveCapabilities = undefined;
       this.setLoadState("not_started");
     }
     try { launch.proc.kill(); } catch { /* process already exited */ }

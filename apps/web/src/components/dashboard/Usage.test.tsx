@@ -110,6 +110,24 @@ describe("worker resource presentation", () => {
     expect(html).toContain("memory admission");
   });
 
+  test("shows effective capability groups for loaded models", () => {
+    const model = { ...worker, worker: { ...worker.worker, effectiveCapabilities: {
+      cache: { partialSuffixTrim: false, partialPrefixBranch: true, wholeStateCopy: true,
+        promptBoundarySnapshots: true, quantizedKv: false },
+      generation: { structuredOutput: { json_object: "post_validate", json_schema: "unsupported",
+        post_validation: true, max_schema_bytes: 65_536 }, toolTemplateSupport: true },
+      modalities: { input: ["text"], output: ["text"] },
+    } } };
+    const html = renderToStaticMarkup(<LoadedModels models={[model] as never} now={0}
+      actions={{ busy: {}, run: async () => undefined } as never} />);
+    expect(html).toContain('data-model-details="capabilities"');
+    expect(html).toContain("Effective Capabilities");
+    expect(html).toContain("post validate");
+    expect(html).toContain("tool template");
+    expect(html).toContain("prefix branch");
+    expect(html).toContain("text → text");
+  });
+
   test("keeps common loaded-model details ordered before backend memory", () => {
     const html = renderToStaticMarkup(
       <LoadedModels

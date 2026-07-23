@@ -205,17 +205,17 @@ export const WorkerCapabilitiesSchema = z.object({
   }).strict(),
 }).strict();
 
-export const EffectiveModelCapabilitiesSchema = z.object({
+export const EffectiveCapabilitiesSchema = z.object({
   cache: z.object({
-    partial_suffix_trim: z.boolean(),
-    partial_prefix_branch: z.boolean(),
-    whole_state_copy: z.boolean(),
-    prompt_boundary_snapshots: z.boolean(),
-    quantized_kv: z.boolean(),
+    partialSuffixTrim: z.boolean(),
+    partialPrefixBranch: z.boolean(),
+    wholeStateCopy: z.boolean(),
+    promptBoundarySnapshots: z.boolean(),
+    quantizedKv: z.boolean(),
   }).strict(),
   generation: z.object({
-    structured_output: StructuredOutputCapabilitiesSchema,
-    tool_templates: z.boolean(),
+    structuredOutput: StructuredOutputCapabilitiesSchema,
+    toolTemplateSupport: z.boolean(),
   }).strict(),
   modalities: z.object({
     input: z.tuple([z.literal("text")]),
@@ -327,7 +327,7 @@ export const LoadedModelSchema = z.object({
     }).optional(),
     tokenCapabilities: ModelTokenCapabilitiesSchema.optional(),
     workerCapabilities: WorkerCapabilitiesSchema.optional(),
-    effectiveModelCapabilities: EffectiveModelCapabilitiesSchema.optional(),
+    effectiveCapabilities: EffectiveCapabilitiesSchema.optional(),
   }),
 });
 

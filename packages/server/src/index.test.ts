@@ -614,6 +614,52 @@ describe("clap server", () => {
     expect(inferParserFamilies("", '{"model_type":"qwen3_moe","enable_thinking":true}')).toEqual(["qwen"]);
   });
 
+  test("native tool preparation follows effective capabilities, not backend labels", async () => {
+    const previous = Object.fromEntries([
+      "CLAP_LLAMA_WORKER", "CLAP_FAKE_WORKER_OUTPUT", "CLAP_FAKE_WORKER_REQUEST_LOG",
+      "CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT",
+    ].map((key) => [key, process.env[key]]));
+    const dir = await mkdtemp(join(tmpdir(), "clap-effective-tools-test-"));
+    const fallbackModel = join(dir, "fallback.gguf");
+    const nativeModel = join(dir, "native.gguf");
+    const requestLog = join(dir, "requests.jsonl");
+    try {
+      await writeFile(fallbackModel, "gguf bytes");
+      await writeFile(nativeModel, "gguf bytes");
+      await writeFile(join(dir, "tokenizer_config.json"), JSON.stringify({
+        chat_template: "{% if tools %}{{ tools }}{{ tool_calls }}{% endif %}",
+      }));
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "ok";
+      process.env.CLAP_FAKE_WORKER_REQUEST_LOG = requestLog;
+      delete process.env.CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT;
+      const fallbackApp = createServer();
+      const body = (model: string) => JSON.stringify({ model,
+        messages: [{ role: "user", content: "search" }],
+        tools: [{ type: "function", function: { name: "search", parameters: { type: "object" } } }],
+      });
+      expect((await fallbackApp.request("/v1/chat/completions", { method: "POST",
+        headers: { "content-type": "application/json" }, body: body(fallbackModel) })).status).toBe(200);
+
+      process.env.CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT = "1";
+      const nativeApp = createServer();
+      expect((await nativeApp.request("/v1/chat/completions", { method: "POST",
+        headers: { "content-type": "application/json" }, body: body(nativeModel) })).status).toBe(200);
+
+      const commands = (await readFile(requestLog, "utf8")).trim().split("\n")
+        .map((line) => JSON.parse(line));
+      expect(commands.map((command) => command.type)).toEqual(["load", "generate", "load", "generate"]);
+      const generated = commands.filter((command) => command.type === "generate");
+      expect(generated).toHaveLength(2);
+      expect(generated[0].request.messages[0].content).toContain("Available tools");
+      expect(generated[1].request.tools).toHaveLength(1);
+      expect(generated[1].request.messages[0].content).toBe("search");
+    } finally {
+      for (const [key, value] of Object.entries(previous)) restoreEnv(key, value);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses cached tokenizer template metadata for ambiguous local models", async () => {
     const previousWorker = process.env.CLAP_LLAMA_WORKER;
     const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
@@ -1388,10 +1434,12 @@ describe("clap server", () => {
     const model = join(dir, "model.Q4_K_M.gguf");
     const streamModel = join(dir, "stream.Q4_K_M.gguf");
     const invalidModel = join(dir, "invalid.Q4_K_M.gguf");
+    const nativeModel = join(dir, "native.Q4_K_M.gguf");
     try {
       await writeFile(model, "gguf bytes");
       await writeFile(streamModel, "gguf bytes");
       await writeFile(invalidModel, "gguf bytes");
+      await writeFile(nativeModel, "gguf bytes");
       process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
       process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE = "post_validate";
       process.env.CLAP_FAKE_WORKER_OUTPUT = '{"ok":true}';
@@ -1403,6 +1451,15 @@ describe("clap server", () => {
       });
       expect(required.status).toBe(400);
       expect((await required.json()).error.code).toBe("structured_output_capability_required");
+
+      process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE = "native";
+      const nativeRequired = await app.request("/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: nativeModel, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_object", constraint: "required" } }),
+      });
+      expect(nativeRequired.status).toBe(200);
+      process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE = "post_validate";
 
       delete process.env.CLAP_FAKE_WORKER_OUTPUT;
       process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify([..."```json\n{\"ok\":true}\n```"]);
@@ -2702,8 +2759,8 @@ describe("clap server", () => {
       expect(loadBody.model.worker.workerCapabilities).toMatchObject({
         backend: "llama", scheduling: { fused_multi_sequence_batching: true, interleaved: true },
       });
-      expect(loadBody.model.worker.effectiveModelCapabilities).toMatchObject({
-        generation: { structured_output: { json_object: "native" }, tool_templates: false },
+      expect(loadBody.model.worker.effectiveCapabilities).toMatchObject({
+        generation: { structuredOutput: { json_object: "native" }, toolTemplateSupport: false },
         modalities: { input: ["text"], output: ["text"] },
       });
 
@@ -2711,8 +2768,8 @@ describe("clap server", () => {
       const activeBody = await active.json();
       expect(activeBody.models.map((entry: { id: string }) => entry.id)).toContain("acme/lifecycle-gguf");
       expect(activeBody.models[0].worker.pid).toBe(loadBody.model.worker.pid);
-      expect(activeBody.models[0].worker.effectiveModelCapabilities)
-        .toEqual(loadBody.model.worker.effectiveModelCapabilities);
+      expect(activeBody.models[0].worker.effectiveCapabilities)
+        .toEqual(loadBody.model.worker.effectiveCapabilities);
       expect(activeBody.models[0].worker).toMatchObject({
         launchId: loadBody.model.worker.launchId,
         stderrLogPath: loadBody.model.worker.stderrLogPath,
@@ -3298,8 +3355,9 @@ const send = (type, id, fields = {}) => {
   console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields }));
 };
 const structuredMode = process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE ?? "native";
+const toolTemplateSupport = process.env.CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT === "1";
 const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true } };
-const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: structuredMode, json_schema: structuredMode, post_validation: true, max_schema_bytes: 65536 }, tool_templates: false }, modalities: { input: ["text"], output: ["text"] } };
+const effective = { cache: { partial_suffix_trim: true, partial_prefix_branch: true, whole_state_copy: true, prompt_boundary_snapshots: true, quantized_kv: false }, generation: { structured_output: { json_object: structuredMode, json_schema: structuredMode, post_validation: true, max_schema_bytes: 65536 }, tool_templates: toolTemplateSupport }, modalities: { input: ["text"], output: ["text"] } };
 const tokens = { model_context_window: 4096, effective_context_window: 4096, max_input_tokens: 4095, max_output_tokens: null, backend_allocation_cap: 4096, user_configured_override: null };
 console.log(JSON.stringify({ protocol: 1, type: "ready", worker_capabilities: workerCapabilities, model_capabilities: null }));
 for await (const chunk of Bun.stdin.stream()) {

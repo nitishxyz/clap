@@ -1252,41 +1252,41 @@
                       ],
                       "additionalProperties": false
                     },
-                    "effectiveModelCapabilities": {
+                    "effectiveCapabilities": {
                       "type": "object",
                       "properties": {
                         "cache": {
                           "type": "object",
                           "properties": {
-                            "partial_suffix_trim": {
+                            "partialSuffixTrim": {
                               "type": "boolean"
                             },
-                            "partial_prefix_branch": {
+                            "partialPrefixBranch": {
                               "type": "boolean"
                             },
-                            "whole_state_copy": {
+                            "wholeStateCopy": {
                               "type": "boolean"
                             },
-                            "prompt_boundary_snapshots": {
+                            "promptBoundarySnapshots": {
                               "type": "boolean"
                             },
-                            "quantized_kv": {
+                            "quantizedKv": {
                               "type": "boolean"
                             }
                           },
                           "required": [
-                            "partial_suffix_trim",
-                            "partial_prefix_branch",
-                            "whole_state_copy",
-                            "prompt_boundary_snapshots",
-                            "quantized_kv"
+                            "partialSuffixTrim",
+                            "partialPrefixBranch",
+                            "wholeStateCopy",
+                            "promptBoundarySnapshots",
+                            "quantizedKv"
                           ],
                           "additionalProperties": false
                         },
                         "generation": {
                           "type": "object",
                           "properties": {
-                            "structured_output": {
+                            "structuredOutput": {
                               "type": "object",
                               "properties": {
                                 "json_object": {
@@ -1321,13 +1321,13 @@
                               ],
                               "additionalProperties": false
                             },
-                            "tool_templates": {
+                            "toolTemplateSupport": {
                               "type": "boolean"
                             }
                           },
                           "required": [
-                            "structured_output",
-                            "tool_templates"
+                            "structuredOutput",
+                            "toolTemplateSupport"
                           ],
                           "additionalProperties": false
                         },
@@ -2055,41 +2055,41 @@
                     ],
                     "additionalProperties": false
                   },
-                  "effectiveModelCapabilities": {
+                  "effectiveCapabilities": {
                     "type": "object",
                     "properties": {
                       "cache": {
                         "type": "object",
                         "properties": {
-                          "partial_suffix_trim": {
+                          "partialSuffixTrim": {
                             "type": "boolean"
                           },
-                          "partial_prefix_branch": {
+                          "partialPrefixBranch": {
                             "type": "boolean"
                           },
-                          "whole_state_copy": {
+                          "wholeStateCopy": {
                             "type": "boolean"
                           },
-                          "prompt_boundary_snapshots": {
+                          "promptBoundarySnapshots": {
                             "type": "boolean"
                           },
-                          "quantized_kv": {
+                          "quantizedKv": {
                             "type": "boolean"
                           }
                         },
                         "required": [
-                          "partial_suffix_trim",
-                          "partial_prefix_branch",
-                          "whole_state_copy",
-                          "prompt_boundary_snapshots",
-                          "quantized_kv"
+                          "partialSuffixTrim",
+                          "partialPrefixBranch",
+                          "wholeStateCopy",
+                          "promptBoundarySnapshots",
+                          "quantizedKv"
                         ],
                         "additionalProperties": false
                       },
                       "generation": {
                         "type": "object",
                         "properties": {
-                          "structured_output": {
+                          "structuredOutput": {
                             "type": "object",
                             "properties": {
                               "json_object": {
@@ -2124,13 +2124,13 @@
                             ],
                             "additionalProperties": false
                           },
-                          "tool_templates": {
+                          "toolTemplateSupport": {
                             "type": "boolean"
                           }
                         },
                         "required": [
-                          "structured_output",
-                          "tool_templates"
+                          "structuredOutput",
+                          "toolTemplateSupport"
                         ],
                         "additionalProperties": false
                       },
@@ -2846,41 +2846,41 @@
                     ],
                     "additionalProperties": false
                   },
-                  "effectiveModelCapabilities": {
+                  "effectiveCapabilities": {
                     "type": "object",
                     "properties": {
                       "cache": {
                         "type": "object",
                         "properties": {
-                          "partial_suffix_trim": {
+                          "partialSuffixTrim": {
                             "type": "boolean"
                           },
-                          "partial_prefix_branch": {
+                          "partialPrefixBranch": {
                             "type": "boolean"
                           },
-                          "whole_state_copy": {
+                          "wholeStateCopy": {
                             "type": "boolean"
                           },
-                          "prompt_boundary_snapshots": {
+                          "promptBoundarySnapshots": {
                             "type": "boolean"
                           },
-                          "quantized_kv": {
+                          "quantizedKv": {
                             "type": "boolean"
                           }
                         },
                         "required": [
-                          "partial_suffix_trim",
-                          "partial_prefix_branch",
-                          "whole_state_copy",
-                          "prompt_boundary_snapshots",
-                          "quantized_kv"
+                          "partialSuffixTrim",
+                          "partialPrefixBranch",
+                          "wholeStateCopy",
+                          "promptBoundarySnapshots",
+                          "quantizedKv"
                         ],
                         "additionalProperties": false
                       },
                       "generation": {
                         "type": "object",
                         "properties": {
-                          "structured_output": {
+                          "structuredOutput": {
                             "type": "object",
                             "properties": {
                               "json_object": {
@@ -2915,13 +2915,13 @@
                             ],
                             "additionalProperties": false
                           },
-                          "tool_templates": {
+                          "toolTemplateSupport": {
                             "type": "boolean"
                           }
                         },
                         "required": [
-                          "structured_output",
-                          "tool_templates"
+                          "structuredOutput",
+                          "toolTemplateSupport"
                         ],
                         "additionalProperties": false
                       },
@@ -7437,41 +7437,41 @@
                                 ],
                                 "additionalProperties": false
                               },
-                              "effectiveModelCapabilities": {
+                              "effectiveCapabilities": {
                                 "type": "object",
                                 "properties": {
                                   "cache": {
                                     "type": "object",
                                     "properties": {
-                                      "partial_suffix_trim": {
+                                      "partialSuffixTrim": {
                                         "type": "boolean"
                                       },
-                                      "partial_prefix_branch": {
+                                      "partialPrefixBranch": {
                                         "type": "boolean"
                                       },
-                                      "whole_state_copy": {
+                                      "wholeStateCopy": {
                                         "type": "boolean"
                                       },
-                                      "prompt_boundary_snapshots": {
+                                      "promptBoundarySnapshots": {
                                         "type": "boolean"
                                       },
-                                      "quantized_kv": {
+                                      "quantizedKv": {
                                         "type": "boolean"
                                       }
                                     },
                                     "required": [
-                                      "partial_suffix_trim",
-                                      "partial_prefix_branch",
-                                      "whole_state_copy",
-                                      "prompt_boundary_snapshots",
-                                      "quantized_kv"
+                                      "partialSuffixTrim",
+                                      "partialPrefixBranch",
+                                      "wholeStateCopy",
+                                      "promptBoundarySnapshots",
+                                      "quantizedKv"
                                     ],
                                     "additionalProperties": false
                                   },
                                   "generation": {
                                     "type": "object",
                                     "properties": {
-                                      "structured_output": {
+                                      "structuredOutput": {
                                         "type": "object",
                                         "properties": {
                                           "json_object": {
@@ -7506,13 +7506,13 @@
                                         ],
                                         "additionalProperties": false
                                       },
-                                      "tool_templates": {
+                                      "toolTemplateSupport": {
                                         "type": "boolean"
                                       }
                                     },
                                     "required": [
-                                      "structured_output",
-                                      "tool_templates"
+                                      "structuredOutput",
+                                      "toolTemplateSupport"
                                     ],
                                     "additionalProperties": false
                                   },
@@ -8855,41 +8855,41 @@
                               ],
                               "additionalProperties": false
                             },
-                            "effectiveModelCapabilities": {
+                            "effectiveCapabilities": {
                               "type": "object",
                               "properties": {
                                 "cache": {
                                   "type": "object",
                                   "properties": {
-                                    "partial_suffix_trim": {
+                                    "partialSuffixTrim": {
                                       "type": "boolean"
                                     },
-                                    "partial_prefix_branch": {
+                                    "partialPrefixBranch": {
                                       "type": "boolean"
                                     },
-                                    "whole_state_copy": {
+                                    "wholeStateCopy": {
                                       "type": "boolean"
                                     },
-                                    "prompt_boundary_snapshots": {
+                                    "promptBoundarySnapshots": {
                                       "type": "boolean"
                                     },
-                                    "quantized_kv": {
+                                    "quantizedKv": {
                                       "type": "boolean"
                                     }
                                   },
                                   "required": [
-                                    "partial_suffix_trim",
-                                    "partial_prefix_branch",
-                                    "whole_state_copy",
-                                    "prompt_boundary_snapshots",
-                                    "quantized_kv"
+                                    "partialSuffixTrim",
+                                    "partialPrefixBranch",
+                                    "wholeStateCopy",
+                                    "promptBoundarySnapshots",
+                                    "quantizedKv"
                                   ],
                                   "additionalProperties": false
                                 },
                                 "generation": {
                                   "type": "object",
                                   "properties": {
-                                    "structured_output": {
+                                    "structuredOutput": {
                                       "type": "object",
                                       "properties": {
                                         "json_object": {
@@ -8924,13 +8924,13 @@
                                       ],
                                       "additionalProperties": false
                                     },
-                                    "tool_templates": {
+                                    "toolTemplateSupport": {
                                       "type": "boolean"
                                     }
                                   },
                                   "required": [
-                                    "structured_output",
-                                    "tool_templates"
+                                    "structuredOutput",
+                                    "toolTemplateSupport"
                                   ],
                                   "additionalProperties": false
                                 },
@@ -9721,41 +9721,41 @@
                               ],
                               "additionalProperties": false
                             },
-                            "effectiveModelCapabilities": {
+                            "effectiveCapabilities": {
                               "type": "object",
                               "properties": {
                                 "cache": {
                                   "type": "object",
                                   "properties": {
-                                    "partial_suffix_trim": {
+                                    "partialSuffixTrim": {
                                       "type": "boolean"
                                     },
-                                    "partial_prefix_branch": {
+                                    "partialPrefixBranch": {
                                       "type": "boolean"
                                     },
-                                    "whole_state_copy": {
+                                    "wholeStateCopy": {
                                       "type": "boolean"
                                     },
-                                    "prompt_boundary_snapshots": {
+                                    "promptBoundarySnapshots": {
                                       "type": "boolean"
                                     },
-                                    "quantized_kv": {
+                                    "quantizedKv": {
                                       "type": "boolean"
                                     }
                                   },
                                   "required": [
-                                    "partial_suffix_trim",
-                                    "partial_prefix_branch",
-                                    "whole_state_copy",
-                                    "prompt_boundary_snapshots",
-                                    "quantized_kv"
+                                    "partialSuffixTrim",
+                                    "partialPrefixBranch",
+                                    "wholeStateCopy",
+                                    "promptBoundarySnapshots",
+                                    "quantizedKv"
                                   ],
                                   "additionalProperties": false
                                 },
                                 "generation": {
                                   "type": "object",
                                   "properties": {
-                                    "structured_output": {
+                                    "structuredOutput": {
                                       "type": "object",
                                       "properties": {
                                         "json_object": {
@@ -9790,13 +9790,13 @@
                                       ],
                                       "additionalProperties": false
                                     },
-                                    "tool_templates": {
+                                    "toolTemplateSupport": {
                                       "type": "boolean"
                                     }
                                   },
                                   "required": [
-                                    "structured_output",
-                                    "tool_templates"
+                                    "structuredOutput",
+                                    "toolTemplateSupport"
                                   ],
                                   "additionalProperties": false
                                 },

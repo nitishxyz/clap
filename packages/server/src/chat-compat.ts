@@ -14,7 +14,7 @@ export type { ParsedAssistantOutput, ParserTemplateInfo } from "./parsers/types"
 
 export type PrepareChatOptions = {
   // The runtime renders tool declarations natively through the model's chat
-  // template (MLX + template with tool support). Injecting a second JSON
+  // template (when both the loaded runtime and template advertise support). Injecting a second JSON
   // tool-call convention on top confuses small models into narrating calls
   // as text, so the compat instruction block is skipped.
   nativeTools?: boolean;

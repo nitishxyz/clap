@@ -153,6 +153,24 @@ function LoadedModelRow({ entry, now, actions, platform, systemMemoryBytes, cpuC
                   : "unknown"}
             </DetailItem>
             </div>
+            {entry.worker.effectiveCapabilities ? (
+              <div className="mt-2 border-t border-soft-border pt-2" data-model-details="capabilities">
+                <div className="mb-1.5 text-[0.62rem] uppercase tracking-[0.08em] text-muted">Effective Capabilities</div>
+                <div className="grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-4">
+                  <DetailItem label="modalities">
+                    {entry.worker.effectiveCapabilities.modalities.input.join(", ")} → {entry.worker.effectiveCapabilities.modalities.output.join(", ")}
+                  </DetailItem>
+                  <DetailItem label="structured object">{entry.worker.effectiveCapabilities.generation.structuredOutput.json_object.replaceAll("_", " ")}</DetailItem>
+                  <DetailItem label="structured schema">{entry.worker.effectiveCapabilities.generation.structuredOutput.json_schema.replaceAll("_", " ")}</DetailItem>
+                  <DetailItem label="tool template">{entry.worker.effectiveCapabilities.generation.toolTemplateSupport ? "supported" : "unsupported"}</DetailItem>
+                  <DetailItem label="suffix trim">{entry.worker.effectiveCapabilities.cache.partialSuffixTrim ? "supported" : "unsupported"}</DetailItem>
+                  <DetailItem label="prefix branch">{entry.worker.effectiveCapabilities.cache.partialPrefixBranch ? "supported" : "unsupported"}</DetailItem>
+                  <DetailItem label="state copy">{entry.worker.effectiveCapabilities.cache.wholeStateCopy ? "supported" : "unsupported"}</DetailItem>
+                  <DetailItem label="prompt snapshots">{entry.worker.effectiveCapabilities.cache.promptBoundarySnapshots ? "supported" : "unsupported"}</DetailItem>
+                  <DetailItem label="quantized kv">{entry.worker.effectiveCapabilities.cache.quantizedKv ? "supported" : "unsupported"}</DetailItem>
+                </div>
+              </div>
+            ) : null}
             <div className="mt-2 border-t border-soft-border pt-2" data-model-details="concurrency">
               <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.62rem] uppercase tracking-[0.08em] text-muted">
                 <span>Worker Capacity</span>
