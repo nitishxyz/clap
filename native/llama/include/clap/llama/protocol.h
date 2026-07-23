@@ -74,7 +74,8 @@ class ProtocolWriter {
  public:
   explicit ProtocolWriter(std::ostream& output) : output_(output) {}
 
-  void ready(nlohmann::json worker_capabilities, nlohmann::json model_capabilities);
+  void ready(nlohmann::json worker_capabilities, nlohmann::json model_capabilities,
+             nlohmann::json structured_output = nullptr);
   bool accepted(const std::string& request_id);
   bool started(const std::string& request_id);
   bool token(const std::string& request_id, const std::string& text);

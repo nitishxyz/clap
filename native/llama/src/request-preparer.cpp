@@ -4,6 +4,7 @@
 #include "clap/llama/environment.h"
 #include "clap/llama/prompt.h"
 #include "clap/llama/protocol.h"
+#include "clap/llama/structured-output.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -106,11 +107,13 @@ uint64_t RequestPreparer::capabilities() const {
 }
 
 PreparedRequest RequestPreparer::prepare(const std::string& id, const nlohmann::json& request) {
+  auto structured_output = parse_structured_output(request);
   PromptRenderer renderer(runtime_);
   auto prompt = renderer.prepare(prompt_input_from_request(request));
   PreparedRequest prepared;
   prepared.id = id;
   prepared.params = sampling_from_request(request);
+  prepared.structured_output = std::move(structured_output);
   if (!request.contains("cache_identity")) {
     throw RequestError("cache_identity_required", "cache_identity is required");
   }

@@ -4,6 +4,7 @@
 #include "clap/llama/prompt.h"
 #include "clap/llama/sampling.h"
 #include "clap/llama/stop-buffer.h"
+#include "clap/llama/structured-output.h"
 #include "stable-boundary.h"
 
 #include <cstddef>
@@ -14,6 +15,8 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "clap/llama/structured-output.h"
 
 namespace clap::llama {
 
@@ -110,6 +113,7 @@ struct PreparedRequest {
 
   std::string id;
   SamplingParams params;
+  std::optional<StructuredOutputConstraint> structured_output;
   CacheLease cache_lease;
   clap::llama_cache::Identity cache_identity;
   std::vector<llama_token> prompt_tokens;

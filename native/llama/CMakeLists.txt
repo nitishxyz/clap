@@ -20,6 +20,7 @@ endif()
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static llama.cpp libraries" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Build llama.cpp tests" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Build llama.cpp examples" FORCE)
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build llama.cpp common utilities" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "Enable llama.cpp CURL support" FORCE)
 
 add_subdirectory("${CLAP_LLAMA_VENDOR_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
@@ -61,6 +62,7 @@ set(CLAP_LLAMA_SOURCES
   src/sampling.cpp
   src/scheduler.cpp
   src/stop-buffer.cpp
+  src/structured-output.cpp
   src/telemetry.cpp
   src/worker-state.cpp
   src/worker.cpp
@@ -79,6 +81,7 @@ set(CLAP_LLAMA_HEADERS
   include/clap/llama/sampling.h
   include/clap/llama/scheduler.h
   include/clap/llama/stop-buffer.h
+  include/clap/llama/structured-output.h
   include/clap/llama/telemetry.h
   include/clap/llama/worker-state.h
   include/clap/llama/worker.h
@@ -91,7 +94,7 @@ target_include_directories(clap-llama PRIVATE
   "${CLAP_LLAMA_INCLUDE_DIR}"
   "${CLAP_LLAMA_VENDOR_DIR}/vendor"
 )
-target_link_libraries(clap-llama PRIVATE llama clap-cache-ffi)
+target_link_libraries(clap-llama PRIVATE llama llama-common clap-cache-ffi)
 
 install(TARGETS clap-llama
   RUNTIME DESTINATION .
@@ -99,6 +102,20 @@ install(TARGETS clap-llama
 )
 
 if(BUILD_TESTING)
+  add_executable(clap-llama-structured-output
+    tests/structured-output.test.cpp
+    src/protocol.cpp
+    src/structured-output.cpp
+  )
+  target_include_directories(clap-llama-structured-output PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CLAP_LLAMA_INCLUDE_DIR}"
+    "${CLAP_LLAMA_VENDOR_DIR}/common"
+    "${CLAP_LLAMA_VENDOR_DIR}/vendor"
+  )
+  target_link_libraries(clap-llama-structured-output PRIVATE llama llama-common)
+  add_test(NAME clap-llama-structured-output COMMAND clap-llama-structured-output)
+
   add_executable(clap-llama-cache-identity
     tests/cache-identity.test.cpp
     src/cache-identity.cpp
@@ -129,6 +146,7 @@ if(BUILD_TESTING)
     src/sampling.cpp
     src/scheduler.cpp
     src/stop-buffer.cpp
+    src/structured-output.cpp
     src/telemetry.cpp
     src/worker-state.cpp
     src/worker.cpp
@@ -139,7 +157,7 @@ if(BUILD_TESTING)
     "${CLAP_LLAMA_INCLUDE_DIR}"
     "${CLAP_LLAMA_VENDOR_DIR}/vendor"
   )
-  target_link_libraries(clap-llama-worker PRIVATE llama clap-cache-ffi)
+  target_link_libraries(clap-llama-worker PRIVATE llama llama-common clap-cache-ffi)
   add_test(NAME clap-llama-worker COMMAND clap-llama-worker)
 
   add_executable(clap-llama-scheduler
@@ -172,6 +190,7 @@ if(BUILD_TESTING)
     src/request-state.cpp
     src/sampling.cpp
     src/stop-buffer.cpp
+    src/structured-output.cpp
     src/telemetry.cpp
     src/worker-state.cpp
   )
@@ -181,7 +200,7 @@ if(BUILD_TESTING)
     "${CLAP_LLAMA_INCLUDE_DIR}"
     "${CLAP_LLAMA_VENDOR_DIR}/vendor"
   )
-  target_link_libraries(clap-llama-worker-state PRIVATE llama clap-cache-ffi)
+  target_link_libraries(clap-llama-worker-state PRIVATE llama llama-common clap-cache-ffi)
   add_test(NAME clap-llama-worker-state COMMAND clap-llama-worker-state)
 
   add_executable(clap-llama-generation-stepper
@@ -363,6 +382,7 @@ if(BUILD_TESTING)
     src/request-state.cpp
     src/sampling.cpp
     src/stop-buffer.cpp
+    src/structured-output.cpp
   )
   add_dependencies(clap-llama-request-preparer clap-cache-ffi-build)
   target_include_directories(clap-llama-request-preparer PRIVATE
@@ -370,7 +390,7 @@ if(BUILD_TESTING)
     "${CLAP_LLAMA_INCLUDE_DIR}"
     "${CLAP_LLAMA_VENDOR_DIR}/vendor"
   )
-  target_link_libraries(clap-llama-request-preparer PRIVATE llama clap-cache-ffi)
+  target_link_libraries(clap-llama-request-preparer PRIVATE llama llama-common clap-cache-ffi)
   add_test(NAME clap-llama-request-preparer COMMAND clap-llama-request-preparer)
 
   add_executable(clap-llama-stop-buffer

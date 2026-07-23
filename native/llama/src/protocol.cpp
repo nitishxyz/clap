@@ -139,10 +139,13 @@ V1Request decode_v1_request(const std::string& line) {
 }
 
 void ProtocolWriter::ready(nlohmann::json worker_capabilities,
-                           nlohmann::json model_capabilities) {
-  emit("", {{"protocol", 1}, {"type", "ready"},
+                           nlohmann::json model_capabilities,
+                           nlohmann::json structured_output) {
+  nlohmann::json event = {{"protocol", 1}, {"type", "ready"},
       {"worker_capabilities", std::move(worker_capabilities)},
-      {"model_capabilities", std::move(model_capabilities)}}, output_);
+      {"model_capabilities", std::move(model_capabilities)}};
+  if (!structured_output.is_null()) event["structured_output"] = std::move(structured_output);
+  emit("", std::move(event), output_);
 }
 
 bool ProtocolWriter::scoped(const std::string& request_id, const char* type,

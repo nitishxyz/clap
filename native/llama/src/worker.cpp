@@ -35,7 +35,12 @@ Worker::Worker() : Worker(std::cin, std::cout) {}
 Worker::Worker(std::istream& input, std::ostream& output)
     : output_(output), v1_(std::make_unique<ProtocolWriter>(output)),
       state_(), scheduler_(scheduler_state(state_)), reader_(input) {
-  v1_->ready({{"backend", "llama"}, {"streaming", true}}, nlohmann::json::object());
+  v1_->ready({{"backend", "llama"}, {"streaming", true}}, nlohmann::json::object(), {
+      {"json_object", "native"},
+      {"json_schema", "native"},
+      {"post_validation", true},
+      {"max_schema_bytes", 64 * 1024},
+  });
 }
 
 void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {
@@ -171,6 +176,10 @@ bool Worker::dispatch(const std::string& line) {
     body.erase("request_id");
     body.erase("request");
     body["cache_identity"] = request.body["cache_identity"];
+    body.erase("structured_output");
+    if (request.body.contains("structured_output")) {
+      body["structured_output"] = request.body["structured_output"];
+    }
     body["id"] = request.request_id;
     body["type"] = "generate";
     scheduler_.enqueue(request.request_id, std::move(body));
