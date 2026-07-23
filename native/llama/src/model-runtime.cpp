@@ -40,6 +40,7 @@ void ModelRuntime::reset() noexcept {
   startup_available_bytes_ = 0;
   model_file_bytes_ = 0;
   hybrid_ = false;
+  prompt_boundary_snapshots_ = false;
   has_encoder_ = false;
   cache_domain_.clear();
   kv_format_.clear();
@@ -112,6 +113,15 @@ bool ModelRuntime::load(const std::string& model_path) {
   startup_available_bytes_ = startup_available;
   model_file_bytes_ = file_size_error ? 0 : model_file_bytes;
   hybrid_ = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
+  char architecture[64] = {};
+  const bool has_architecture = llama_model_meta_val_str(
+      model_, "general.architecture", architecture, sizeof(architecture)) >= 0;
+  // Gemma 4's shared KV layers cannot currently be cloned into another
+  // sequence with llama_memory_seq_cp: the first suffix decode fails batch
+  // initialization. Continue/branch remain valid, but anchor restore must be
+  // rejected before planning until llama.cpp exposes copy-safe shared state.
+  prompt_boundary_snapshots_ = !hybrid_ &&
+      (!has_architecture || std::string(architecture) != "gemma4");
   has_encoder_ = llama_model_has_encoder(model_);
   const char* kv_type = std::getenv("CLAP_LLAMA_KV_TYPE");
   kv_format_ = kv_type && *kv_type ? kv_type : "f16";

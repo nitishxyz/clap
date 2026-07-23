@@ -97,16 +97,19 @@ RequestPreparer::RequestPreparer(ModelRuntime& runtime, CacheExecutor* cache_exe
     : runtime_(runtime), cache_executor_(cache_executor), slots_(std::move(slots)),
       fingerprint_(std::move(fingerprint)) {}
 
-uint64_t cache_capabilities(bool hybrid) {
+uint64_t cache_capabilities(bool hybrid, bool prompt_boundary_snapshots) {
   uint64_t value = CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
       CLAP_CACHE_CAP_RELIABLE_RESIDENT_LENGTH | CLAP_CACHE_CAP_RETAIN_LAST_TOKEN_FOR_LOGITS;
-  return hybrid ? value | CLAP_CACHE_CAP_RECURRENT_OR_HYBRID
-      : value | CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM | CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH |
-          CLAP_CACHE_CAP_ZERO_COPY_BRANCH | CLAP_CACHE_CAP_UNIFIED_STORAGE |
-          CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT;
+  if (hybrid) return value | CLAP_CACHE_CAP_RECURRENT_OR_HYBRID;
+  value |= CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM | CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH |
+      CLAP_CACHE_CAP_ZERO_COPY_BRANCH | CLAP_CACHE_CAP_UNIFIED_STORAGE;
+  if (prompt_boundary_snapshots) value |= CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT;
+  return value;
 }
 
-uint64_t RequestPreparer::capabilities() const { return cache_capabilities(runtime_.hybrid()); }
+uint64_t RequestPreparer::capabilities() const {
+  return cache_capabilities(runtime_.hybrid(), runtime_.prompt_boundary_snapshots());
+}
 
 PreparedRequest RequestPreparer::prepare(const std::string& id, const nlohmann::json& request) {
   auto structured_output = parse_structured_output(request);

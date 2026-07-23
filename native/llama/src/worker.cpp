@@ -181,7 +181,8 @@ bool Worker::dispatch(const std::string& line) {
         {"effective_model_capabilities", {
           {"cache", {{"partial_suffix_trim", !state_.hybrid()},
             {"partial_prefix_branch", !state_.hybrid()},
-            {"whole_state_copy", true}, {"prompt_boundary_snapshots", !state_.hybrid()},
+            {"whole_state_copy", true},
+            {"prompt_boundary_snapshots", state_.prompt_boundary_snapshots()},
             {"quantized_kv", state_.kv_format().find('q') != std::string::npos}}},
           {"generation", {{"structured_output", {{"json_object", "native"},
             {"json_schema", "native"}, {"post_validation", true},

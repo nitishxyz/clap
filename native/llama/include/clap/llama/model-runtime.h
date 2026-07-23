@@ -34,6 +34,7 @@ class ModelRuntime {
   uint64_t startup_available_bytes() const noexcept { return startup_available_bytes_; }
   uint64_t model_file_bytes() const noexcept { return model_file_bytes_; }
   bool hybrid() const noexcept { return hybrid_; }
+  bool prompt_boundary_snapshots() const noexcept { return prompt_boundary_snapshots_; }
   bool has_encoder() const noexcept { return has_encoder_; }
   const std::string& cache_domain() const noexcept { return cache_domain_; }
   const std::string& kv_format() const noexcept { return kv_format_; }
@@ -51,6 +52,7 @@ class ModelRuntime {
   uint64_t startup_available_bytes_ = 0;
   uint64_t model_file_bytes_ = 0;
   bool hybrid_ = false;
+  bool prompt_boundary_snapshots_ = false;
   bool has_encoder_ = false;
   std::string cache_domain_;
   std::string kv_format_;

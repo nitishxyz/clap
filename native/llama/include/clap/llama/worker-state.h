@@ -40,6 +40,7 @@ class WorkerState {
   const std::string& model_path() const noexcept { return runtime_.model_path(); }
   bool has_encoder() const noexcept { return runtime_.has_encoder(); }
   bool hybrid() const noexcept { return runtime_.hybrid(); }
+  bool prompt_boundary_snapshots() const noexcept { return runtime_.prompt_boundary_snapshots(); }
   int32_t max_active() const noexcept { return max_active_; }
   int32_t batch_capacity() const;
   int32_t effective_context_window() const noexcept { return runtime_.backend_allocation_cap(); }
