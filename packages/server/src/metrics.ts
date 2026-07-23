@@ -72,6 +72,7 @@ export type RequestRecord = {
   durationMs?: number;
   ttftMs?: number;
   queuedMs?: number;
+  priority: "interactive" | "normal" | "background";
   loadMs?: number;
   model: string;
   endpoint: string;
@@ -289,6 +290,12 @@ export class MetricsCollector {
   private eventSequence = 0;
   readonly serverLaunchId = crypto.randomUUID();
   readonly histograms = makeRequestHistograms();
+  readonly priorityRequestOutcomes = new Map<string, number>();
+  readonly priorityDurationMs = {
+    interactive: makeRequestHistograms().durationMs,
+    normal: makeRequestHistograms().durationMs,
+    background: makeRequestHistograms().durationMs,
+  };
   readonly structuredOutputOutcomes = new Map<string, number>();
   readonly residency: ResidencyMetrics = {
     reservedBytes: 0, activeReservations: 0, outcomes: new Map(), evictions: new Map(),
@@ -371,6 +378,7 @@ export class MetricsCollector {
       model,
       endpoint,
       stream,
+      priority: "normal",
       status: "active",
       phase: "queued",
     };
@@ -409,6 +417,7 @@ export class MetricsCollector {
           tool_calls: message.tool_calls,
         }));
         const identity = request.cache;
+        record.priority = identity?.priority ?? "normal";
         const promptPrefixId = promptPrefixFingerprint(record.model, messages);
         const sessionFingerprint = this.cacheEvents?.fingerprint(identity?.session);
         durableIdentity = {
@@ -425,7 +434,7 @@ export class MetricsCollector {
           systemTokenHash: this.cacheEvents?.fingerprint(systemContent),
           toolsTokenHash: this.cacheEvents?.fingerprint(toolShape),
           promptTokenHash: this.cacheEvents?.fingerprint({ messages: promptShape, tools: toolShape }),
-          priority: identity?.priority,
+          priority: record.priority,
           side: identity?.side_request,
         };
         record.messageCount = messages.length;
@@ -557,8 +566,14 @@ export class MetricsCollector {
         if (record.status === "ok") this.totals.ok += 1;
         else if (record.status === "error") this.totals.errors += 1;
         else if (record.status === "cancelled") this.totals.cancelled += 1;
+        const priorityOutcome = `${record.priority}\0${record.status}`;
+        this.priorityRequestOutcomes.set(priorityOutcome,
+          (this.priorityRequestOutcomes.get(priorityOutcome) ?? 0) + 1);
         if (record.ttftMs !== undefined) this.histograms.ttftMs.observe(record.ttftMs);
-        if (record.durationMs !== undefined) this.histograms.durationMs.observe(record.durationMs);
+        if (record.durationMs !== undefined) {
+          this.histograms.durationMs.observe(record.durationMs);
+          this.priorityDurationMs[record.priority].observe(record.durationMs);
+        }
         this.histograms.queuedMs.observe(record.queuedMs ?? 0);
         if (record.completionTokens !== undefined) this.histograms.completionTokens.observe(record.completionTokens);
         this.totals.promptTokens += result.promptTokens ?? 0;

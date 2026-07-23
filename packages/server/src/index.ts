@@ -456,6 +456,8 @@ export function createServer(
       histograms: metrics.histograms,
       residency: metrics.residency,
       structuredOutputOutcomes: metrics.structuredOutputOutcomes,
+      priorityRequestOutcomes: metrics.priorityRequestOutcomes,
+      priorityDurationMs: metrics.priorityDurationMs,
     }), 200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
   });
 
@@ -529,6 +531,7 @@ export function createServer(
           endedAt: event.timestamp,
           durationMs: event.durationMs,
           ttftMs: event.ttftMs,
+          priority: event.priority ?? "normal",
           model: event.model,
           endpoint: event.endpoint ?? "/v1/chat/completions",
           stream: false,
@@ -634,6 +637,7 @@ export function createServer(
         endedAt: persisted.timestamp,
         durationMs: persisted.durationMs,
         ttftMs: persisted.ttftMs,
+        priority: persisted.priority ?? "normal",
         model: persisted.model,
         endpoint: persisted.endpoint ?? "/v1/chat/completions",
         stream: false,
@@ -959,7 +963,8 @@ export function createServer(
   ) {
     let release: () => void;
     try {
-      release = await limiter.acquire(c.get("requestIdentity").clientId, c.req.raw.signal);
+      release = await limiter.acquire(c.get("requestIdentity").clientId,
+        request.cache?.priority ?? "normal", c.req.raw.signal);
     } catch (error) {
       if (error instanceof QueueFullError) {
         releaseIdentityLease();

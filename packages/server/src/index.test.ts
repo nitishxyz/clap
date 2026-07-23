@@ -506,11 +506,11 @@ describe("clap server", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/plain");
       const body = await response.text();
-      expect(body).toContain('clap_requests_total{status="ok"} 1');
-      expect(body).toContain("clap_queue_inflight 0");
+      expect(body).toContain('clap_requests_total{priority="normal",status="ok"} 1');
+      expect(body).toContain('clap_queue_inflight{priority="normal"} 0');
       expect(body).toContain("clap_queue_inflight_limit ");
-      expect(body).toContain("clap_request_duration_ms_count 1");
-      expect(body).toContain('clap_request_duration_ms_bucket{le="+Inf"} 1');
+      expect(body).toContain('clap_request_duration_ms_count{priority="normal"} 1');
+      expect(body).toContain('clap_request_duration_ms_bucket{priority="normal",le="+Inf"} 1');
       expect(body).toContain('clap_tokens_total{kind="completion"}');
       expect(body).toContain("# TYPE clap_request_ttft_ms histogram");
       expect(body).toContain("clap_residency_reserved_bytes 0");

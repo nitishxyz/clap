@@ -27,6 +27,10 @@ export type DashboardQueue = {
   queued: number;
   maxInflight: number;
   queueDepth: number;
+  inflightByPriority: Record<"interactive" | "normal" | "background", number>;
+  waitingByPriority: Record<"interactive" | "normal" | "background", number>;
+  outcomesByPriority: Record<"interactive" | "normal" | "background",
+    Record<"admitted" | "rejected" | "aborted", number>>;
 };
 
 export type DashboardTotals = {
@@ -111,6 +115,7 @@ export type DashboardRequest = {
   ttftMs?: number;
   loadMs?: number;
   queuedMs?: number;
+  priority: "interactive" | "normal" | "background";
   model: string;
   endpoint: string;
   stream: boolean;

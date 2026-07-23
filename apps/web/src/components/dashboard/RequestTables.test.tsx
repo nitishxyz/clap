@@ -18,6 +18,7 @@ const base: DashboardRequest = {
   stream: true,
   status: "ok",
   phase: "done",
+  priority: "normal",
 };
 
 function outcome(category: CacheOutcomeCategory, extra: Partial<CacheOutcome> = {}): CacheOutcome {
@@ -34,6 +35,11 @@ function row(request: DashboardRequest): string {
 }
 
 describe("recent request intent and cache badges", () => {
+  test("shows canonical request priority", () => {
+    const html = row({ ...base, priority: "interactive" });
+    expect(html).toContain(">priority<");
+    expect(html).toContain(">interactive<");
+  });
   test("shows structured constraint mode and outcome without schema content", () => {
     const html = row({ ...base, structuredOutput: {
       kind: "json_schema", requestedStrength: "required", backendMode: "native",

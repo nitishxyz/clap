@@ -17,6 +17,16 @@ function tempDir(): string {
 }
 
 describe("metrics queue accounting", () => {
+  test("records canonical request priority and bounded priority outcomes", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("model", "/v1/chat/completions", false);
+    expect(handle.record.priority).toBe("normal");
+    handle.capture({ messages: [{ role: "user", content: "x" }],
+      cache: { priority: "interactive" } });
+    handle.finish({ status: "ok" });
+    expect(handle.record.priority).toBe("interactive");
+    expect(metrics.priorityRequestOutcomes.get("interactive\0ok")).toBe(1);
+  });
   test("structured telemetry fingerprints schemas and uses bounded metric labels", () => {
     const metrics = new MetricsCollector();
     const handle = metrics.start("secret-model-id", "/v1/chat/completions", false);

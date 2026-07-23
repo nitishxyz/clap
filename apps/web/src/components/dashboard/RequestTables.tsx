@@ -253,6 +253,7 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
               "session / prefix",
               "model",
               "status",
+              "priority",
               "structured output",
               { label: "queue", numeric: true },
               { label: "load", numeric: true },
@@ -287,6 +288,7 @@ export function RecentRequests({ requests, onSelect }: { requests: DashboardRequ
                   {request.model}
                 </Td>
                 <Td><StatusTag status={request.status} /></Td>
+                <Td><Tag tone={request.priority === "interactive" ? "ok" : request.priority === "background" ? "warn" : undefined}>{request.priority ?? "normal"}</Tag></Td>
                 {request.structuredOutput ? <Td className="max-w-[150px]">
                   <span title={`${request.structuredOutput.kind} · ${request.structuredOutput.requestedStrength}`}>
                     {request.structuredOutput.requestedStrength} · {request.structuredOutput.backendMode ?? "pending"}

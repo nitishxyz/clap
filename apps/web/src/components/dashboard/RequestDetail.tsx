@@ -311,6 +311,7 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
                 {record.finishReason ? <span className="ml-2 text-muted">{record.finishReason}</span> : null}
               </Field>
               <Field label="endpoint">{record.endpoint} · {record.stream ? "sse" : "json"}</Field>
+              <Field label="priority"><Tag>{record.priority ?? "normal"}</Tag></Field>
               <Field label="timing">
                 {record.loadMs !== undefined && record.loadMs > 500 ? `load ${fmtDuration(record.loadMs)} · ` : ""}
                 ttft {fmtDuration(record.ttftMs)} · total {fmtDuration(record.durationMs)}

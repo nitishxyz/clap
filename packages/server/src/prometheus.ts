@@ -50,7 +50,11 @@ export type PromSnapshot = {
     reusedTokens: number;
   };
   activeRequests: number;
-  queue: { inflight: number; queued: number; maxInflight: number; queueDepth: number };
+  queue: { inflight: number; queued: number; maxInflight: number; queueDepth: number;
+    inflightByPriority: Record<"interactive" | "normal" | "background", number>;
+    waitingByPriority: Record<"interactive" | "normal" | "background", number>;
+    outcomesByPriority: Record<"interactive" | "normal" | "background",
+      Record<"admitted" | "rejected" | "aborted", number>> };
   loadedModels: Array<{
     id: string;
     backend: string;
@@ -99,6 +103,8 @@ export type PromSnapshot = {
     completionTokens: Histogram;
   };
   structuredOutputOutcomes: Map<string, number>;
+  priorityRequestOutcomes: Map<string, number>;
+  priorityDurationMs: Record<"interactive" | "normal" | "background", Histogram>;
   residency: {
     reservedBytes: number;
     activeReservations: number;
@@ -133,11 +139,11 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
     for (const [labels, value] of entries) lines.push(`${name}${labels} ${value}`);
   };
 
-  counter("clap_requests_total", "Completed inference requests by status", [
-    ['{status="ok"}', snapshot.totals.ok],
-    ['{status="error"}', snapshot.totals.errors],
-    ['{status="cancelled"}', snapshot.totals.cancelled],
-  ]);
+  counter("clap_requests_total", "Completed inference requests by priority and status",
+    [...snapshot.priorityRequestOutcomes].map(([key, value]) => {
+      const [priority, status] = key.split("\0");
+      return [`{priority="${esc(priority!)}",status="${esc(status!)}"}`, value];
+    }));
   counter("clap_tokens_total", "Tokens processed", [
     ['{kind="prompt"}', snapshot.totals.promptTokens],
     ['{kind="completion"}', snapshot.totals.completionTokens],
@@ -154,8 +160,16 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   ]);
 
   gauge("clap_requests_active", "Requests currently executing or streaming", [["", snapshot.activeRequests]]);
-  gauge("clap_queue_inflight", "Requests admitted past the fair limiter", [["", snapshot.queue.inflight]]);
-  gauge("clap_queue_waiting", "Requests waiting in the fair queue", [["", snapshot.queue.queued]]);
+  gauge("clap_queue_inflight", "Requests admitted past the fair limiter by priority",
+    Object.entries(snapshot.queue.inflightByPriority).map(([priority, value]) =>
+      [`{priority="${priority}"}`, value]));
+  counter("clap_queue_outcomes_total", "Fair limiter outcomes by priority",
+    Object.entries(snapshot.queue.outcomesByPriority).flatMap(([priority, outcomes]) =>
+      Object.entries(outcomes).map(([outcome, value]) =>
+        [`{priority="${priority}",outcome="${outcome}"}`, value] as [string, number])));
+  gauge("clap_queue_waiting", "Requests waiting in the fair queue by priority",
+    Object.entries(snapshot.queue.waitingByPriority).map(([priority, value]) =>
+      [`{priority="${priority}"}`, value]));
   gauge("clap_queue_inflight_limit", "Configured max_inflight", [["", snapshot.queue.maxInflight]]);
   gauge("clap_queue_depth_limit", "Configured queue_depth", [["", snapshot.queue.queueDepth]]);
   gauge("clap_uptime_seconds", "Server uptime", [["", Math.round(snapshot.uptimeMs / 1000)]]);
@@ -235,7 +249,9 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   lines.push("# HELP clap_request_ttft_ms Time to first token (excludes queue wait)", "# TYPE clap_request_ttft_ms histogram");
   lines.push(...snapshot.histograms.ttftMs.render("clap_request_ttft_ms"));
   lines.push("# HELP clap_request_duration_ms End-to-end request duration", "# TYPE clap_request_duration_ms histogram");
-  lines.push(...snapshot.histograms.durationMs.render("clap_request_duration_ms"));
+  for (const priority of ["interactive", "normal", "background"] as const) {
+    lines.push(...snapshot.priorityDurationMs[priority].render("clap_request_duration_ms", `priority="${priority}"`));
+  }
   lines.push("# HELP clap_request_queued_ms Time spent waiting before dispatch", "# TYPE clap_request_queued_ms histogram");
   lines.push(...snapshot.histograms.queuedMs.render("clap_request_queued_ms"));
   lines.push("# HELP clap_request_completion_tokens Completion tokens per request", "# TYPE clap_request_completion_tokens histogram");

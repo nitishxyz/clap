@@ -7,7 +7,14 @@ function snapshot(): PromSnapshot {
     totals: { requests: 0, ok: 0, errors: 0, cancelled: 0, promptTokens: 0,
       completionTokens: 0, cacheHits: 0, cacheMisses: 0, reusedTokens: 0 },
     activeRequests: 0,
-    queue: { inflight: 0, queued: 0, maxInflight: 1, queueDepth: 1 },
+    queue: { inflight: 0, queued: 0, maxInflight: 1, queueDepth: 1,
+      inflightByPriority: { interactive: 0, normal: 0, background: 0 },
+      waitingByPriority: { interactive: 0, normal: 0, background: 0 },
+      outcomesByPriority: {
+        interactive: { admitted: 0, rejected: 0, aborted: 0 },
+        normal: { admitted: 1, rejected: 0, aborted: 0 },
+        background: { admitted: 0, rejected: 0, aborted: 0 },
+      } },
     loadedModels: [{
       id: "private/model-id", backend: "mlx", state: "resident",
       retention: {
@@ -25,6 +32,8 @@ function snapshot(): PromSnapshot {
     uptimeMs: 0,
     histograms: { ttftMs: histogram(), durationMs: histogram(), queuedMs: histogram(), completionTokens: histogram() },
     structuredOutputOutcomes: new Map(),
+    priorityRequestOutcomes: new Map([["normal\0ok", 1]]),
+    priorityDurationMs: { interactive: histogram(), normal: histogram(), background: histogram() },
     residency: { reservedBytes: 0, activeReservations: 0, outcomes: new Map(), evictions: new Map(),
       estimateObservedRatioSum: 0, estimateObservedRatioCount: 0 },
   };
@@ -39,5 +48,9 @@ describe("honest Prometheus memory telemetry", () => {
     expect(output).toContain('clap_retention_session_bytes{backend="mlx",source="estimated",basis="cache_components"} 0');
     expect(output).toContain('clap_retention_estimated_bytes{backend="mlx",source="estimated",basis="cache_components"} 4096');
     expect(output).not.toContain('source="measured"');
+    expect(output).toContain('clap_requests_total{priority="normal",status="ok"} 1');
+    expect(output).toContain('clap_queue_waiting{priority="background"} 0');
+    expect(output).toContain('clap_queue_outcomes_total{priority="normal",outcome="admitted"} 1');
+    expect(output).toContain('clap_request_duration_ms_count{priority="interactive"} 0');
   });
 });
