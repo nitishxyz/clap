@@ -100,6 +100,18 @@ describe("StreamingOutputFilter cancel", () => {
     expect(filter.feed("lo")).toEqual([]);
     expect(filter.emittedContent).toBe("Hel");
   });
+
+  test("buffered structured output emits no marker or JSON bytes before or after cancel", () => {
+    const filter = new StreamingOutputFilter({ toolMode: false, bufferAll: true });
+    const input = '<think>private</think>```json\n{"answer":42}\n```';
+    for (const byte of [...input]) expect(filter.feed(byte)).toEqual([]);
+    expect(filter.emittedContent).toBe("");
+    expect(filter.emittedReasoning).toBe("");
+    filter.cancel();
+    expect(filter.feed('{"late":true}')).toEqual([]);
+    expect(filter.emittedContent).toBe("");
+    expect(filter.emittedReasoning).toBe("");
+  });
 });
 
 describe("remainingDelta", () => {

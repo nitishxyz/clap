@@ -1405,7 +1405,7 @@ describe("clap server", () => {
       expect((await required.json()).error.code).toBe("structured_output_capability_required");
 
       delete process.env.CLAP_FAKE_WORKER_OUTPUT;
-      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(["```json\n{", "\"ok\":true", "}\n```"]);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify([..."```json\n{\"ok\":true}\n```"]);
       const streamed = await app.request("/v1/chat/completions", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ model: streamModel, stream: true, messages: [{ role: "user", content: "json" }],
@@ -1425,6 +1425,20 @@ describe("clap server", () => {
       });
       expect(invalid.status).toBe(422);
       expect((await invalid.json()).error.code).toBe("structured_output_invalid");
+
+      const schemaModel = join(dir, "schema.Q4_K_M.gguf");
+      await writeFile(schemaModel, "gguf bytes");
+      process.env.CLAP_FAKE_WORKER_OUTPUT = '{"answer":"wrong"}';
+      const schemaViolation = await app.request("/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: schemaModel, messages: [{ role: "user", content: "json" }],
+          response_format: { type: "json_schema", constraint: "best_effort",
+            json_schema: { name: "answer", schema: { type: "object", properties: {
+              answer: { type: "number" },
+            }, required: ["answer"] } } } }),
+      });
+      expect(schemaViolation.status).toBe(422);
+      expect((await schemaViolation.json()).error.code).toBe("structured_output_invalid");
     } finally {
       for (const [key, value] of Object.entries(previous)) restoreEnv(key, value);
       await rm(dir, { recursive: true, force: true });
