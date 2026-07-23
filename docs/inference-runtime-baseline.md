@@ -1,108 +1,232 @@
-# Inference Runtime Baseline
+# Final Inference Runtime Architecture
 
-This Phase 0 baseline freezes the native runtime's current responsibilities and observable behavior before decomposition. It is descriptive, not a new protocol contract.
+This document supersedes the Phase 0 baseline. It describes the production architecture after the inference-runtime hardening program. The old unversioned worker protocol, backend-owned process loops, permissive memory provenance, and monolithic native entrypoints are not supported compatibility surfaces.
 
-## Snapshot
+For build and runtime discovery details, see [Native Runtime Workers](native-runtimes.md). Performance work intentionally deferred beyond hardening is tracked in [Inference Runtime Benchmark Follow-up](inference-runtime-benchmark-follow-up.md).
 
-Line counts use `wc -l` on the working tree. The audit counts supplied before the Phase 0 characterization changes are retained for comparison. Current counts were rechecked on 2026-07-22 at 07:04 IST.
+## System ownership
 
-| File | Pre-Phase 0 audit | Current baseline |
-| --- | ---: | ---: |
-| `native/llama/clap-llama.cpp` | 1,811 | 1,765 |
-| `native/mlx/Sources/clap-mlx/main.swift` | 2,116 | 2,107 |
-| `native/mlx/Sources/clap-mlx/CacheCoordinator.swift` | 362 | 361 |
-| `packages/runtime-router/src/resident.ts` | 998 | 997 |
-
-The current values reflect concurrent extraction/characterization work already present in the working tree. This document does not attribute those deltas to the CMake gate.
-
-## Ownership And Responsibilities
-
-- `native/llama/clap-llama.cpp`: GGUF/llama.cpp model lifecycle, JSON-lines transport, prompt rendering/tokenization, sampling, stop and UTF-8 handling, request admission, decode-first batching, physical KV-slot mutation, Rust cache-plan application, telemetry, and terminal events.
-- `native/llama/CMakeLists.txt`: sole explicit manifest of production C++ translation units, vendored llama.cpp configuration, imported Rust cache archive linkage, worker installation, and CTest characterization registration.
-- `native/mlx/Sources/clap-mlx/main.swift`: MLX model lifecycle, JSON-lines transport, prompt/token processing, generation, physical MLX KV-cache mutation, scheduler integration, telemetry, and terminal events.
-- `native/mlx/Sources/clap-mlx/CacheCoordinator.swift`: Swift-to-C cache coordinator ownership, plan/view translation, slot/generation operations, plan commit/abort, and coordinator error propagation.
-- `native/cache`: backend-neutral Rust cache policy and C ABI. It decides eligible reuse, target/donor slots, evictions, leases, generations, and commit outcomes; it does not mutate llama.cpp or MLX cache objects.
-- `packages/runtime-router/src/resident.ts`: server-side worker process lifecycle, request correlation, model residency/retention state, cancellation and load/unload control, worker-output parsing, and propagation of tokens, usage, cache, timing, memory, and capability telemetry.
-
-## Legacy JSON-Lines Protocol
-
-There is no required protocol-version envelope. Each stdin line is decoded independently and each stdout line is one JSON object. Request IDs are optional strings; unsolicited telemetry omits `id`.
-
-### Inbound Variants
-
-| Variant | Current fields and behavior |
-| --- | --- |
-| Load | `type: "load"`, `id?`, `model`; returns model capabilities and retention. |
-| Unload | `type: "unload"`, `id?`; rejected while active requests exist. |
-| Shutdown | `type: "shutdown"`, `id?`; acknowledges completion and exits. |
-| Cancel | `type: "cancel"`, `id?`; an empty/missing ID is treated as active-request wildcard, while queued cancellation requires an exact non-empty ID. |
-| Concurrency update | `type: "set_max_active"`, `max_active`, plus optional previous value, limiting/adjustment metadata, retained-growth reserve, global resident bytes, and pressure state. |
-| Chat/generation | Any other `type` value, including omitted `type`, is treated as chat. Fields include `id?`, `model`, `messages`, `stream?`, token/sampling controls, stop as string or string array, penalties, tools/tool choice where supported, and cache intent/identity. |
-
-The backends accept overlapping but not formally versioned field sets. Unknown commands therefore fall through to chat instead of producing an unknown-command error.
-
-### Outbound Variants
-
-| Variant | Observable shape |
-| --- | --- |
-| Started | `{id, started: true, retention?}` after admission. |
-| Stream text | `{id, token}`; MLX also has a legacy `{id, content}` field in its message envelope. |
-| Prefill progress | `{id, prefill: {done, total}}` where emitted by the backend. |
-| Load completion | `{id, loaded: true, done: true, token_capabilities, retention?}`. |
-| Unload completion | `{id, unloaded: true, done: true}`. |
-| Control acknowledgement | `{id, done: true, retention?}` for shutdown/concurrency updates. |
-| Chat completion | `{id, done: true, finish_reason, cancelled, usage, cache, timing?, memory?}`; queued cancellation may emit only the cancellation terminal fields. |
-| Error | `{id?, error, code?}`. The machine-readable `code` is optional. |
-| Unsolicited telemetry | `{retention}` or memory/retention telemetry without an `id`. |
-
-All fields are additive/optional in the legacy parser; terminal messages are recognized by shape rather than an explicit event discriminator.
-
-## Cache Outcome Baseline
-
-- A coordinator plan can select continue-in-slot (`reuse_kind: "slot"`), restore from an anchor (`"anchor"`), branch/copy from a donor (`"branch"`), or no realized reuse (`reuse_kind: null`, `hit: false`).
-- Successful outcomes report planned and realized reuse token counts, target and optional donor slot/generation, scope, evictions, decision time, stable-boundary/checkpoint details, and candidate eligibility/rejection reasons.
-- Capacity or busy-slot planning outcomes apply backpressure and leave the request queued.
-- Non-capacity coordinator planning failures fail closed (`coordinator_plan_failed_closed`).
-- Runtime fallback telemetry currently includes coordinator unavailable, coordinator unavailable with no cache, coordinator advance failure, and decode retry with full prefill.
-- Materialization validates target/donor bounds and physical capabilities before commit. Failure clears the target physical slot and does not report successful reuse.
-- Generation/advance failures invalidate coordinator state where possible. Cache behavior remains backend-owned physically and Rust-owned logically.
-
-## Scheduler Ordering Baseline
-
-- GGUF rounds are decode-first: runnable decode requests retain active-vector order, followed by runnable prefill requests in the same stable order. Non-runnable requests are omitted. The characterization test also freezes duplicate/mixed request-ID ordering independently of ID value.
-- MLX gives highest priority to requests near their first token (residual prefill at or below 256), then first decode, then established decode, then other prefill. Equal-priority requests use ascending admission order.
-- Every runnable MLX request appears once per round, preventing arrival-based starvation. Prefill quantum is 512 when uncontended and 96 when contended. Near-first-token prefills may receive additional turns, capped at five.
-- Cancelled MLX requests are excluded. GGUF cancellation marks matching active requests and exact-ID queued requests according to the legacy asymmetry above.
-
-## Native Build And Test Gates
-
-- `runtime:cache:test` runs the locked Rust workspace independently.
-- `runtime:llama:test` configures the Clap-owned CMake project, builds only the C++ characterization executable, and runs its named CTest.
-- `runtime:mlx:test` builds the release Rust FFI archive needed by SwiftPM, then runs the Swift package tests independently.
-- `native:test` runs the three gates in cache, llama, MLX order.
-- `runtime:llama:build` configures and builds the `clap-llama` CMake target, then installs the runtime component into `libexec`; source and link manifests are not duplicated in the Bun script.
-
-## Verification Matrix
-
-The complete Phase 0 matrix below was run on 2026-07-22 between 07:02 and 07:04 IST on macOS 26.4.1 arm64 with Bun 1.3.14, Rust 1.92.0, CMake 4.3.0, and Apple Swift 6.3.1. Status is one of `PASS`, `FAIL`, or `SKIP`; `SKIP` includes its reason.
-
-| Gate | Exact command | Status | Notes |
+| Layer | Owner | Responsibilities | Explicitly does not own |
 | --- | --- | --- | --- |
-| TypeScript typecheck | `bun run typecheck` | PASS | Exit 0; root `tsc --noEmit -p tsconfig.json` produced no diagnostics. |
-| TypeScript tests | `bun test apps packages` | PASS | 271 passed, 0 failed, 1,214 expectations across 25 files in 7.84 seconds. |
-| Rust cache | `bun run runtime:cache:test` | PASS | 54 integration tests passed (36 coordinator, 10 retention, 8 ABI), 0 failed; unit/doc targets with no tests also passed. |
-| C++ characterization | `bun run runtime:llama:test` | PASS | CMake configured and built `clap-llama-characterization`; CTest passed 1/1. |
-| Swift/MLX tests | `bun run runtime:mlx:test` | PASS | 33 XCTest tests and 3 Swift Testing tests passed, 0 failed. |
-| GGUF production build/package | `bun run runtime:llama:build` | PASS | Built `clap-llama` with static llama.cpp and Rust cache dependencies; installed/up-to-date at `libexec/clap-llama`. |
-| MLX production build/package | `bun run runtime:mlx:build` | PASS | Production Swift build completed; packaged `libexec/clap-mlx` and `libexec/mlx.metallib`. |
-| Bundle validation | `bun run bundle:check` | PASS | Validated `clap-llama`, `clap-mlx`, and `mlx.metallib`. |
-| Legacy JSON/JSONL fixture parse | `bun -e 'import { readdir } from "node:fs/promises"; const dir="packages/runtime-router/fixtures/legacy-worker-protocol"; for (const name of (await readdir(dir)).filter((name) => name.endsWith(".json") \|\| name.endsWith(".jsonl")).sort()) { const text=await Bun.file(`${dir}/${name}`).text(); if (name.endsWith(".jsonl")) { const lines=text.split(/\r?\n/).filter((line) => line.trim()); lines.forEach((line, index) => { try { JSON.parse(line); } catch (error) { throw new Error(`${name}:${index + 1}: ${error}`); } }); console.log(`${name}: ${lines.length} JSONL records parsed`); } else { JSON.parse(text); console.log(`${name}: JSON parsed`); } }'` | PASS | Parsed manifest JSON plus 7 request, 13 llama-event, and 14 MLX-event JSONL records. |
-| Patch whitespace validation | `git diff --check` | PASS | Exit 0 with no diagnostics across the current workspace diff. |
-| Linux GGUF release gate | `bun run runtime:llama:build` | SKIP | Current host is macOS arm64; Linux CPU/CUDA release coverage requires a Linux runner. |
+| HTTP/control plane | `packages/server`, `packages/runtime-router` | API validation, authentication, cache-identity derivation and rotation, model resolution, global load admission, resident lifecycle, worker spawning, strict protocol decoding, parser selection, structured-output policy, telemetry projection | Native token generation, physical cache mutation, cache reuse policy |
+| Shared worker contract | `packages/worker-protocol` | Protocol-v1 TypeScript types, Zod schemas, validation, request/event discriminators, capability and memory contracts | Process lifecycle or backend behavior inference |
+| Cache policy | `native/cache` | Backend-neutral Rust coordinator, authenticated namespace decisions, donor/target selection, generations, leases, eviction, plan/commit/abort, C ABI | llama.cpp or MLX object mutation |
+| GGUF adapter | `native/llama` | llama.cpp model/runtime integration, prompt/token handling, bounded generation steps, scheduler, structured constraints, physical KV operations, telemetry, protocol-v1 transport | Cache-policy decisions or TypeScript process ownership |
+| MLX adapter | `native/mlx` | MLX model/runtime integration, bounded generation state, scheduling, physical cache operations, telemetry, protocol-v1 transport | Cache-policy decisions or TypeScript process ownership |
 
-### Classified Diagnostics
+The native entrypoints are intentionally thin: `native/llama/src/main.cpp` and `native/mlx/Sources/clap-mlx/main.swift` only assemble their applications. Production logic lives in focused modules. Ownership is enforced by `native:structure:check`, `native:ownership:check`, and `runtime:process:ownership`.
 
-- No required matrix command failed.
-- `runtime:llama:test` and `runtime:llama:build` emitted vendored llama.cpp configuration warnings: ccache was unavailable, OpenMP was not found, and ARM feature detection fell back to `-mcpu=native`. These are pre-existing host/toolchain warnings, not Phase 0 regressions: both targets built successfully using the detected CPU, Accelerate, BLAS, and Metal backends, and CTest passed.
-- `bun test apps packages` printed `[clap] ignoring invalid profile in broken.json: missing "name"`. This is expected output from the passing invalid-profile characterization test, not a suite failure.
-- An earlier package-local TypeScript invocation reported TS6310 project-reference diagnostics. The required root gate did not reproduce them: `bun run typecheck` passed with no diagnostics. The package-local invocation is therefore classified as a pre-existing alternate-invocation/project-reference issue outside this matrix, not a Phase 0 regression.
+## TypeScript control plane and process ownership
+
+`ResidentWorkerRegistry` performs global model admission and owns residency across both backends. Admission is serialized, reserves estimated bytes before launch, protects active/pinned/loading/target/reserved residents, evicts only eligible idle residents, and replans stale snapshots. It fails closed when available memory is unavailable or only estimated unless explicit headroom makes admission safe.
+
+`packages/runtime-router/src/process/resident-worker-process.ts` is the sole native inference spawn and request-correlation owner. It:
+
+1. resolves a configured or bundled worker command;
+2. creates unique per-launch paths and metadata;
+3. spawns one resident worker for one physical model identity;
+4. negotiates protocol v1 through `ready`;
+5. registers request IDs before writing commands;
+6. validates sequence and state transitions;
+7. maps typed worker results and telemetry;
+8. unloads and shuts down gracefully, then applies a bounded forced-stop timeout;
+9. finalizes launch metadata exactly once even when protocol and exit paths race.
+
+Backend packages discover binaries and validate model formats. They do not spawn inference processes or parse worker stdout.
+
+## Strict worker protocol v1
+
+Workers communicate as newline-delimited JSON, but every line is a strict protocol-v1 envelope. There is no legacy shape fallback.
+
+### Requests
+
+Every request has `protocol: 1`, a non-empty `request_id`, and one of these explicit `type` values:
+
+- `load`
+- `generate`
+- `cancel`
+- `set_max_active`
+- `unload`
+- `shutdown`
+
+`generate` requires the server-derived `cache_identity`; callers cannot supply authoritative identity material directly. Structured-output contracts are typed as `json_object` or `json_schema` with `best_effort` or `required` strength.
+
+### Events
+
+The worker first emits exactly one unscoped `ready` event containing strict worker capabilities. Request-scoped events carry a nonnegative, contiguous `sequence` and are one of `accepted`, `started`, `token`, `content`, `prefill_progress`, `completed`, or `failed`. Unscoped `telemetry` and `diagnostic` events cannot carry request scope. Completed results have explicit kinds: `loaded`, `generated`, `cancelled`, `max_active_updated`, `unloaded`, or `shutdown`.
+
+The decoder rejects oversized lines, malformed JSON, version mismatches, missing/duplicate readiness, unknown event types, malformed envelopes, scope violations, unknown request IDs, sequence gaps/regressions, and invalid state transitions. Fault codes are defined in `packages/runtime-router/src/protocol/errors.ts`; request-scoped faults reject that request, while worker-scoped faults terminate the unsafe launch.
+
+## Cache policy and physical adapters
+
+Rust owns logical cache correctness. The C++ and Swift adapters execute a validated plan against backend-native state, then commit or abort it. Physical mutation cannot occur outside the designated cache adapters, and generation primitives cannot occur outside the generation owners.
+
+A reuse transaction follows this order:
+
+1. derive authenticated cache and physical model identities;
+2. ask Rust to plan against current generations, leases, capabilities, and boundaries;
+3. validate donor/target and physical capability preconditions;
+4. copy, trim, clear, or continue native state through the backend adapter;
+5. confirm realized state and commit the logical plan;
+6. invalidate/clear and abort on any failed physical or logical transition;
+7. report planned versus realized reuse and classified candidate rejection reasons.
+
+This ordering prevents a logical hit from being published before physical materialization succeeds.
+
+## Authenticated cache identity and rotation
+
+The server derives an opaque v1 identity from the authenticated principal, installation secret generation, bounded display labels, project/harness/agent/session scope, and physical model identity. Secret-bearing labels are HMAC-derived before crossing the worker boundary. The wire contract contains fixed-width fingerprints and a numeric namespace ID; raw API keys and installation secrets are never sent to native workers or persisted in cache-decision records.
+
+Remote requests carrying cache intent require a valid API key. Loopback/embedded behavior follows server authentication policy. Rotate identity material with:
+
+```sh
+curl -X POST http://127.0.0.1:11435/clap/v1/cache/identity/rotate \
+  -H 'Authorization: Bearer <key>'
+```
+
+Rotation takes the installation-secret writer lock, blocks new identity derivation, lets already-dispatched old-generation requests reach terminal state, drains all residents, atomically installs a new generation, and reports `previousGeneration`, `newGeneration`, `rotatedAt`, and `clearedResidents`. Old-generation cache entries cannot match the new generation.
+
+## Capabilities, scheduling, and priority
+
+Behavior-sensitive choices use effective capabilities reported after model load, not backend-name sniffing. The capability surface includes:
+
+- cache: suffix trim, prefix branch, whole-state copy, prompt-boundary snapshots, quantized KV;
+- generation: structured-output modes and tool-template support;
+- modalities: accepted input and output modalities;
+- token limits: model/effective context, input/output bounds, allocation cap, and configured override.
+
+Backend labels remain valid only for mechanics such as binary selection, model-format validation, physical identity, and backend-specific configuration/error guidance.
+
+The only request/cache priority vocabulary is `interactive`, `normal`, and `background`. Both native schedulers preserve FIFO within a class, advance every runnable class before weighted extras, and do not destructively preempt active work. Interactive work receives greater weight and a larger prefill quantum; starvation tests ensure sustained interactive load cannot block normal or background requests indefinitely.
+
+## Parsers and structured output
+
+Assistant-output parser selection is trait-driven in `packages/server/src/parsers`:
+
+1. an exact user parser selection wins;
+2. discovered template family traits select user or built-in parsers;
+3. tool, response-format, tool-template, or reasoning traits select the generic structured parser;
+4. otherwise the plain parser is used.
+
+A model-name substring is not evidence of an output protocol. Parsing is centralized; native backends do not duplicate assistant-output parsers.
+
+For each requested structured contract, the loaded model advertises `native`, `post_validate`, or `unsupported`. `native` sends the typed constraint to the worker. `post_validate` validates the generated result in the control plane. `required` constraints fail when the effective capability cannot satisfy them; `best_effort` may use the supported fallback mode. Outcomes are classified for telemetry without storing caller schemas.
+
+## Honest memory and global admission
+
+Memory values carry all three parts: bytes, source, and basis.
+
+- `measured` requires a positive observation and a measured basis such as resident RSS or a runtime/worker allocator.
+- `estimated` may be zero and identifies its estimate basis, such as artifacts, architecture metadata, configured cache, cache components, or context configuration.
+- `unavailable` requires `bytes: null` and a reason basis.
+
+A missing measurement is never encoded as measured zero. Prometheus omits unavailable values and numeric values without provenance instead of inventing labels. Estimated retained bytes are separate from observed retained bytes.
+
+Global admission combines canonical model identity, artifact/configuration estimates, measured OS availability, configured OS/runtime headroom, existing reservations, and resident observations. Critical pressure can evict one eligible idle resident only after stale-state revalidation; active, pinned, loading, always-resident, target, and reserved models are protected.
+
+## Operator configuration
+
+Configuration precedence is defaults, `/etc/clap/clap.toml`, `$CLAP_HOME/clap.toml`, then explicit environment. `GET /clap/v1/config` shows effective config and loaded sources; `PATCH /clap/v1/config` writes the user file. Authentication and per-model worker settings can apply live or on the next worker start; server listener and limit changes require restart.
+
+Important controls:
+
+| Area | Configuration |
+| --- | --- |
+| Runtime discovery | `CLAP_LLAMA_WORKER`, `CLAP_MLX_WORKER`, `CLAP_HOME` |
+| Lifecycle/admission | `CLAP_KEEP_ALIVE`, `CLAP_MAX_ACTIVE`, `CLAP_MODEL_OS_HEADROOM_BYTES`, `CLAP_MODEL_RUNTIME_HEADROOM_BYTES`, `CLAP_UNKNOWN_MODEL_MEMORY_MIN_BYTES` |
+| Request queue | `[limits] max_inflight`, `queue_depth`, `max_active` (environment equivalents are consumed by the server) |
+| GGUF | `[llama]` or `CLAP_LLAMA_CONTEXT`, `CLAP_LLAMA_MAX_SESSION_CTX`, `CLAP_LLAMA_MAX_OUTPUT`, `CLAP_LLAMA_BATCH`, `CLAP_LLAMA_UBATCH`, `CLAP_LLAMA_GPU_LAYERS`, `CLAP_LLAMA_KV_TYPE`, `CLAP_LLAMA_RETAINED_MAX` |
+| MLX | `[mlx]` or `CLAP_MLX_CONTEXT`, `CLAP_MLX_MAX_SESSION_CTX`, `CLAP_MLX_MAX_OUTPUT`, `CLAP_MLX_KV_TYPE`, retained initial/max/budget/watermark/growth controls |
+| Checkpoints | `[cache.checkpoints]` or `CLAP_CACHE_CHECKPOINTS_ENABLED`, minimum/interval/max and budget controls |
+| Launch logs | `CLAP_WORKER_LOG_MAX_LAUNCHES_PER_MODEL`, `CLAP_WORKER_LOG_MAX_BYTES_PER_BACKEND`, `CLAP_WORKER_SHUTDOWN_TIMEOUT_MS` |
+| Auth/telemetry | `[auth] require_api_key`, `CLAP_REQUIRE_API_KEY`, `[telemetry] cache_decisions_enabled`, maximum MiB and age |
+
+Per-model `[models."owner/name"]` sections can set lifecycle and worker values applied to that model on its next start.
+
+## Operator diagnostics
+
+Use these paths before inspecting process state manually:
+
+| Path | Purpose |
+| --- | --- |
+| `GET /clap/v1/health` | Liveness, version, uptime |
+| `GET /clap/v1/backends` | Worker discovery and platform/install reasons |
+| `GET /clap/v1/runtime` | Runtime and configuration summary |
+| `GET /clap/v1/runtime/models` | Loaded state, memory provenance, retention, limits, effective capabilities, launch links |
+| `GET /clap/v1/dashboard` and `/clap/v1/dashboard/stream` | Current operational snapshot and live events |
+| `GET /clap/v1/cache-decisions` and `/:id` | Persisted cache decision evidence |
+| `GET /metrics` | Prometheus counters, queues, priorities, residency, structured outcomes, and honest memory series |
+| `GET /openapi.json` | Machine-readable HTTP contract |
+
+Per-launch artifacts are under:
+
+```text
+$CLAP_HOME/logs/workers/<backend>/<model-identity-hash>/<launch-id>.stderr.log
+$CLAP_HOME/logs/workers/<backend>/<model-identity-hash>/<launch-id>.json
+```
+
+Metadata includes launch/model identity fingerprints, PID, command, protocol version, lifecycle phase/timestamps, exit status, and crash classification. Paths use canonical model fingerprints rather than raw model paths. Finalized pairs are pruned by per-model count and per-backend bytes; active, unfinished, malformed, and invalid entries are not silently deleted.
+
+Persisted cache decisions are stored under `$CLAP_HOME/telemetry` with configured byte/age retention. They include launch IDs so historical rows are distinguishable from current resident cache state.
+
+Typical operator error classes:
+
+- discovery/platform: worker missing, unsupported MLX platform, missing MLX Metal library, model path/layout invalid;
+- protocol: the strict fault codes listed above, surfaced with the per-launch log hint;
+- admission: unavailable memory, insufficient headroom, no safe eviction candidate, or model estimate above capacity;
+- structured output: required capability unavailable or generated output invalid;
+- cache: identity authentication required, plan/materialization mismatch, generation mismatch, busy lease, or fail-closed coordinator error;
+- native resource failure: backend-specific message plus launch log path; GGUF guidance may suggest a smaller quant/context/batch/GPU-layer configuration.
+
+## Cache correctness tiers and assets
+
+The correctness program separates deterministic logic from physical-model coverage:
+
+- **Tier A**: locked Rust coordinator tests, C++ tests, Swift tests, protocol isolation, and gate wiring. It needs no downloaded model.
+- **Tier B**: default pinned physical GGUF and MLX assets, run through the backend probes and canonical scenarios.
+- **Tier C**: explicitly provisioned architecture/format expansion matrix. Missing declared assets are skipped unless assets are required.
+
+Asset pins and expected probe metadata live in `config/cache-correctness-assets.json`. Cases, architectures, scenarios, timeouts, and resident-byte ceilings live in `config/cache-correctness-matrix.json`. Asset validation rejects mutable revisions and mismatched files/probe facts. Reports and sanitized logs are written by `scripts/run-cache-correctness-matrix.ts`; secrets and local asset paths must not enter committed output.
+
+Run:
+
+```sh
+bun run native:cache:tier-a
+bun run native:cache:tier-b
+bun run native:cache:tier-c
+```
+
+To make absent pinned assets fail instead of skip:
+
+```sh
+CLAP_CACHE_TEST_REQUIRE_ASSETS=1 bun run native:cache:tier-b
+CLAP_CACHE_TEST_REQUIRE_ASSETS=1 bun run native:cache:tier-c
+```
+
+## Required verification
+
+Run from the repository root with Bun:
+
+```sh
+bun run typecheck
+bun test apps packages
+bun run native:build
+bun run native:test
+bun run bundle:check
+```
+
+Individual architectural gates are also directly runnable:
+
+```sh
+bun run cache:identity:check
+bun run structured-output:gate
+bun run capability-priority:gate
+bun run memory:honesty:check
+bun run native:structure:check
+bun run native:ownership:check
+bun run runtime:process:ownership
+bun run native:probe:leak:check
+bun run native:cache:gate:check
+```
+
+`native:test` includes the identity, structured-output, capability/priority, memory, structure, ownership, process, and Tier A gates. `native:build` builds both native workers and therefore requires macOS arm64 for MLX. On other hosts, run the GGUF/cache gates supported by that host and use a macOS arm64 runner for the full matrix.

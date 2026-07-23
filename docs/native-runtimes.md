@@ -1,34 +1,50 @@
 # Native Runtime Workers
 
-Clap ships native runtime workers in `libexec/` and treats missing workers as packaging blockers.
-There are no mock, fallback, or placeholder runtime paths in the product flow.
+Clap ships resident native workers in `libexec/`. Missing or invalid workers are explicit installation/platform failures; production does not substitute mocks, one-shot subprocesses, or an unversioned protocol.
 
-## JSON-Line Protocol
+The complete ownership and operator model is documented in [Final Inference Runtime Architecture](inference-runtime-baseline.md).
 
-Both workers read exactly one JSON object from stdin and write JSON objects to stdout, one per line.
+## Runtime discovery
 
-Input:
+The TypeScript control plane checks `CLAP_LLAMA_WORKER` or `CLAP_MLX_WORKER` first, then bundled candidates around the executable and repository `libexec` directory. A configured value may contain a command plus arguments. The executable must exist and be nonempty.
 
-```json
-{"type":"chat","model":"/path/to/model","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":256,"temperature":0.7}
+- GGUF discovery failure reports `not_installed` with bundle diagnostics.
+- MLX requires macOS arm64. Other platforms report `unsupported`.
+- MLX discovery also requires `mlx.metallib` or `Resources/mlx.metallib` next to the worker.
+
+Inspect discovery without launching a model at `GET /clap/v1/backends`. Validate packaged artifacts with:
+
+```sh
+bun run bundle:check
 ```
 
-Output:
+## Strict protocol v1
+
+Both workers use newline-delimited JSON over stdin/stdout. Every envelope contains `protocol: 1`; requests have nonempty `request_id` and explicit request types. A worker must emit one `ready` event before any other event.
+
+Example load request:
 
 ```json
-{"token":"partial text"}
-{"done":true}
+{"protocol":1,"type":"load","request_id":"load_1","model":"/absolute/path/to/model"}
 ```
 
-Errors are reported as JSON and cause a non-zero exit:
+The corresponding event progression is scoped and sequenced:
 
 ```json
-{"error":"human readable failure"}
+{"protocol":1,"type":"accepted","request_id":"load_1","sequence":0}
+{"protocol":1,"type":"started","request_id":"load_1","sequence":1}
+{"protocol":1,"type":"completed","request_id":"load_1","sequence":2,"result":{"kind":"loaded","effective_model_capabilities":{},"token_capabilities":{}}}
 ```
 
-## llama.cpp GGUF Worker
+The abbreviated capability objects above illustrate event order only; real `loaded` results must satisfy the strict capability schemas in `packages/worker-protocol/src/schemas.ts`.
 
-Build and bundle:
+Generation requests carry a server-derived `cache_identity` and optional typed `structured_output`; callers do not write worker commands directly. Request types are `load`, `generate`, `cancel`, `set_max_active`, `unload`, and `shutdown`. Event types are `ready`, `accepted`, `started`, `token`, `content`, `prefill_progress`, `completed`, `failed`, `telemetry`, and `diagnostic`.
+
+Stdout is protocol-only. Native diagnostics go to stderr and are captured per launch. Unknown events, malformed envelopes, version mismatch, sequence/state violations, or non-JSON stdout are protocol faults; there is no legacy parser fallback.
+
+## llama.cpp GGUF worker
+
+Build and package:
 
 ```sh
 bun run runtime:llama:vendor
@@ -36,24 +52,63 @@ bun run runtime:llama:build
 bun run bundle:check
 ```
 
-`bun run runtime:llama:vendor` clones `ggerganov/llama.cpp` into `vendor/llama.cpp` and initializes submodules.
-`bun run runtime:llama:build` configures llama.cpp with CMake, enables Metal on macOS, builds llama.cpp static libraries, links `native/llama/clap-llama.cpp` directly against llama.cpp APIs, and installs `libexec/clap-llama`.
-The worker is resident: `load` maps GGUF weights once into the process, `chat` reuses the loaded model/context, and `unload`/`shutdown` free them. It does not shell out to `llama-cli`.
+`runtime:llama:vendor` provisions the pinned llama.cpp source. `runtime:llama:build` configures the Clap-owned CMake project, builds the Rust cache FFI and focused C++ modules, links the resident worker, and installs `libexec/clap-llama`.
 
-## Swift MLX Worker
+Production code is split across protocol, worker/application state, model runtime, request preparation, prompt/sampling/stop handling, bounded generation stepping, scheduling, structured output, cache identity/execution, environment, and telemetry modules under `native/llama/src`. Physical KV mutation is confined to the cache executor; logical reuse policy remains in Rust.
 
-Build and bundle on macOS arm64:
+Useful resource controls include `CLAP_LLAMA_CONTEXT`, `CLAP_LLAMA_MAX_SESSION_CTX`, `CLAP_LLAMA_MAX_OUTPUT`, `CLAP_LLAMA_BATCH`, `CLAP_LLAMA_UBATCH`, `CLAP_LLAMA_GPU_LAYERS`, `CLAP_LLAMA_KV_TYPE`, and `CLAP_LLAMA_RETAINED_MAX`.
+
+## Swift MLX worker
+
+Build and package on macOS arm64:
 
 ```sh
 bun run runtime:mlx:build
 bun run bundle:check
 ```
 
-The Swift package in `native/mlx` depends on `mlx-swift-lm`, `mlx-swift`, and Hugging Face tokenizer packages. It builds a real `clap-mlx` executable into `libexec/clap-mlx`.
-The worker loads local MLX model directories, runs generation through MLX Swift LM, and writes Clap JSON-line token/content messages. The build script fails immediately on non-macOS-arm64 hosts.
+The Swift package builds the resident `clap-mlx` executable and packages its Metal library. Production code is split into application, protocol, scheduling, model, configuration, telemetry, tool, support, generation-adapter, and cache-adapter modules under `native/mlx/Sources/clap-mlx`, with reusable worker/cache policy modules in sibling Swift targets.
 
-## Runtime Discovery
+Physical MLX cache copy/trim/clear is confined to the cache adapter. Scheduling and bounded generation state are protocol-independent. Logical cache planning and generations remain Rust-owned.
 
-The control plane checks explicit `CLAP_LLAMA_WORKER` / `CLAP_MLX_WORKER` paths first, then bundled `libexec/clap-llama` and `libexec/clap-mlx` candidates. Missing binaries are reported as `not_installed`; they are not replaced with mocks.
+Useful controls include `CLAP_MLX_CONTEXT`, `CLAP_MLX_MAX_SESSION_CTX`, `CLAP_MLX_MAX_OUTPUT`, `CLAP_MLX_KV_TYPE`, and retained-cache initial/max/budget/watermark/growth settings documented in the final architecture guide.
 
-Model inventory endpoints only list installed/cached/local models. Curated aliases are exposed separately at `/clap/v1/aliases` and can still be used with `clap pull <alias>`.
+## Process lifecycle and logs
+
+Only `ResidentWorkerProcess` spawns native inference workers. A process loads one physical model identity and remains resident across requests. Load is single-flight; unload and shutdown are explicit protocol requests. The control plane waits for graceful shutdown and then uses `CLAP_WORKER_SHUTDOWN_TIMEOUT_MS` as the forced-stop bound.
+
+Every process start has independent artifacts:
+
+```text
+$CLAP_HOME/logs/workers/<backend>/<model-identity-hash>/<launch-id>.stderr.log
+$CLAP_HOME/logs/workers/<backend>/<model-identity-hash>/<launch-id>.json
+```
+
+The sidecar records launch identity, command, PID, protocol, phase, timestamps, exit status, and crash classification. Retention is controlled with `CLAP_WORKER_LOG_MAX_LAUNCHES_PER_MODEL` and `CLAP_WORKER_LOG_MAX_BYTES_PER_BACKEND`.
+
+## Verification
+
+Run backend-specific tests independently:
+
+```sh
+bun run runtime:cache:test
+bun run runtime:llama:test
+bun run runtime:mlx:test
+```
+
+Run all production builds and native gates:
+
+```sh
+bun run native:build
+bun run native:test
+bun run bundle:check
+```
+
+For physical cache probes with provisioned pinned models:
+
+```sh
+bun run native:cache:tier-b
+bun run native:cache:tier-c
+```
+
+The MLX build/test commands require macOS arm64. Rust and supported GGUF checks remain independently runnable on other hosts.
