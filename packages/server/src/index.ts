@@ -143,6 +143,7 @@ type ServerEnv = {
 export function createServer(
   residents = new ResidentWorkerRegistry(),
   lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdownAsync(entry.key)),
+  options: { memorySnapshot?: ResidentWorkerRegistry["memorySnapshot"] } = {},
 ) {
   const app = new Hono<ServerEnv>();
   const { config, sources: configSources } = loadClapConfig();
@@ -199,7 +200,7 @@ export function createServer(
   const persistedHistorical = (event: PersistedCacheDecision, warm: Set<string>) =>
     event.serverLaunchId !== metrics.serverLaunchId
     || (event.workerLaunchId !== undefined && !warm.has(event.workerLaunchId));
-  residents.memorySnapshot = async (pids) => {
+  residents.memorySnapshot = options.memorySnapshot ?? (async (pids) => {
     const [memory, processUsage] = await Promise.all([
       systemMemorySnapshot(),
       sampleProcessUsage(pids),
@@ -209,7 +210,7 @@ export function createServer(
       availableMemoryBytes: memory.availableBytes,
       residentBytesByPid: new Map([...processUsage].map(([pid, usage]) => [pid, usage.rssBytes])),
     };
-  };
+  });
   residents.rssSampler = processRssBytes;
   residents.configureResidency({
     lifecycle,

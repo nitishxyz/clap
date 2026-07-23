@@ -20,14 +20,15 @@ process.env.CLAP_MODEL_RUNTIME_HEADROOM_BYTES = "0";
 
 const mlxSupported = process.platform === "darwin" && process.arch === "arm64";
 
-function ampleMemoryResidents(): ResidentWorkerRegistry {
+function serverWithAmpleMemory() {
   const residents = new ResidentWorkerRegistry();
-  residents.memorySnapshot = async () => ({
-    physicalMemoryBytes: 1_000_000_000_000,
-    availableMemoryBytes: 1_000_000_000_000,
-    residentBytesByPid: new Map(),
+  return createServer(residents, undefined, {
+    memorySnapshot: async () => ({
+      physicalMemoryBytes: 1_000_000_000_000,
+      availableMemoryBytes: 1_000_000_000_000,
+      residentBytesByPid: new Map(),
+    }),
   });
-  return residents;
 }
 
 describe("clap server", () => {
@@ -811,7 +812,7 @@ describe("clap server", () => {
       await writeFile(join(model, "tokenizer.json"), "{}");
       await writeFile(join(model, "model.safetensors"), "fake");
 
-      const response = await createServer(ampleMemoryResidents()).request("/v1/chat/completions", {
+      const response = await serverWithAmpleMemory().request("/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -3216,7 +3217,7 @@ describe("clap server", () => {
       await writeFile(join(repoDir, "tokenizer.json"), "{}");
       await writeFile(join(repoDir, "model.safetensors"), "weights");
 
-      const response = await createServer(ampleMemoryResidents()).request("/v1/chat/completions", {
+      const response = await serverWithAmpleMemory().request("/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
