@@ -276,6 +276,32 @@ fn short_side_request_evicts_an_older_side_slot_not_recent_primary() {
 }
 
 #[test]
+fn side_request_prefers_protected_anchor_over_longer_live_session() {
+    let mut cache = manager(4);
+    let anchor_tokens = [1, 2, 3];
+    let anchor = materialize_anchor(&mut cache, &anchor_tokens, namespace(1), Scope::Harness);
+
+    let primary_tokens = [1, 2, 3, 4, 5];
+    let mut primary_request = request(&primary_tokens, namespace(1), 12, 0);
+    primary_request.labels.session = 12;
+    let primary = cache.plan(primary_request).unwrap();
+    commit_idle(&mut cache, &primary, primary_tokens.len(), SlotState::Session);
+
+    let mut side_request = request(
+        &[1, 2, 3, 4, 9],
+        namespace(1),
+        12,
+        Capabilities::WHOLE_STATE_COPY,
+    );
+    side_request.labels.session = 12;
+    side_request.labels.side_request = true;
+    let side = cache.plan(side_request).unwrap();
+    assert_eq!(side.operation, Operation::Restore);
+    assert_eq!(side.donor.as_ref().unwrap().slot, anchor);
+    assert_eq!(side.reuse_tokens, anchor_tokens.len());
+}
+
+#[test]
 fn saturated_anchor_pool_evicts_an_idle_anchor_instead_of_returning_no_capacity() {
     let mut cache = manager(3);
     for suffix in 0..3 {

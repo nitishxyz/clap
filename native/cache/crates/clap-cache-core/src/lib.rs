@@ -835,13 +835,15 @@ impl CacheManager {
                     .then_some((id, prefix))
             })
             .max_by(|(left_id, left_prefix), (right_id, right_prefix)| {
-                left_prefix
+                let left = &self.slots[*left_id as usize];
+                let right = &self.slots[*right_id as usize];
+                let left_anchor = (request.labels.side_request && left.state == SlotState::Anchor) as u8;
+                let right_anchor = (request.labels.side_request && right.state == SlotState::Anchor) as u8;
+                left_anchor
+                    .cmp(&right_anchor)
+                    .then_with(|| left_prefix
                     .cmp(right_prefix)
-                    .then_with(|| {
-                        let left = &self.slots[*left_id as usize];
-                        let right = &self.slots[*right_id as usize];
-                        donor_rank(left, request).cmp(&donor_rank(right, request))
-                    })
+                    .then_with(|| donor_rank(left, request).cmp(&donor_rank(right, request))))
                     .then_with(|| right_id.cmp(left_id))
             })
     }
