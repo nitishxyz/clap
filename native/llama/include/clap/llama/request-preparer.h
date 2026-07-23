@@ -31,6 +31,7 @@ RequestBudget validate_request_budget(int prompt_count, int context_size,
                                       int requested_max_tokens,
                                       int configured_max_output,
                                       int session_cap);
+uint64_t cache_capabilities(bool hybrid);
 
 class RequestPreparer {
  public:

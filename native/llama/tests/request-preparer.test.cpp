@@ -6,6 +6,8 @@
 #include <string>
 
 int main() {
+  assert((clap::llama::cache_capabilities(true) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) == 0);
+  assert((clap::llama::cache_capabilities(false) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) != 0);
   auto budget = clap::llama::validate_request_budget(10, 100, 0, 20, 0);
   assert(budget.max_tokens == 20);
   assert(budget.output_reserve == 20);

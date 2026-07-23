@@ -39,6 +39,7 @@ class WorkerState {
   bool same_path(const std::string& path) const { return runtime_.same_path(path); }
   const std::string& model_path() const noexcept { return runtime_.model_path(); }
   bool has_encoder() const noexcept { return runtime_.has_encoder(); }
+  bool hybrid() const noexcept { return runtime_.hybrid(); }
   int32_t max_active() const noexcept { return max_active_; }
   int32_t batch_capacity() const;
   int32_t effective_context_window() const noexcept { return runtime_.backend_allocation_cap(); }

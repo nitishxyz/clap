@@ -179,8 +179,9 @@ bool Worker::dispatch(const std::string& line) {
       const int32_t effective = state_.effective_context_window();
       v1_->completed(request.request_id, {{"kind", "loaded"}, {"model", model},
         {"effective_model_capabilities", {
-          {"cache", {{"partial_suffix_trim", true}, {"partial_prefix_branch", true},
-            {"whole_state_copy", true}, {"prompt_boundary_snapshots", true},
+          {"cache", {{"partial_suffix_trim", !state_.hybrid()},
+            {"partial_prefix_branch", !state_.hybrid()},
+            {"whole_state_copy", true}, {"prompt_boundary_snapshots", !state_.hybrid()},
             {"quantized_kv", state_.kv_format().find('q') != std::string::npos}}},
           {"generation", {{"structured_output", {{"json_object", "native"},
             {"json_schema", "native"}, {"post_validation", true},
