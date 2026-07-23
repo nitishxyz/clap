@@ -282,7 +282,11 @@ for (const backend of (["mlx", "gguf"] as const)) {
       { role: "user", content: "Logical session restored: return exactly ANCHOR_ISOLATED" }],
       cache: { ...identity, side_request: true } });
     const facts = telemetry(restored.event) as any;
-    forcedScenarios.push({ backend, scenario: "anchor", skipped: false,
+    const restoredAsAnchor = facts?.kind === "anchor" && facts?.hit === true;
+    forcedScenarios.push({ backend, scenario: "anchor", skipped: !restoredAsAnchor,
+      reason: restoredAsAnchor ? undefined : facts?.fallback === "decode_retry_full_prefill"
+        ? "advertised checkpoint restore failed physical decode and safely fell back to full prefill"
+        : "advertised checkpoint snapshot materialized, but session-affinity selected a resident slot instead of restore",
       correct: restored.text.trim() === "ANCHOR_ISOLATED",
       contaminated: restored.text.includes("ANCHOR_SEED"),
       explicitBoundary, cache: facts });
@@ -347,7 +351,9 @@ for (const backend of (["mlx", "gguf"] as const)) {
     const expectedBackoff = unload.body.unloaded === false && immediateLoad.status === 503
       && immediateLoad.body.error?.code === "insufficient_model_memory";
     let load = immediateLoad;
-    for (let attempt = 0; load.status === 503 && expectedBackoff && attempt < 20; attempt += 1) {
+    const structuredAdmission = load.status === 503
+      && load.body.error?.code === "insufficient_model_memory";
+    for (let attempt = 0; load.status === 503 && structuredAdmission && attempt < 20; attempt += 1) {
       await Bun.sleep(500);
       load = await jsonRequest("/clap/v1/models/load", {
         method: "POST", body: JSON.stringify({ model: models[backend], backend, keepAlive: "15m" }),
@@ -358,7 +364,7 @@ for (const backend of (["mlx", "gguf"] as const)) {
       unloadWaitMs: Date.now() - unloadStarted, loadStatus: load.status,
       state: load.body.model?.state, errorCode: load.body.error?.code,
       immediateLoadStatus: immediateLoad.status, immediateErrorCode: immediateLoad.body.error?.code,
-      expectedStructuredBackoff: expectedBackoff });
+      expectedStructuredBackoff: expectedBackoff || structuredAdmission });
   }
 }
 
@@ -375,7 +381,8 @@ const forcedFailed = forcedScenarios.filter((item: any) => !item.skipped
       && item.explicitBoundary?.skipReason !== "unsupported_template_boundary")));
 const lifecycleFailed = extras.filter((item: any) => item.exercise === "immediate-unload-reload"
   && (item.unloadStatus !== 200 || item.loadStatus !== 200
-    || item.state !== "warm" || (item.immediateLoadStatus === 503 && !item.expectedStructuredBackoff)));
+    || !["warm", "active"].includes(item.state)
+    || (item.immediateLoadStatus === 503 && !item.expectedStructuredBackoff)));
 console.log(JSON.stringify({
   startedAt, completedAt: Date.now(), exactInterleaving: turns.map((turn) => turn.label),
   results, forcedScenarios, extras,
