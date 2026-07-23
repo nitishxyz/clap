@@ -16,6 +16,7 @@ type CacheEvent = {
   status?: string;
   promptTokenCount?: number;
   workerLaunchId?: string;
+  stableBoundaries?: Array<{ kind?: string; label?: string; status?: string; materialized?: boolean; skipReason?: string }>;
   cache?: {
     hit?: boolean;
     kind?: string;
@@ -143,7 +144,21 @@ function telemetry(event: CacheEvent | undefined) {
     donorSlot: event.cache?.donorSlot,
     targetSlot: event.cache?.targetSlot,
     fallback: event.cache?.fallback,
+    stableBoundaries: event.stableBoundaries,
   } : null;
+}
+
+async function runChat(backend: Backend, body: Record<string, unknown>) {
+  const requestStarted = Date.now();
+  const { status, body: response } = await jsonRequest("/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: models[backend], backend, temperature: 0,
+      seed: 4242, max_tokens: 32, ...body }),
+  });
+  if (status !== 200) throw new Error(`${backend} forced scenario failed (${status}): ${JSON.stringify(response)}`);
+  return {
+    text: response.choices?.[0]?.message?.content ?? "",
+    event: await cacheEvent(models[backend]!, requestStarted),
+  };
 }
 
 for (let index = 0; index < turns.length; index += 1) {
@@ -198,6 +213,82 @@ for (let index = 0; index < turns.length; index += 1) {
 }
 
 const extras: unknown[] = [];
+
+const forcedScenarios: unknown[] = [];
+for (const backend of (["mlx", "gguf"] as const)) {
+  await jsonRequest("/clap/v1/models/load", { method: "POST", body: JSON.stringify({
+    model: models[backend], backend, keepAlive: "15m",
+  }) });
+  const runtime = await jsonRequest("/clap/v1/runtime/models");
+  const loaded = (runtime.body.models ?? []).find((entry: any) => entry.id === models[backend]);
+  const capabilities = loaded?.worker?.effectiveCapabilities?.cache ?? loaded?.effectiveCapabilities?.cache;
+
+  if (capabilities?.partialPrefixBranch !== true) {
+    forcedScenarios.push({ backend, scenario: "branch", skipped: true,
+      reason: "effective cache capability partialPrefixBranch=false for this model architecture" });
+  } else {
+    const system = `${systemPrompt(backend, "A")} Forced branch shared prefix `
+      + "one two three four five six seven eight nine ten ".repeat(8);
+    const cache = { namespace: `forced-${backend}`, project: "deployment", harness: "forced-v1",
+      agent: "branch-agent", session: "shared-branch-cache-domain", priority: "interactive" };
+    const seed = await runChat(backend, { messages: [{ role: "system", content: system },
+      { role: "user", content: "Logical session seed: return exactly BRANCH_SEED" }], cache });
+    if (seed.text.trim() !== "BRANCH_SEED") throw new Error(`${backend} branch seed response mismatch`);
+    const controller = new AbortController();
+    const busy = fetch(`${baseURL}/v1/chat/completions`, { method: "POST", headers,
+      signal: controller.signal, body: JSON.stringify({ model: models[backend], backend,
+        messages: [{ role: "system", content: system },
+          { role: "user", content: "Logical session busy: write the word BUSY repeatedly." }],
+        stream: true, temperature: 0, max_tokens: 1024, cache }) });
+    await Bun.sleep(150);
+    const branch = await runChat(backend, { messages: [{ role: "system", content: system },
+      { role: "user", content: "Logical session isolated: return exactly BRANCH_ISOLATED" }], cache });
+    controller.abort();
+    try { await busy; } catch {}
+    const facts = telemetry(branch.event) as any;
+    forcedScenarios.push({ backend, scenario: "branch", skipped: false,
+      correct: branch.text.trim() === "BRANCH_ISOLATED", contaminated: branch.text.includes("BUSY")
+        || branch.text.includes("BRANCH_SEED"), cache: facts });
+  }
+
+  if (capabilities?.promptBoundarySnapshots !== true || capabilities?.wholeStateCopy !== true) {
+    forcedScenarios.push({ backend, scenario: "anchor", skipped: true,
+      reason: `effective cache capabilities promptBoundarySnapshots=${String(capabilities?.promptBoundarySnapshots)} wholeStateCopy=${String(capabilities?.wholeStateCopy)}` });
+  } else {
+    const stable = `${systemPrompt(backend, "C")} Forced stable anchor `
+      + "amber bronze cobalt denim emerald fuchsia gold hazel indigo jade ".repeat(12);
+    const identity = { namespace: `forced-anchor-${backend}`, project: "deployment",
+      harness: "forced-anchor-v1", agent: "shared-anchor-agent", session: "shared-anchor-cache-domain",
+      priority: "normal", boundaries: [{ kind: "messages", through_message: 0, label: "stable-system" }] };
+    const seed = await runChat(backend, { messages: [{ role: "system", content: stable },
+      { role: "user", content: "Logical session anchor seed: return exactly ANCHOR_SEED" }], cache: identity });
+    if (seed.text.trim() !== "ANCHOR_SEED") throw new Error(`${backend} anchor seed response mismatch`);
+    const seedFacts = telemetry(seed.event) as any;
+    const explicitBoundary = seedFacts?.stableBoundaries?.find((item: any) => item.label === "stable-system");
+    await Bun.sleep(500);
+    const fillCount = 160;
+    for (let offset = 0; offset < fillCount; offset += 16) {
+      await Promise.all(Array.from({ length: Math.min(16, fillCount - offset) }, async (_, index) => {
+        const filler = offset + index;
+        const response = await jsonRequest("/v1/chat/completions", { method: "POST", body: JSON.stringify({
+          model: models[backend], backend, messages: [{ role: "user", content: `Filler ${filler}` }],
+          temperature: 0, max_tokens: 1, cache: { namespace: `filler-${backend}-${filler}`,
+            session: `filler-${filler}`, priority: "interactive" },
+        }) });
+        if (response.status !== 200) throw new Error(`${backend} anchor filler ${filler} failed (${response.status})`);
+      }));
+    }
+    const restored = await runChat(backend, { messages: [{ role: "system", content: stable },
+      { role: "user", content: "Logical session restored: return exactly ANCHOR_ISOLATED" }],
+      cache: { ...identity, side_request: true } });
+    const facts = telemetry(restored.event) as any;
+    forcedScenarios.push({ backend, scenario: "anchor", skipped: false,
+      correct: restored.text.trim() === "ANCHOR_ISOLATED",
+      contaminated: restored.text.includes("ANCHOR_SEED"),
+      explicitBoundary, cache: facts });
+  }
+}
+
 for (const backend of (["mlx", "gguf"] as const)) {
   const structured = await jsonRequest("/v1/chat/completions", {
     method: "POST",
@@ -240,22 +331,35 @@ for (const backend of (["mlx", "gguf"] as const)) {
 }
 
 for (const backend of (["mlx", "gguf"] as const)) {
-  const unload = await jsonRequest("/clap/v1/models/unload", {
-    method: "POST", body: JSON.stringify({ model: models[backend], backend }),
-  });
-  await Bun.sleep(500);
-  let load = await jsonRequest("/clap/v1/models/load", {
-    method: "POST", body: JSON.stringify({ model: models[backend], backend, keepAlive: "15m" }),
-  });
-  for (let attempt = 0; load.status === 503 && attempt < 2; attempt += 1) {
-    await Bun.sleep(2000);
-    load = await jsonRequest("/clap/v1/models/load", {
+  for (const candidate of (["mlx", "gguf"] as const)) {
+    await jsonRequest("/clap/v1/models/unload", { method: "POST", body: JSON.stringify({
+      model: models[candidate], backend: candidate,
+    }) });
+  }
+  for (let round = 1; round <= 3; round += 1) {
+    const unloadStarted = Date.now();
+    const unload = await jsonRequest("/clap/v1/models/unload", {
+      method: "POST", body: JSON.stringify({ model: models[backend], backend }),
+    });
+    const immediateLoad = await jsonRequest("/clap/v1/models/load", {
       method: "POST", body: JSON.stringify({ model: models[backend], backend, keepAlive: "15m" }),
     });
+    const expectedBackoff = unload.body.unloaded === false && immediateLoad.status === 503
+      && immediateLoad.body.error?.code === "insufficient_model_memory";
+    let load = immediateLoad;
+    for (let attempt = 0; load.status === 503 && expectedBackoff && attempt < 20; attempt += 1) {
+      await Bun.sleep(500);
+      load = await jsonRequest("/clap/v1/models/load", {
+        method: "POST", body: JSON.stringify({ model: models[backend], backend, keepAlive: "15m" }),
+      });
+    }
+    extras.push({ backend, exercise: "immediate-unload-reload", round,
+      unloadStatus: unload.status, unloaded: unload.body.unloaded,
+      unloadWaitMs: Date.now() - unloadStarted, loadStatus: load.status,
+      state: load.body.model?.state, errorCode: load.body.error?.code,
+      immediateLoadStatus: immediateLoad.status, immediateErrorCode: immediateLoad.body.error?.code,
+      expectedStructuredBackoff: expectedBackoff });
   }
-  extras.push({ backend, exercise: "unload-reload", unloadStatus: unload.status,
-    unloaded: unload.body.unloaded, loadStatus: load.status, state: load.body.model?.state,
-    errorCode: load.body.error?.code });
 }
 
 const rotate = await jsonRequest("/clap/v1/cache/identity/rotate", { method: "POST", body: "{}" });
@@ -263,11 +367,21 @@ const health = await jsonRequest("/clap/v1/health");
 const failed = results.filter((item: any) => !item.correct || item.contaminated
   || item.cache?.status !== "ok" || typeof item.cache?.hit !== "boolean"
   || (item.continuation && (item.cache.hit !== true || !(item.cache.reusedTokens > 0))));
+const forcedFailed = forcedScenarios.filter((item: any) => !item.skipped
+  && (!item.correct || item.contaminated || item.cache?.status !== "ok"
+    || item.cache?.hit !== true || !(item.cache?.reusedTokens > 0)
+    || item.cache?.kind !== item.scenario || !(item.cache?.targetGeneration > 0)
+    || (item.scenario === "anchor" && item.explicitBoundary?.status !== "resolved"
+      && item.explicitBoundary?.skipReason !== "unsupported_template_boundary")));
+const lifecycleFailed = extras.filter((item: any) => item.exercise === "immediate-unload-reload"
+  && (item.unloadStatus !== 200 || item.loadStatus !== 200
+    || item.state !== "warm" || (item.immediateLoadStatus === 503 && !item.expectedStructuredBackoff)));
 console.log(JSON.stringify({
   startedAt, completedAt: Date.now(), exactInterleaving: turns.map((turn) => turn.label),
-  results, extras,
+  results, forcedScenarios, extras,
   reset: { status: rotate.status, clearedResidents: rotate.body.clearedResidents },
   health: { status: health.status, body: health.body },
-  summary: { turns: results.length, failed: failed.length },
+  summary: { turns: results.length, failed: failed.length,
+    forcedFailed: forcedFailed.length, lifecycleFailed: lifecycleFailed.length },
 }, null, 2));
-if (failed.length) process.exitCode = 1;
+if (failed.length || forcedFailed.length || lifecycleFailed.length) process.exitCode = 1;
