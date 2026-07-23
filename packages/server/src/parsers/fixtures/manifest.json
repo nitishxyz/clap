@@ -1,7 +1,11 @@
 {
   "version": 1,
   "cases": [
+    "json-tools.json",
+    "native-protocols.json",
     "plain-text.json",
-    "qwen-template-tool.json"
+    "qwen-template-tool.json",
+    "reasoning.json",
+    "xml-partial.json"
   ]
 }

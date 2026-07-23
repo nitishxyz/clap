@@ -1,0 +1,5 @@
+{
+  "input": "{\"tool_calls\":[{\"name\":\"search\",\"arguments\":\"{\\\"tags\\\":\\\"docs\\\",\\\"limit\\\":\\\"2\\\"}\"},{\"name\":\"open\",\"arguments\":{\"path\":\"README.md\"}}]}",
+  "expectedTools": ["search", "open"],
+  "expectedSearchArguments": { "tags": ["docs"], "limit": 2 }
+}

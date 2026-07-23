@@ -1,0 +1,5 @@
+{
+  "input": "<tool_call>\n<function=search>\n<parameter=query>\ndocs\n</parameter>",
+  "expectedTool": "search",
+  "expectedArguments": { "query": "docs" }
+}

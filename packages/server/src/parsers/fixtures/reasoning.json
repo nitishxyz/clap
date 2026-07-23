@@ -1,0 +1,5 @@
+{
+  "input": "<think>Maybe call a tool: {\"name\":\"search\",\"arguments\":{\"query\":\"hidden\"}}</think>The visible answer.",
+  "expectedReasoning": "Maybe call a tool: {\"name\":\"search\",\"arguments\":{\"query\":\"hidden\"}}",
+  "expectedContent": "The visible answer."
+}

@@ -1,0 +1,9 @@
+[
+  { "family": "harmony", "input": "<|tool_call|>call:search {\"query\":\"harmony\"}", "tool": "search" },
+  { "family": "hermes", "input": "<tool_call>{\"name\":\"search\",\"arguments\":{\"query\":\"hermes\"}}</tool_call>", "tool": "search" },
+  { "family": "qwen", "input": "<|tool_call_start|>{\"name\":\"search\",\"arguments\":{\"query\":\"qwen\"}}<|tool_call_end|>", "tool": "search" },
+  { "family": "deepseek", "input": "<｜tool▁call▁begin｜>function search```json\n{\"query\":\"deepseek\"}\n```<｜tool▁call▁end｜>", "tool": "search" },
+  { "family": "mistral", "input": "[TOOL_CALLS]search{\"query\":\"mistral\"}", "tool": "search" },
+  { "family": "llama", "input": "<|python_tag|>search(query=\"llama\")", "tool": "search" },
+  { "family": "gemma", "input": "<|tool_call>call:{\"tool_name\":\"search\",\"arguments\":{\"query\":\"gemma\"}}<tool_call|>", "tool": "search" }
+]
