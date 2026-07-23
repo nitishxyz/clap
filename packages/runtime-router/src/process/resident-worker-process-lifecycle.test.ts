@@ -169,15 +169,15 @@ describe.serial("resident worker lifecycle races", () => {
   test("observes RSS only while a stable process PID exists", async () => {
     const { worker } = await setup();
     expect(await worker.observeRss(async () => 123)).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_observed",
+      source: "unavailable", bytes: null, basis: "not_observed",
     });
     await worker.load();
     const pid = worker.info().pid!;
     expect(await worker.observeRss(async (sampledPid) => sampledPid === pid ? 12_345 : null)).toEqual({
-      kind: "measured", bytes: 12_345, basis: "resident_rss",
+      source: "measured", bytes: 12_345, basis: "resident_rss",
     });
     expect(await worker.observeRss(async () => 0)).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_reported",
+      source: "unavailable", bytes: null, basis: "not_reported",
     });
     await worker.shutdownAsync();
   });
@@ -305,21 +305,21 @@ describe.serial("resident worker lifecycle races", () => {
     const fixture = await setup();
     const registry = new ResidentWorkerRegistry();
     expect(await registry.observeWorkerRss("missing")).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_observed",
+      source: "unavailable", bytes: null, basis: "not_observed",
     });
     const worker = registry.getOrCreate("sample", "llama", fixture.worker.modelPath);
     expect(await registry.observeWorkerRss("sample")).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_observed",
+      source: "unavailable", bytes: null, basis: "not_observed",
     });
     await worker.load();
     const pid = worker.info().pid!;
     registry.rssSampler = async (sampledPid) => sampledPid === pid ? 98_765 : undefined;
     expect(await registry.observeWorkerRss("sample")).toEqual({
-      kind: "measured", bytes: 98_765, basis: "resident_rss",
+      source: "measured", bytes: 98_765, basis: "resident_rss",
     });
     registry.rssSampler = async () => undefined;
     expect(await registry.observeWorkerRss("sample")).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_reported",
+      source: "unavailable", bytes: null, basis: "not_reported",
     });
     await registry.shutdownAsync();
   });
@@ -395,7 +395,7 @@ describe.serial("resident worker lifecycle races", () => {
     lifecycle.snapshots = [{
       key: "victim", state: "idle", activeRequests: 0, pinned: false, always: false,
       loadedAtMs: 1, lastUsedAtMs: 1, lifecycleVersion: 1, retainedValueScore: 0,
-      memory: { kind: "measured", bytes: 600 * 1024 ** 2, basis: "resident_rss" },
+      memory: { source: "measured", bytes: 600 * 1024 ** 2, basis: "resident_rss" },
     }];
     let samples = 0;
     registry.memorySnapshot = async () => ({ physicalMemoryBytes: 8 * 1024 ** 3,

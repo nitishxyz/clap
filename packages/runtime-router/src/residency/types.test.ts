@@ -16,13 +16,13 @@ import {
 describe("MemoryValue", () => {
   test("constructs explicit measured, estimated, and unavailable values", () => {
     expect(measuredMemory(1.2, "resident_rss")).toEqual({
-      kind: "measured", bytes: 2, basis: "resident_rss",
+      source: "measured", bytes: 2, basis: "resident_rss",
     });
     expect(estimatedMemory(0, "model_artifacts")).toEqual({
-      kind: "estimated", bytes: 0, basis: "model_artifacts",
+      source: "estimated", bytes: 0, basis: "model_artifacts",
     });
     expect(unavailableMemory("not_supported")).toEqual({
-      kind: "unavailable", bytes: null, basis: "not_supported",
+      source: "unavailable", bytes: null, basis: "not_supported",
     });
   });
 
@@ -30,10 +30,10 @@ describe("MemoryValue", () => {
     for (const bytes of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => measuredMemory(bytes, "runtime_allocator")).toThrow(RangeError);
     }
-    expect(isMemoryValue({ kind: "measured", bytes: 0, basis: "resident_rss" })).toBe(false);
-    expect(isMemoryValue({ kind: "unavailable", bytes: 0, basis: "not_observed" })).toBe(false);
-    expect(isMemoryValue({ kind: "unavailable", bytes: null, basis: "not_observed" })).toBe(true);
-    expect(() => assertMemoryValue({ kind: "estimated", bytes: -1, basis: "model_artifacts" })).toThrow(TypeError);
+    expect(isMemoryValue({ source: "measured", bytes: 0, basis: "resident_rss" })).toBe(false);
+    expect(isMemoryValue({ source: "unavailable", bytes: 0, basis: "not_observed" })).toBe(false);
+    expect(isMemoryValue({ source: "unavailable", bytes: null, basis: "not_observed" })).toBe(true);
+    expect(() => assertMemoryValue({ source: "estimated", bytes: -1, basis: "model_artifacts" })).toThrow(TypeError);
     expect(() => measuredMemory(1, "invented" as never)).toThrow(TypeError);
   });
 
@@ -45,7 +45,7 @@ describe("MemoryValue", () => {
 
   test("serializes unavailable memory as null rather than a false zero", () => {
     expect(JSON.stringify(unavailableMemory("not_reported"))).toBe(
-      '{"kind":"unavailable","bytes":null,"basis":"not_reported"}',
+      '{"source":"unavailable","bytes":null,"basis":"not_reported"}',
     );
   });
 });

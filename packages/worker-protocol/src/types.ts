@@ -25,6 +25,47 @@ export type StructuredOutputKind = typeof STRUCTURED_OUTPUT_KINDS[number];
 export type StructuredOutputStrength = typeof STRUCTURED_OUTPUT_STRENGTHS[number];
 export type StructuredOutputMode = typeof STRUCTURED_OUTPUT_MODES[number];
 
+export type MemorySource = "measured" | "estimated" | "unavailable";
+export type MeasuredMemoryBasis = "resident_rss" | "runtime_allocator" | "os_available";
+export type EstimatedMemoryBasis =
+  | "prior_observation"
+  | "model_artifacts"
+  | "architecture_metadata"
+  | "configured_cache"
+  | "conservative_fallback";
+export type UnavailableMemoryBasis = "not_observed" | "not_supported" | "not_reported";
+export type MemoryBasis = MeasuredMemoryBasis | EstimatedMemoryBasis | UnavailableMemoryBasis;
+export type MemoryValue =
+  | Readonly<{ bytes: number; source: "measured"; basis: MeasuredMemoryBasis }>
+  | Readonly<{ bytes: number; source: "estimated"; basis: EstimatedMemoryBasis }>
+  | Readonly<{ bytes: null; source: "unavailable"; basis: UnavailableMemoryBasis }>;
+
+export type WorkerMemoryTelemetry = {
+  active_bytes: number | null;
+  active_bytes_source?: MemorySource;
+  active_bytes_basis?: MemoryBasis;
+  cache_bytes: number | null;
+  cache_bytes_source?: MemorySource;
+  cache_bytes_basis?: MemoryBasis;
+  peak_active_bytes: number | null;
+  peak_active_bytes_source?: MemorySource;
+  peak_active_bytes_basis?: MemoryBasis;
+  [key: string]: unknown;
+};
+
+export type WorkerRetentionTelemetry = {
+  retained_bytes?: number | null;
+  retained_bytes_source?: MemorySource;
+  retained_bytes_basis?: MemoryBasis;
+  session_bytes?: number | null;
+  session_bytes_source?: MemorySource;
+  session_bytes_basis?: MemoryBasis;
+  anchor_bytes?: number | null;
+  anchor_bytes_source?: MemorySource;
+  anchor_bytes_basis?: MemoryBasis;
+  [key: string]: unknown;
+};
+
 export type ProtocolError = {
   code: string;
   message: string;
@@ -95,6 +136,11 @@ export type ContentEvent = ScopedEventBase & { type: "content"; content: unknown
 export type PrefillProgressEvent = ScopedEventBase & { type: "prefill_progress"; completed: number; total: number };
 export type CompletedEvent = ScopedEventBase & { type: "completed"; result: CompletedResult };
 export type FailedEvent = ScopedEventBase & { type: "failed"; error: ProtocolError };
-export type TelemetryEvent = { protocol: 1; type: "telemetry"; telemetry: Record<string, unknown>; [key: string]: unknown };
+export type WorkerTelemetry = {
+  memory?: WorkerMemoryTelemetry;
+  retention?: WorkerRetentionTelemetry;
+  [key: string]: unknown;
+};
+export type TelemetryEvent = { protocol: 1; type: "telemetry"; telemetry: WorkerTelemetry; [key: string]: unknown };
 export type DiagnosticEvent = { protocol: 1; type: "diagnostic"; level: "debug" | "info" | "warning" | "error"; message: string; [key: string]: unknown };
 export type WorkerEvent = ReadyEvent | AcceptedEvent | StartedEvent | TokenEvent | ContentEvent | PrefillProgressEvent | CompletedEvent | FailedEvent | TelemetryEvent | DiagnosticEvent;

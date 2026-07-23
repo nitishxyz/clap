@@ -39,5 +39,5 @@ function compareVictims(left: LifecycleResidencySnapshot, right: LifecycleReside
 }
 
 function measuredBytes(snapshot: LifecycleResidencySnapshot): number {
-  return snapshot.memory.kind === "measured" ? snapshot.memory.bytes : -1;
+  return snapshot.memory.source === "measured" ? snapshot.memory.bytes : -1;
 }

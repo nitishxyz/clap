@@ -33,6 +33,33 @@ describe("worker retention telemetry", () => {
     expect(parseWorkerRetention({ retained_total: 1 })).toBeUndefined();
     expect(parseWorkerRetention({ max_active: 4, active_policy: { mode: "auto" } })).toBeUndefined();
   });
+
+  test("maps validated retention source and basis companions", () => {
+    const legacy = {
+      max_active: 1, active_policy: { mode: "fixed", selected_max: 1, backend_ceiling: 1,
+        hardware_ceiling: 1, model_ceiling: 1, memory_ceiling: 1, reason: "configured",
+        inputs: {} },
+      active: 0, retained_total: 1, retained_sessions: 1, retained_anchors: 0,
+      retained_bytes: 4096, session_bytes: 4096, anchor_bytes: 0, budget_bytes: 8192,
+      high_watermark_bytes: 7000, low_watermark_bytes: 6000, under_pressure: false,
+      hard_ceiling: 4, eviction_count: 0,
+    };
+    expect(parseWorkerRetention({
+      ...legacy,
+      retained_bytes_source: "measured", retained_bytes_basis: "runtime_allocator",
+      session_bytes_source: "estimated", session_bytes_basis: "configured_cache",
+    })).toMatchObject({
+      retainedBytes: 4096, retainedBytesSource: "measured", retainedBytesBasis: "runtime_allocator",
+      sessionBytes: 4096, sessionBytesSource: "estimated", sessionBytesBasis: "configured_cache",
+    });
+    expect(parseWorkerRetention({
+      ...legacy, retained_bytes_source: "measured", retained_bytes_basis: "runtime_allocator",
+      retained_bytes: 0,
+    })).toBeUndefined();
+    expect(parseWorkerRetention({
+      ...legacy, retained_bytes_source: "unavailable", retained_bytes_basis: "not_reported",
+    })).toBeUndefined();
+  });
 });
 
 describe("worker token capabilities", () => {

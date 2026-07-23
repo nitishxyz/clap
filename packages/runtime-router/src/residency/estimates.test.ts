@@ -36,7 +36,7 @@ describe("model load estimates", () => {
     const kv = 2_048 * 128 * 1024;
 
     expect(estimate).toEqual({
-      kind: "estimated",
+      source: "estimated",
       bytes: weights + 512 * MIB + kv,
       basis: "architecture_metadata",
     });
@@ -55,7 +55,7 @@ describe("model load estimates", () => {
     const estimate = estimateModelLoadMemory(descriptor, undefined, { physicalMemoryBytes: 16 * GIB, env: {} });
 
     expect(estimate).toEqual({
-      kind: "estimated",
+      source: "estimated",
       bytes: Math.ceil(4 * GIB * 1.35) + GIB + 8 * GIB,
       basis: "configured_cache",
     });
@@ -78,7 +78,7 @@ describe("model load estimates", () => {
 
     expect(history.get(descriptor)).toBe(12 * GIB);
     expect(estimateModelLoadMemory(descriptor, history, { physicalMemoryBytes: 32 * GIB, env: {} })).toEqual({
-      kind: "estimated", bytes: 12 * GIB, basis: "prior_observation",
+      source: "estimated", bytes: 12 * GIB, basis: "prior_observation",
     });
     expect(() => history.update(descriptor, 0)).toThrow(RangeError);
   });
@@ -114,7 +114,7 @@ describe("model load estimates", () => {
     expect(estimateModelLoadMemory(unknown, undefined, {
       physicalMemoryBytes: 40 * GIB,
       env: { [UNKNOWN_MODEL_MIN_BYTES_ENV]: String(6 * GIB) },
-    })).toEqual({ kind: "estimated", bytes: 10 * GIB, basis: "conservative_fallback" });
+    })).toEqual({ source: "estimated", bytes: 10 * GIB, basis: "conservative_fallback" });
     expect(estimateModelLoadMemory(unknown, undefined, {
       physicalMemoryBytes: 8 * GIB,
       env: { [UNKNOWN_MODEL_MIN_BYTES_ENV]: String(6 * GIB) },

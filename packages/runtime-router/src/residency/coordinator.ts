@@ -149,7 +149,7 @@ export class ResidencyCoordinator {
     try {
       let reason: LoadAdmissionDecision["reason"] = "within_budget";
       while (!this.fits(memory.available, reservation.bytes, reservationId)) {
-        if (memory.available.kind !== "measured") {
+        if (memory.available.source !== "measured") {
           this.emit("model_load_rejected", model, reservation.bytes, { reason: "memory_state_unavailable" });
           throw this.insufficient("memory_state_unavailable", requested, memory.available, reservationId, 0);
         }
@@ -207,7 +207,7 @@ export class ResidencyCoordinator {
   }
 
   private fits(available: MemoryValue, requestedBytes: number, ownReservationId: string): boolean {
-    if (available.kind !== "measured") return false;
+    if (available.source !== "measured") return false;
     const committed = saturatingAddMemoryBytes(
       requestedBytes,
       this.reservedBytesExcept(ownReservationId),

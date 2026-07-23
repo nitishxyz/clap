@@ -50,6 +50,26 @@ describe("worker protocol v1 fixtures", () => {
 });
 
 describe("worker protocol validation", () => {
+  test("validates honest memory values and telemetry companions", () => {
+    const event = (telemetry: Record<string, unknown>) => ({ protocol: 1, type: "telemetry", telemetry });
+    expect(decodeWorkerEvent(event({ memory: {
+      active_bytes: 1024, active_bytes_source: "measured", active_bytes_basis: "runtime_allocator",
+      cache_bytes: 0, cache_bytes_source: "estimated", cache_bytes_basis: "configured_cache",
+      peak_active_bytes: 2048,
+    } }))).toMatchObject({ telemetry: { memory: { active_bytes_source: "measured" } } });
+    expect(decodeWorkerEvent(event({ retention: {
+      retained_bytes: null, retained_bytes_source: "unavailable", retained_bytes_basis: "not_reported",
+    } }))).toMatchObject({ telemetry: { retention: { retained_bytes: null } } });
+
+    for (const memory of [
+      { active_bytes: null, active_bytes_source: "measured", active_bytes_basis: "runtime_allocator", cache_bytes: 0, peak_active_bytes: 1 },
+      { active_bytes: 1, active_bytes_source: "unavailable", active_bytes_basis: "not_reported", cache_bytes: 0, peak_active_bytes: 1 },
+      { active_bytes: 0, active_bytes_source: "measured", active_bytes_basis: "runtime_allocator", cache_bytes: 0, peak_active_bytes: 1 },
+      { active_bytes: 1, active_bytes_source: "measured", cache_bytes: 0, peak_active_bytes: 1 },
+      { active_bytes: null, cache_bytes: 0, peak_active_bytes: 1 },
+    ]) expect(() => decodeWorkerEvent(event({ memory }))).toThrow(ProtocolValidationError);
+  });
+
   test("requires a strict opaque cache identity on generate requests", () => {
     const identity = fixtureCacheIdentity();
     const base = { protocol: 1, type: "generate", request_id: "req", prompt: "hello" };

@@ -12,6 +12,54 @@ const content = z.union([
 const requestBase = { protocol, request_id: requestId };
 const fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
 const displayLabel = z.string().min(1).max(128);
+const memoryBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const measuredMemoryBasis = z.enum(["resident_rss", "runtime_allocator", "os_available"]);
+const estimatedMemoryBasis = z.enum([
+  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "conservative_fallback",
+]);
+const unavailableMemoryBasis = z.enum(["not_observed", "not_supported", "not_reported"]);
+export const MemoryValueSchema = z.discriminatedUnion("source", [
+  z.object({ bytes: memoryBytes.positive(), source: z.literal("measured"), basis: measuredMemoryBasis }).strict(),
+  z.object({ bytes: memoryBytes, source: z.literal("estimated"), basis: estimatedMemoryBasis }).strict(),
+  z.object({ bytes: z.null(), source: z.literal("unavailable"), basis: unavailableMemoryBasis }).strict(),
+]);
+
+const memorySource = z.enum(["measured", "estimated", "unavailable"]);
+const memoryBasis = z.union([measuredMemoryBasis, estimatedMemoryBasis, unavailableMemoryBasis]);
+const addMemoryCompanionValidation = <T extends z.ZodRawShape>(shape: T, fields: readonly string[]) =>
+  extensibleObject(shape).superRefine((value, context) => {
+    const record = value as Record<string, unknown>;
+    for (const field of fields) {
+      const sourceKey = `${field}_source`;
+      const basisKey = `${field}_basis`;
+      const hasSource = record[sourceKey] !== undefined;
+      const hasBasis = record[basisKey] !== undefined;
+      if (!hasSource && !hasBasis) {
+        if (record[field] === null) context.addIssue({ code: "custom", path: [field], message: "null bytes require source and basis" });
+        continue;
+      }
+      if (!hasSource || !hasBasis) {
+        context.addIssue({ code: "custom", path: [!hasSource ? sourceKey : basisKey], message: "memory source and basis must be provided together" });
+        continue;
+      }
+      const parsed = MemoryValueSchema.safeParse({
+        bytes: record[field], source: record[sourceKey], basis: record[basisKey],
+      });
+      if (!parsed.success) context.addIssue({ code: "custom", path: [field], message: "invalid memory value" });
+    }
+  });
+
+export const WorkerMemoryTelemetrySchema = addMemoryCompanionValidation({
+  active_bytes: memoryBytes.nullable(), active_bytes_source: memorySource.optional(), active_bytes_basis: memoryBasis.optional(),
+  cache_bytes: memoryBytes.nullable(), cache_bytes_source: memorySource.optional(), cache_bytes_basis: memoryBasis.optional(),
+  peak_active_bytes: memoryBytes.nullable(), peak_active_bytes_source: memorySource.optional(), peak_active_bytes_basis: memoryBasis.optional(),
+}, ["active_bytes", "cache_bytes", "peak_active_bytes"]);
+
+export const WorkerRetentionTelemetrySchema = addMemoryCompanionValidation({
+  retained_bytes: memoryBytes.nullable().optional(), retained_bytes_source: memorySource.optional(), retained_bytes_basis: memoryBasis.optional(),
+  session_bytes: memoryBytes.nullable().optional(), session_bytes_source: memorySource.optional(), session_bytes_basis: memoryBasis.optional(),
+  anchor_bytes: memoryBytes.nullable().optional(), anchor_bytes_source: memorySource.optional(), anchor_bytes_basis: memoryBasis.optional(),
+}, ["retained_bytes", "session_bytes", "anchor_bytes"]);
 export const CacheIdentitySchema = z.object({
   version: z.literal(1),
   generation: z.string().min(1).max(64),
@@ -114,7 +162,13 @@ export const PrefillProgressEventSchema = extensibleObject({
 });
 export const CompletedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("completed"), result: CompletedResultSchema });
 export const FailedEventSchema = extensibleObject({ ...scopedBase, type: z.literal("failed"), error: ProtocolErrorSchema });
-export const TelemetryEventSchema = extensibleObject({ ...unsolicitedBase, type: z.literal("telemetry"), telemetry: z.record(z.unknown()) });
+export const WorkerTelemetrySchema = extensibleObject({
+  memory: WorkerMemoryTelemetrySchema.optional(),
+  retention: WorkerRetentionTelemetrySchema.optional(),
+});
+export const TelemetryEventSchema = extensibleObject({
+  ...unsolicitedBase, type: z.literal("telemetry"), telemetry: WorkerTelemetrySchema,
+});
 export const DiagnosticEventSchema = extensibleObject({
   ...unsolicitedBase, type: z.literal("diagnostic"), level: z.enum(["debug", "info", "warning", "error"]), message: z.string().min(1),
 });

@@ -1,18 +1,8 @@
+import { MemoryValueSchema, type EstimatedMemoryBasis, type MeasuredMemoryBasis,
+  type MemoryValue, type UnavailableMemoryBasis } from "@clap/worker-protocol";
+
 export const MAX_MEMORY_BYTES = Number.MAX_SAFE_INTEGER;
-
-export type MeasuredMemoryBasis = "resident_rss" | "runtime_allocator" | "os_available";
-export type EstimatedMemoryBasis =
-  | "prior_observation"
-  | "model_artifacts"
-  | "architecture_metadata"
-  | "configured_cache"
-  | "conservative_fallback";
-export type UnavailableMemoryBasis = "not_observed" | "not_supported" | "not_reported";
-
-export type MemoryValue =
-  | Readonly<{ kind: "measured"; bytes: number; basis: MeasuredMemoryBasis }>
-  | Readonly<{ kind: "estimated"; bytes: number; basis: EstimatedMemoryBasis }>
-  | Readonly<{ kind: "unavailable"; bytes: null; basis: UnavailableMemoryBasis }>;
+export type { EstimatedMemoryBasis, MeasuredMemoryBasis, MemoryValue, UnavailableMemoryBasis };
 
 function normalizeBytes(bytes: number, allowZero: boolean): number {
   if (!Number.isFinite(bytes) || bytes < 0 || (!allowZero && bytes === 0)) {
@@ -22,33 +12,25 @@ function normalizeBytes(bytes: number, allowZero: boolean): number {
 }
 
 export function measuredMemory(bytes: number, basis: MeasuredMemoryBasis): MemoryValue {
-  if (!MEASURED_BASES.has(basis)) throw new TypeError("invalid measured memory basis");
-  return Object.freeze({ kind: "measured", bytes: normalizeBytes(bytes, false), basis });
+  const value = { source: "measured" as const, bytes: normalizeBytes(bytes, false), basis };
+  assertMemoryValue(value);
+  return Object.freeze(value);
 }
 
 export function estimatedMemory(bytes: number, basis: EstimatedMemoryBasis): MemoryValue {
-  if (!ESTIMATED_BASES.has(basis)) throw new TypeError("invalid estimated memory basis");
-  return Object.freeze({ kind: "estimated", bytes: normalizeBytes(bytes, true), basis });
+  const value = { source: "estimated" as const, bytes: normalizeBytes(bytes, true), basis };
+  assertMemoryValue(value);
+  return Object.freeze(value);
 }
 
 export function unavailableMemory(basis: UnavailableMemoryBasis): MemoryValue {
-  if (!UNAVAILABLE_BASES.has(basis)) throw new TypeError("invalid unavailable memory basis");
-  return Object.freeze({ kind: "unavailable", bytes: null, basis });
+  const value = { source: "unavailable" as const, bytes: null, basis };
+  assertMemoryValue(value);
+  return Object.freeze(value);
 }
 
 export function isMemoryValue(value: unknown): value is MemoryValue {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as { kind?: unknown; bytes?: unknown; basis?: unknown };
-  if (candidate.kind === "unavailable") {
-    return candidate.bytes === null && UNAVAILABLE_BASES.has(candidate.basis);
-  }
-  if (candidate.kind === "measured") {
-    return isValidBytes(candidate.bytes, false) && MEASURED_BASES.has(candidate.basis);
-  }
-  if (candidate.kind === "estimated") {
-    return isValidBytes(candidate.bytes, true) && ESTIMATED_BASES.has(candidate.basis);
-  }
-  return false;
+  return MemoryValueSchema.safeParse(value).success;
 }
 
 export function assertMemoryValue(value: unknown): asserts value is MemoryValue {
@@ -64,23 +46,6 @@ export function saturatingAddMemoryBytes(...values: number[]): number {
   }
   return total;
 }
-
-function isValidBytes(value: unknown, allowZero: boolean): value is number {
-  return typeof value === "number"
-    && Number.isSafeInteger(value)
-    && value >= (allowZero ? 0 : 1)
-    && value <= MAX_MEMORY_BYTES;
-}
-
-const MEASURED_BASES: ReadonlySet<unknown> = new Set<MeasuredMemoryBasis>([
-  "resident_rss", "runtime_allocator", "os_available",
-]);
-const ESTIMATED_BASES: ReadonlySet<unknown> = new Set<EstimatedMemoryBasis>([
-  "prior_observation", "model_artifacts", "architecture_metadata", "configured_cache", "conservative_fallback",
-]);
-const UNAVAILABLE_BASES: ReadonlySet<unknown> = new Set<UnavailableMemoryBasis>([
-  "not_observed", "not_supported", "not_reported",
-]);
 
 export interface ResidencyModelDescriptor {
   readonly modelKey: string;
@@ -187,6 +152,13 @@ export function isResidencyPolicy(value: unknown): value is ResidencyPolicy {
     && isValidBytes(policy.conservativeFallbackBytes, false)
     && isPositiveSafeInteger(policy.reservationTtlMs)
     && isPositiveSafeInteger(policy.maximumConcurrentLoads);
+}
+
+function isValidBytes(value: unknown, allowZero: boolean): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= (allowZero ? 0 : 1)
+    && value <= MAX_MEMORY_BYTES;
 }
 
 function positiveSafeInteger(value: number, label: string): number {

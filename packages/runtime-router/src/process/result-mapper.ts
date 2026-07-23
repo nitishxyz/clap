@@ -1,4 +1,5 @@
 import type { ModelTokenCapabilities } from "@clap/api";
+import { WorkerMemoryTelemetrySchema, type MemoryBasis, type MemorySource } from "@clap/worker-protocol";
 import { parseWorkerRetention, parseWorkerTokenCapabilities, type ResidentCacheInfo,
   type ResidentChatResult, type ResidentMlxMemory, type ResidentMlxRetention,
   type ResidentProgress, type ResidentTiming, type ResidentUsage } from "../resident";
@@ -52,20 +53,43 @@ export function mapWorkerTelemetryPayload(
     : { retention: telemetry };
 }
 
+function memoryCompanions(
+  raw: Record<string, unknown>,
+  wireName: string,
+  propertyName: string,
+): Record<string, MemorySource | MemoryBasis> {
+  const source = raw[`${wireName}_source`] as MemorySource | undefined;
+  const basis = raw[`${wireName}_basis`] as MemoryBasis | undefined;
+  return source && basis
+    ? { [`${propertyName}Source`]: source, [`${propertyName}Basis`]: basis }
+    : {};
+}
+
+export function parseWorkerMemory(value: unknown): ResidentMlxMemory | undefined {
+  const parsed = WorkerMemoryTelemetrySchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const memory = parsed.data;
+  const { active_bytes: activeBytes, cache_bytes: cacheBytes, peak_active_bytes: peakActiveBytes } = memory;
+  if (typeof activeBytes !== "number" || typeof cacheBytes !== "number"
+    || typeof peakActiveBytes !== "number") return undefined;
+  return {
+    activeBytes,
+    ...memoryCompanions(memory, "active_bytes", "activeBytes"),
+    cacheBytes,
+    ...memoryCompanions(memory, "cache_bytes", "cacheBytes"),
+    peakActiveBytes,
+    ...memoryCompanions(memory, "peak_active_bytes", "peakActiveBytes"),
+  };
+}
+
 export function applyWorkerPayload(
   message: Record<string, unknown>,
   context: WorkerPayloadContext,
 ): void {
     const id = typeof message.id === "string" ? message.id : undefined;
     if (message.memory && typeof message.memory === "object") {
-      const memory = message.memory as Record<string, unknown>;
-      if (typeof memory.active_bytes === "number" && typeof memory.cache_bytes === "number" && typeof memory.peak_active_bytes === "number") {
-        context.setMemory({
-          activeBytes: memory.active_bytes,
-          cacheBytes: memory.cache_bytes,
-          peakActiveBytes: memory.peak_active_bytes,
-        });
-      }
+      const memory = parseWorkerMemory(message.memory);
+      if (memory) context.setMemory(memory);
     }
     const parsedRetention = parseWorkerRetention(message.retention);
     if (parsedRetention) {

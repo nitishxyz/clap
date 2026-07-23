@@ -1,5 +1,6 @@
 import type { ChatCompletionRequest, LoadedModel, ModelTokenCapabilities } from "@clap/api";
-import type { CacheIdentity, StructuredOutputCapabilities, StructuredOutputContract } from "@clap/worker-protocol";
+import { WorkerRetentionTelemetrySchema, type CacheIdentity, type MemoryBasis, type MemorySource,
+  type StructuredOutputCapabilities, type StructuredOutputContract } from "@clap/worker-protocol";
 import { freemem, totalmem } from "node:os";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
@@ -43,8 +44,14 @@ export type ResidentWorkerResidencyInfo = {
 
 export type ResidentMlxMemory = {
   activeBytes: number;
+  activeBytesSource?: MemorySource;
+  activeBytesBasis?: MemoryBasis;
   cacheBytes: number;
+  cacheBytesSource?: MemorySource;
+  cacheBytesBasis?: MemoryBasis;
   peakActiveBytes: number;
+  peakActiveBytesSource?: MemorySource;
+  peakActiveBytesBasis?: MemoryBasis;
 };
 
 export type ResidentMlxRetention = {
@@ -71,8 +78,14 @@ export type ResidentMlxRetention = {
   retainedSessions: number;
   retainedAnchors: number;
   retainedBytes: number;
+  retainedBytesSource?: MemorySource;
+  retainedBytesBasis?: MemoryBasis;
   sessionBytes: number;
+  sessionBytesSource?: MemorySource;
+  sessionBytesBasis?: MemoryBasis;
   anchorBytes: number;
+  anchorBytesSource?: MemorySource;
+  anchorBytesBasis?: MemoryBasis;
   automaticCheckpointCount?: number;
   automaticCheckpointBytes?: number;
   automaticCheckpointBudgetBytes?: number;
@@ -233,6 +246,7 @@ export type ResidentCrashListener = (info: {
 export function parseWorkerRetention(value: unknown): ResidentMlxRetention | undefined {
   if (!value || typeof value !== "object") return undefined;
   const raw = value as Record<string, unknown>;
+  if (!WorkerRetentionTelemetrySchema.safeParse(raw).success) return undefined;
   const integer = (key: string): number | undefined => {
     const entry = raw[key];
     return typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0 ? entry : undefined;
@@ -305,8 +319,11 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
       hardwareCeiling: hardwareCeiling!, modelCeiling: modelCeiling!, memoryCeiling: memoryCeiling!,
       reason, inputs: inputs as Record<string, string | number | boolean | null> },
     active: active!, retainedTotal: retainedTotal!, retainedSessions: retainedSessions!,
-    retainedAnchors: retainedAnchors!, retainedBytes: retainedBytes!, sessionBytes: sessionBytes!,
-    anchorBytes: anchorBytes!, budgetBytes: budgetBytes!, highWatermarkBytes: highWatermarkBytes!,
+    retainedAnchors: retainedAnchors!, retainedBytes: retainedBytes!,
+    ...memoryCompanions(raw, "retained_bytes", "retainedBytes"),
+    sessionBytes: sessionBytes!, ...memoryCompanions(raw, "session_bytes", "sessionBytes"),
+    anchorBytes: anchorBytes!, ...memoryCompanions(raw, "anchor_bytes", "anchorBytes"),
+    budgetBytes: budgetBytes!, highWatermarkBytes: highWatermarkBytes!,
     ...(automaticCheckpointCount !== undefined ? { automaticCheckpointCount } : {}),
     ...(automaticCheckpointBytes !== undefined ? { automaticCheckpointBytes } : {}),
     ...(automaticCheckpointBudgetBytes !== undefined ? { automaticCheckpointBudgetBytes } : {}),
@@ -318,6 +335,18 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     lowWatermarkBytes: lowWatermarkBytes!, underPressure: raw.under_pressure, hardCeiling: hardCeiling!,
     ...(evictionReason ? { evictionReason } : {}), evictionCount: evictionCount!,
   };
+}
+
+function memoryCompanions(
+  raw: Record<string, unknown>,
+  wireName: string,
+  propertyName: string,
+): Record<string, MemorySource | MemoryBasis> {
+  const source = raw[`${wireName}_source`] as MemorySource | undefined;
+  const basis = raw[`${wireName}_basis`] as MemoryBasis | undefined;
+  return source && basis
+    ? { [`${propertyName}Source`]: source, [`${propertyName}Basis`]: basis }
+    : {};
 }
 
 export function parseWorkerTokenCapabilities(value: unknown): ModelTokenCapabilities | undefined {
@@ -499,16 +528,16 @@ export class ResidentWorkerRegistry {
         stabilize: async () => { await Bun.sleep(0); },
         observeRss: async () => {
           const observed = await handle.process.observeRss(this.rssSampler);
-          return observed.kind === "measured" ? observed.bytes : undefined;
+          return observed.source === "measured" ? observed.bytes : undefined;
         },
         shutdownPartial: () => handle.process.shutdownAsync(),
       });
       const observed = await handle.process.observeRss(this.rssSampler);
       handle.residency = {
         estimateBytes: result.decision.requested.bytes,
-        estimateSource: result.decision.requested.kind === "estimated" ? result.decision.requested.basis : null,
-        observedRssBytes: observed.kind === "measured" ? observed.bytes : null,
-        observedRssSource: observed.kind === "measured" ? "resident_rss" : null,
+        estimateSource: result.decision.requested.source === "estimated" ? result.decision.requested.basis : null,
+        observedRssBytes: observed.source === "measured" ? observed.bytes : null,
+        observedRssSource: observed.source === "measured" ? "resident_rss" : null,
         reservationBytes: result.reservation.bytes,
         lastAdmissionReason: result.decision.reason,
         lastEvictionReason: result.decision.evictedModelKeys.length > 0 ? "memory_admission" : null,
