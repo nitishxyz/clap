@@ -40,7 +40,7 @@ import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
 export { createApiKey, listApiKeys, revokeApiKey, keysFilePath } from "./auth";
 import { CacheEventStore, type PersistedCacheDecision } from "./cache-event-store";
-import { deriveCacheIdentity, derivePhysicalModelDomain, InstallationSecretProvider, type DerivedCacheIdentity, type PhysicalModelDomain } from "./cache-identity";
+import { deriveCacheIdentity, derivePhysicalModelDomain, effectivePhysicalContextAllocation, InstallationSecretProvider, type DerivedCacheIdentity, type PhysicalModelDomain } from "./cache-identity";
 import {
   classifyPersistedCacheOutcome,
   firstDecisionIdsForWorkerModelDomain,
@@ -946,7 +946,7 @@ export function createServer(
       ? (modelEnvironment.CLAP_LLAMA_KV_UNIFIED ?? process.env.CLAP_LLAMA_KV_UNIFIED ?? "1") !== "0"
       : false;
     return derivePhysicalModelDomain(model, {
-      contextAllocation: Number.isSafeInteger(context) && context >= 0 ? context : 0,
+      contextAllocation: effectivePhysicalContextAllocation(model, context),
       kvFormat,
       unifiedKv,
     });

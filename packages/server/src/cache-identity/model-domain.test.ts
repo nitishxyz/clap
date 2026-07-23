@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   clearPhysicalModelDomainCache,
   derivePhysicalModelDomain,
+  effectivePhysicalContextAllocation,
   physicalModelDomainCacheStats,
 } from "./model-domain";
 
@@ -21,6 +22,13 @@ afterEach(async () => {
 });
 
 describe("physical model domains", () => {
+  test("matches runtime auto-context semantics for llama and MLX", () => {
+    expect(effectivePhysicalContextAllocation({ backend: "llama", context: 131072 }, 0)).toBe(131072);
+    expect(effectivePhysicalContextAllocation({ backend: "llama", context: 131072 }, 8192)).toBe(8192);
+    expect(effectivePhysicalContextAllocation({ backend: "llama", context: undefined }, 8192)).toBe(8192);
+    expect(effectivePhysicalContextAllocation({ backend: "mlx", context: 131072 }, 0)).toBe(0);
+  });
+
   test("fingerprints a canonical GGUF artifact and reuses its content hash", async () => {
     const path = join(root, "model.gguf");
     await writeFile(path, "small gguf fixture");
