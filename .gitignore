@@ -22,6 +22,7 @@ DerivedData/
 
 # TypeScript
 *.tsbuildinfo
+packages/server/src/web-assets.generated.ts
 
 # Logs
 *.log
