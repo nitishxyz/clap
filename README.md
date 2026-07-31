@@ -280,6 +280,8 @@ GGUF runtime knobs for large models or Metal memory pressure (also via `[llama]`
 - `CLAP_LLAMA_BATCH` / `CLAP_LLAMA_UBATCH` — logical batch and micro-batch (defaults `2048` / `512`)
 - `CLAP_LLAMA_PREFILL_BUDGET` — aggregate prompt-ingest tokens per contended scheduler step so decode streams keep near-solo latency during heavy prefill (default `max(128, batch/4)`)
 - `CLAP_LLAMA_GPU_LAYERS` — GPU offload (default `999`; `0` for CPU)
+- `CLAP_LLAMA_SPLIT_MODE` / `CLAP_LLAMA_MAIN_GPU` / `CLAP_LLAMA_TENSOR_SPLIT` — multi-GPU placement (`none|layer|row`, default `layer`; `tensor_split` is per-device proportions like `3,1`); invalid values fail the load instead of silently changing placement
+- `CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES` — explicit memory budget (net of weights, e.g. a VRAM budget) for deriving concurrent active slots; default derives from measured availability and the per-session context cap
 - `CLAP_LLAMA_KV_TYPE` / `CLAP_LLAMA_RETAINED_MAX` — KV type and retention
 
 If a model fails with `prompt exceeds context window`, reduce history or raise `CLAP_LLAMA_CONTEXT` when memory allows. On `llama_decode failed` or Metal OOM in the per-launch stderr log, try a smaller quant (`Q4_K_M`), lower context/batch, fewer GPU layers, or `CLAP_LLAMA_GPU_LAYERS=0`.

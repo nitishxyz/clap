@@ -321,6 +321,19 @@ if(BUILD_TESTING)
   target_include_directories(clap-llama-kv-fit PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
   add_test(NAME clap-llama-kv-fit COMMAND clap-llama-kv-fit)
 
+  add_executable(clap-llama-active-concurrency
+    tests/active-concurrency.test.cpp
+  )
+  target_include_directories(clap-llama-active-concurrency PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME clap-llama-active-concurrency COMMAND clap-llama-active-concurrency)
+
+  add_executable(clap-llama-gpu-split
+    tests/gpu-split.test.cpp
+  )
+  target_include_directories(clap-llama-gpu-split PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
+  target_link_libraries(clap-llama-gpu-split PRIVATE llama)
+  add_test(NAME clap-llama-gpu-split COMMAND clap-llama-gpu-split)
+
   add_executable(clap-llama-model-runtime
     tests/model-runtime.test.cpp
     src/environment.cpp
@@ -452,6 +465,7 @@ if(BUILD_TESTING)
   add_test(NAME clap-llama-telemetry COMMAND clap-llama-telemetry)
 
   add_custom_target(clap-llama-tests DEPENDS
+    clap-llama-active-concurrency
     clap-llama-cache-adapter
     clap-llama-cache-checkpoint
     clap-llama-cache-identity
@@ -462,6 +476,7 @@ if(BUILD_TESTING)
     clap-llama-characterization
     clap-llama-environment
     clap-llama-generation-stepper
+    clap-llama-gpu-split
     clap-llama-kv-fit
     clap-llama-model-runtime
     clap-llama-prompt

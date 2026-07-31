@@ -111,6 +111,7 @@ export type PromSnapshot = {
     durationMs: Histogram;
     queuedMs: Histogram;
     completionTokens: Histogram;
+    decodeTokensPerSecond: Histogram;
   };
   structuredOutputOutcomes: Map<string, number>;
   priorityRequestOutcomes: Map<string, number>;
@@ -131,6 +132,7 @@ export function makeRequestHistograms(): PromSnapshot["histograms"] {
     durationMs: new Histogram([100, 500, 1000, 5000, 15000, 30000, 60000, 120000, 300000, 600000]),
     queuedMs: new Histogram([10, 50, 100, 500, 1000, 5000, 15000, 60000]),
     completionTokens: new Histogram([16, 64, 256, 1024, 4096, 16384]),
+    decodeTokensPerSecond: new Histogram([1, 2, 5, 10, 20, 40, 80, 160, 320]),
   };
 }
 
@@ -274,6 +276,11 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   lines.push(...snapshot.histograms.queuedMs.render("clap_request_queued_ms"));
   lines.push("# HELP clap_request_completion_tokens Completion tokens per request", "# TYPE clap_request_completion_tokens histogram");
   lines.push(...snapshot.histograms.completionTokens.render("clap_request_completion_tokens"));
+  lines.push(
+    "# HELP clap_request_decode_tokens_per_second Decode-only throughput after the first token (excludes prefill and queue time)",
+    "# TYPE clap_request_decode_tokens_per_second histogram",
+  );
+  lines.push(...snapshot.histograms.decodeTokensPerSecond.render("clap_request_decode_tokens_per_second"));
 
   return `${lines.join("\n")}\n`;
 }

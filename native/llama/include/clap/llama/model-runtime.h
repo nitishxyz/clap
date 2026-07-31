@@ -33,6 +33,10 @@ class ModelRuntime {
   int32_t retained_max() const noexcept { return retained_max_; }
   uint64_t startup_available_bytes() const noexcept { return startup_available_bytes_; }
   uint64_t model_file_bytes() const noexcept { return model_file_bytes_; }
+  // Estimated K+V bytes for one token across all layers (scheduling input
+  // only; never reported as measured KV usage). Zero when metadata was
+  // unavailable.
+  uint64_t kv_bytes_per_token() const noexcept { return kv_bytes_per_token_; }
   bool hybrid() const noexcept { return hybrid_; }
   bool prompt_boundary_snapshots() const noexcept { return prompt_boundary_snapshots_; }
   bool has_encoder() const noexcept { return has_encoder_; }
@@ -51,6 +55,7 @@ class ModelRuntime {
   int32_t retained_max_ = 0;
   uint64_t startup_available_bytes_ = 0;
   uint64_t model_file_bytes_ = 0;
+  uint64_t kv_bytes_per_token_ = 0;
   bool hybrid_ = false;
   bool prompt_boundary_snapshots_ = false;
   bool has_encoder_ = false;

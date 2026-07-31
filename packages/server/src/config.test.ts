@@ -9,6 +9,10 @@ const names = [
   "CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS",
   "CLAP_CACHE_CHECKPOINT_BUDGET_BYTES",
   "CLAP_LLAMA_PREFILL_BUDGET",
+  "CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES",
+  "CLAP_LLAMA_SPLIT_MODE",
+  "CLAP_LLAMA_MAIN_GPU",
+  "CLAP_LLAMA_TENSOR_SPLIT",
   "CLAP_MLX_PREFILL_QUANTUM",
 ] as const;
 
@@ -70,5 +74,41 @@ describe("prefill latency controls", () => {
     expect(env.CLAP_MLX_PREFILL_QUANTUM).toBe("192");
     expect(() => ClapConfigSchema.parse({ llama: { prefill_budget: -1 } })).toThrow();
     expect(() => ClapConfigSchema.parse({ mlx: { prefill_quantum: 0 } })).toThrow();
+  });
+});
+
+describe("active slot derivation controls", () => {
+  test("maps [llama].slot_memory_budget_bytes to worker env", () => {
+    delete process.env.CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES;
+    const config = ClapConfigSchema.parse({
+      llama: { slot_memory_budget_bytes: 17_179_869_184 },
+    });
+    applyConfigToEnv(config);
+    const env: Record<string, string | undefined> = process.env;
+    expect(env.CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES).toBe("17179869184");
+    expect(() => ClapConfigSchema.parse({ llama: { slot_memory_budget_bytes: 0 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ llama: { slot_memory_budget_bytes: 1.5 } })).toThrow();
+  });
+});
+
+describe("multi-GPU split controls", () => {
+  test("maps [llama] split keys to worker env and validates shapes", () => {
+    delete process.env.CLAP_LLAMA_SPLIT_MODE;
+    delete process.env.CLAP_LLAMA_MAIN_GPU;
+    delete process.env.CLAP_LLAMA_TENSOR_SPLIT;
+    const config = ClapConfigSchema.parse({
+      llama: { split_mode: "row", main_gpu: 1, tensor_split: "3,1" },
+    });
+    applyConfigToEnv(config);
+    const env: Record<string, string | undefined> = process.env;
+    expect(env.CLAP_LLAMA_SPLIT_MODE).toBe("row");
+    expect(env.CLAP_LLAMA_MAIN_GPU).toBe("1");
+    expect(env.CLAP_LLAMA_TENSOR_SPLIT).toBe("3,1");
+    expect(() => ClapConfigSchema.parse({ llama: { split_mode: "diagonal" } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ llama: { main_gpu: -1 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ llama: { tensor_split: "3," } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ llama: { tensor_split: "-1,2" } })).toThrow();
+    expect(ClapConfigSchema.parse({ llama: { tensor_split: "0.75,0.25" } })
+      .llama.tensor_split).toBe("0.75,0.25");
   });
 });

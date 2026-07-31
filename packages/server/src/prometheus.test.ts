@@ -31,7 +31,8 @@ function snapshot(): PromSnapshot {
       },
     }],
     uptimeMs: 0,
-    histograms: { ttftMs: histogram(), durationMs: histogram(), queuedMs: histogram(), completionTokens: histogram() },
+    histograms: { ttftMs: histogram(), durationMs: histogram(), queuedMs: histogram(),
+      completionTokens: histogram(), decodeTokensPerSecond: histogram() },
     structuredOutputOutcomes: new Map(),
     priorityRequestOutcomes: new Map([["normal\0ok", 1]]),
     priorityDurationMs: { interactive: histogram(), normal: histogram(), background: histogram() },
@@ -53,6 +54,7 @@ describe("honest Prometheus memory telemetry", () => {
     expect(output).toContain('clap_queue_waiting{priority="background"} 0');
     expect(output).toContain('clap_queue_outcomes_total{priority="normal",outcome="admitted"} 1');
     expect(output).toContain('clap_request_duration_ms_count{priority="interactive"} 0');
+    expect(output).toContain("clap_request_decode_tokens_per_second_count 0");
   });
 
   test("omits numeric memory values whose provenance is absent", () => {

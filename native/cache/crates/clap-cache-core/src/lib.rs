@@ -3,6 +3,7 @@
 //! physical cache objects and execute plans outside this crate.
 
 mod radix;
+mod slot;
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -10,6 +11,7 @@ use std::fmt;
 use std::time::Instant;
 
 use radix::RadixIndex;
+use slot::{anchor_eviction_value, common_prefix, donor_rank, eviction_value, Slot};
 
 pub type SlotId = u32;
 pub type Generation = u64;
@@ -343,49 +345,6 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Clone, Debug)]
-struct Slot {
-    id: SlotId,
-    generation: Generation,
-    namespace: Namespace,
-    tokens: Vec<i32>,
-    state: SlotState,
-    busy: bool,
-    read_leases: u32,
-    writer: Option<PlanId>,
-    labels: Labels,
-    last_used: u64,
-    reuse_count: u64,
-    physical_bytes: u64,
-    saved_us: u64,
-    protected: bool,
-}
-
-impl Slot {
-    fn new(id: SlotId) -> Self {
-        Self {
-            id,
-            generation: 1,
-            namespace: Namespace::default(),
-            tokens: Vec::new(),
-            state: SlotState::Empty,
-            busy: false,
-            read_leases: 0,
-            writer: None,
-            labels: Labels::default(),
-            last_used: 0,
-            reuse_count: 0,
-            physical_bytes: 0,
-            saved_us: 0,
-            protected: false,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.state == SlotState::Empty || self.tokens.is_empty()
-    }
-}
-
-#[derive(Clone, Debug)]
 struct Pending {
     plan: Plan,
 }
@@ -401,6 +360,7 @@ pub struct CacheManager {
     pending: BTreeMap<PlanId, Pending>,
     telemetry: Telemetry,
     last_decision: Option<Decision>,
+    tenant_quotas: BTreeMap<u64, u64>,
 }
 
 impl CacheManager {
@@ -432,6 +392,7 @@ impl CacheManager {
             pending: BTreeMap::new(),
             telemetry: Telemetry::default(),
             last_decision: None,
+            tenant_quotas: BTreeMap::new(),
         };
         manager.refresh_gauges();
         Ok(manager)
@@ -575,6 +536,7 @@ impl CacheManager {
             target_id,
             selected_donor,
             request.namespace,
+            request.labels.tenant,
             if request.result_state == SlotState::Anchor {
                 request
                     .estimated_bytes_per_token
@@ -1130,6 +1092,7 @@ impl CacheManager {
         target: SlotId,
         donor: Option<SlotId>,
         request_namespace: Namespace,
+        request_tenant: u64,
         projected_target_bytes: u64,
         enforce_low_watermark: bool,
     ) -> Result<Vec<SlotId>, Error> {
@@ -1158,6 +1121,9 @@ impl CacheManager {
         namespace_bytes.entry(request_namespace).or_default();
         let fair_share = self.retention.physical_byte_budget.unwrap_or_default()
             / namespace_bytes.len().max(1) as u64;
+        let tenant_bytes = self.tenant_bytes(request_tenant);
+        let tenant_fair_share = self.retention.physical_byte_budget.unwrap_or_default()
+            / tenant_bytes.len().max(1) as u64;
         let mut candidates: Vec<&Slot> = self
             .slots
             .iter()
@@ -1173,22 +1139,36 @@ impl CacheManager {
             .collect();
         candidates.sort_by_key(|slot| {
             let coverage_representative = self.is_checkpoint_coverage_representative(slot);
+            let slot_tenant_bytes = tenant_bytes
+                .get(&slot.labels.tenant)
+                .copied()
+                .unwrap_or_default();
+            // Retained state of a tenant above its explicit quota is
+            // reclaimed first, regardless of priority class.
+            let within_quota = self
+                .tenant_quotas
+                .get(&slot.labels.tenant)
+                .map_or(true, |&quota| slot_tenant_bytes <= quota);
             (
+                within_quota,
                 slot.labels.priority as u32,
                 (!slot.labels.side_request) as u8,
                 (slot.state == SlotState::Anchor) as u8,
                 coverage_representative as u8,
                 slot.reuse_count,
                 slot.saved_us,
+                slot_tenant_bytes <= tenant_fair_share,
                 namespace_bytes
                     .get(&slot.namespace)
                     .copied()
                     .unwrap_or_default()
                     <= fair_share,
-                slot.last_used,
-                Reverse(slot.physical_bytes),
-                slot.tokens.len(),
-                slot.id,
+                (
+                    slot.last_used,
+                    Reverse(slot.physical_bytes),
+                    slot.tokens.len(),
+                    slot.id,
+                ),
             )
         });
         let mut victims = Vec::new();
@@ -1245,6 +1225,7 @@ impl CacheManager {
         }
         namespace_bytes.entry(request_namespace).or_default();
         let fair_share = limit / namespace_bytes.len().max(1) as u64;
+        let tenant_bytes = self.tenant_bytes(0);
         let mut candidates = self
             .slots
             .iter()
@@ -1267,7 +1248,18 @@ impl CacheManager {
                     && self.is_automatic_checkpoint_len(other.tokens.len())
                     && other.tokens.len() < slot.tokens.len()
             });
+            let within_quota = self.tenant_quotas.get(&slot.labels.tenant).map_or(
+                true,
+                |&quota| {
+                    tenant_bytes
+                        .get(&slot.labels.tenant)
+                        .copied()
+                        .unwrap_or_default()
+                        <= quota
+                },
+            );
             (
+                within_quota,
                 slot.namespace != request_namespace,
                 namespace_bytes
                     .get(&slot.namespace)
@@ -1552,6 +1544,38 @@ impl CacheManager {
         Ok(())
     }
 
+    /// Sets or clears (`quota_bytes == 0`) an advisory per-tenant physical
+    /// byte quota. Quota pressure is an eviction input: retained state owned
+    /// by a tenant above its quota is reclaimed first under byte pressure.
+    /// Quotas never partition correctness; they only order victims.
+    pub fn set_tenant_quota(&mut self, tenant: u64, quota_bytes: u64) -> Result<(), Error> {
+        if tenant == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        if quota_bytes == 0 {
+            self.tenant_quotas.remove(&tenant);
+        } else {
+            self.tenant_quotas.insert(tenant, quota_bytes);
+        }
+        Ok(())
+    }
+
+    pub fn tenant_quota(&self, tenant: u64) -> Option<u64> {
+        self.tenant_quotas.get(&tenant).copied()
+    }
+
+    /// Physical bytes retained per tenant across all non-empty slots. The
+    /// requesting tenant is always present so fair-share math counts it.
+    fn tenant_bytes(&self, request_tenant: u64) -> BTreeMap<u64, u64> {
+        let mut bytes = BTreeMap::<u64, u64>::new();
+        for slot in self.slots.iter().filter(|slot| !slot.is_empty()) {
+            let entry = bytes.entry(slot.labels.tenant).or_default();
+            *entry = entry.saturating_add(slot.physical_bytes);
+        }
+        bytes.entry(request_tenant).or_default();
+        bytes
+    }
+
     /// Marks a structural anchor as ineligible for target selection and
     /// pressure eviction. Protection is generation-guarded and cleared by
     /// invalidation/reset.
@@ -1762,47 +1786,4 @@ impl CacheManager {
         self.telemetry.under_pressure = self.retention.physical_byte_budget.is_some()
             && self.telemetry.physical_bytes > self.retention.high_watermark_bytes;
     }
-}
-
-fn common_prefix(left: &[i32], right: &[i32]) -> usize {
-    left.iter()
-        .zip(right)
-        .take_while(|(left, right)| left == right)
-        .count()
-}
-
-fn donor_rank(slot: &Slot, request: &PlanRequest<'_>) -> (u8, u8, u64) {
-    let same_session = ((slot.labels.session == 0 && request.labels.session == 0)
-        || (slot.labels.session != 0 && slot.labels.session == request.labels.session))
-        as u8;
-    let cheap = request
-        .capabilities
-        .contains(Capabilities::ZERO_COPY_BRANCH) as u8;
-    (same_session, cheap, slot.last_used)
-}
-
-/// Lower values are evicted first. Stable slot ID is used by callers as the
-/// final deterministic tie-breaker.
-fn eviction_value(slot: &Slot) -> (u32, u8, u8, u64, u64, u64, usize) {
-    (
-        slot.labels.priority as u32,
-        (!slot.labels.side_request) as u8,
-        (slot.state == SlotState::Anchor) as u8,
-        slot.reuse_count,
-        slot.saved_us,
-        slot.last_used,
-        slot.tokens.len(),
-    )
-}
-
-fn anchor_eviction_value(slot: &Slot) -> (u32, u8, u64, u64, u64, usize) {
-    let structural = matches!(slot.labels.scope, Scope::Harness | Scope::Tenant) as u8;
-    (
-        slot.labels.priority as u32,
-        structural,
-        slot.reuse_count,
-        slot.saved_us,
-        slot.last_used,
-        slot.tokens.len(),
-    )
 }

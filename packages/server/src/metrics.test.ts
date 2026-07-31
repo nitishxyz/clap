@@ -79,6 +79,35 @@ describe("metrics queue accounting", () => {
     expect(handle.record.ttftMs).toBeUndefined();
   });
 
+  test("decode-only throughput excludes prefill and requires two tokens", async () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("test-model", "/v1/chat/completions", false);
+    handle.prefill(10, 100);
+    await sleep(80);
+    handle.firstToken();
+    await sleep(100);
+    handle.finish({ status: "ok", promptTokens: 100, completionTokens: 21 });
+
+    const record = handle.record;
+    // Decode time is measured from the first emitted token, so it must not
+    // absorb the 80ms of prefill.
+    expect(record.decodeMs).toBeGreaterThanOrEqual(80);
+    expect(record.decodeMs!).toBeLessThan(180);
+    expect(record.decodeTokensPerSecond).toBeGreaterThan(0);
+    // 20 post-first tokens over ~100ms of decode.
+    expect(record.decodeTokensPerSecond!).toBeGreaterThanOrEqual(20000 / 180);
+    expect(record.decodeTokensPerSecond!).toBeLessThanOrEqual(20000 / 80);
+
+    const single = metrics.start("test-model", "/v1/chat/completions", false);
+    single.firstToken();
+    single.finish({ status: "ok", promptTokens: 10, completionTokens: 1 });
+    expect(single.record.decodeTokensPerSecond).toBeUndefined();
+
+    const noToken = metrics.start("test-model", "/v1/chat/completions", false);
+    noToken.finish({ status: "error", error: "boom" });
+    expect(noToken.record.decodeMs).toBeUndefined();
+  });
+
   test("fast unqueued requests do not report noise queue time", () => {
     const metrics = new MetricsCollector();
     const handle = metrics.start("test-model", "/v1/chat/completions", false);

@@ -1,6 +1,7 @@
 #include "clap/llama/model-runtime.h"
 
 #include "clap/llama/environment.h"
+#include "clap/llama/gpu-split.h"
 #include "clap/llama/kv-fit.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <vector>
 
 namespace clap::llama {
 
@@ -40,6 +42,7 @@ void ModelRuntime::reset() noexcept {
   retained_max_ = 0;
   startup_available_bytes_ = 0;
   model_file_bytes_ = 0;
+  kv_bytes_per_token_ = 0;
   hybrid_ = false;
   prompt_boundary_snapshots_ = false;
   has_encoder_ = false;
@@ -67,6 +70,28 @@ bool ModelRuntime::load(const std::string& model_path) {
 
   llama_model_params model_params = llama_model_default_params();
   model_params.n_gpu_layers = env_int("CLAP_LLAMA_GPU_LAYERS", 999);
+  // Multi-GPU split (scale plan T4.13): default layer split; misconfiguration
+  // fails the load instead of silently changing placement.
+  const char* split_mode_env = std::getenv("CLAP_LLAMA_SPLIT_MODE");
+  const char* tensor_split_env = std::getenv("CLAP_LLAMA_TENSOR_SPLIT");
+  const auto split = clap::llama_gpu::derive_split(
+      split_mode_env ? split_mode_env : "",
+      env_int("CLAP_LLAMA_MAIN_GPU", 0),
+      tensor_split_env ? tensor_split_env : "",
+      llama_max_devices());
+  if (!split.valid) {
+    throw std::runtime_error("invalid GPU split configuration: " + split.error);
+  }
+  model_params.split_mode = split.mode;
+  model_params.main_gpu = split.main_gpu;
+  // llama.cpp reads exactly llama_max_devices() proportions when set.
+  std::vector<float> tensor_split_padded;
+  if (!split.tensor_split.empty()) {
+    tensor_split_padded.assign(llama_max_devices(), 0.0f);
+    std::copy(split.tensor_split.begin(), split.tensor_split.end(),
+              tensor_split_padded.begin());
+    model_params.tensor_split = tensor_split_padded.data();
+  }
   model_ = llama_model_load_from_file(model_path.c_str(), model_params);
   if (!model_) throw std::runtime_error("failed to load GGUF model: " + model_path);
 
@@ -78,18 +103,19 @@ bool ModelRuntime::load(const std::string& model_path) {
       : (env_context > 0 ? env_context : train_context);
   const char* kv_type_env = std::getenv("CLAP_LLAMA_KV_TYPE");
   const std::string kv_type_name = kv_type_env && *kv_type_env ? kv_type_env : "f16";
+  const int32_t n_head = llama_model_n_head(model_);
+  const int32_t head_dim = n_head > 0 ? llama_model_n_embd(model_) / n_head : 0;
+  const uint64_t kv_bytes_per_token = clap::llama_kv::estimate_kv_bytes_per_token(
+      llama_model_n_layer(model_), llama_model_n_head_kv(model_), head_dim,
+      kv_type_name);
   if (env_context <= 0 && env_int("CLAP_LLAMA_KV_AUTOFIT", 1) != 0) {
     // Automatic context: shrink the unified KV pool allocation until its
     // estimated cost fits measured availability (scale plan T2.6). The
     // estimate is a scheduling input, never reported as measured KV bytes.
-    const int32_t n_head = llama_model_n_head(model_);
-    const int32_t head_dim = n_head > 0 ? llama_model_n_embd(model_) / n_head : 0;
     clap::llama_kv::FitInputs fit_inputs;
     fit_inputs.requested_context = 0;
     fit_inputs.train_context = context_size;
-    fit_inputs.kv_bytes_per_token = clap::llama_kv::estimate_kv_bytes_per_token(
-        llama_model_n_layer(model_), llama_model_n_head_kv(model_), head_dim,
-        kv_type_name);
+    fit_inputs.kv_bytes_per_token = kv_bytes_per_token;
     fit_inputs.available_bytes = startup_available;
     fit_inputs.model_file_bytes = file_size_error ? 0 : model_file_bytes;
     const auto fit = clap::llama_kv::fit_context(fit_inputs);
@@ -141,6 +167,7 @@ bool ModelRuntime::load(const std::string& model_path) {
   retained_max_ = retained_max;
   startup_available_bytes_ = startup_available;
   model_file_bytes_ = file_size_error ? 0 : model_file_bytes;
+  kv_bytes_per_token_ = kv_bytes_per_token;
   hybrid_ = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
   char architecture[64] = {};
   const bool has_architecture = llama_model_meta_val_str(

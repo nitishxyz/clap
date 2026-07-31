@@ -91,6 +91,11 @@ export type RequestRecord = {
   promptTokens?: number;
   completionTokens?: number;
   tokensPerSecond?: number;
+  // Decode-only throughput: completion tokens after the first token divided
+  // by measured decode wall time. Unlike tokensPerSecond it never absorbs
+  // prefill, so contention between prefill and decode stays visible.
+  decodeMs?: number;
+  decodeTokensPerSecond?: number;
   cacheHit?: boolean;
   cacheIntent?: boolean;
   cacheEligibility?: "eligible" | "no_intent" | "no_admission";
@@ -345,6 +350,7 @@ export class MetricsCollector {
     this.histograms.durationMs.reset();
     this.histograms.queuedMs.reset();
     this.histograms.completionTokens.reset();
+    this.histograms.decodeTokensPerSecond.reset();
     for (const histograms of Object.values(this.priorityDurationMs)) histograms.reset();
     this.priorityRequestOutcomes.clear();
     this.structuredOutputOutcomes.clear();
@@ -440,6 +446,7 @@ export class MetricsCollector {
     let queueStart: number | undefined = Date.now();
     let queuedTotal = 0;
     let dispatchedAt: number | undefined;
+    let firstTokenAt: number | undefined;
     const leaveQueue = () => {
       if (queueStart === undefined) return;
       queuedTotal += Date.now() - queueStart;
@@ -549,7 +556,11 @@ export class MetricsCollector {
       },
       firstToken: () => {
         leaveQueue();
-        if (record.ttftMs === undefined) record.ttftMs = Date.now() - (dispatchedAt ?? record.startedAt);
+        if (record.ttftMs === undefined) {
+          const now = Date.now();
+          record.ttftMs = now - (dispatchedAt ?? record.startedAt);
+          firstTokenAt = now;
+        }
         record.phase = "decode";
       },
       finish: (result) => {
@@ -610,6 +621,17 @@ export class MetricsCollector {
           const afterFirstToken = record.ttftMs !== undefined ? working - record.ttftMs : 0;
           const decodeMs = afterFirstToken > 50 ? afterFirstToken : Math.max(working, 1);
           record.tokensPerSecond = Math.round((result.completionTokens / decodeMs) * 1000 * 10) / 10;
+        }
+        // Decode-only throughput measures wall time from the first emitted
+        // token to completion; the first token itself belongs to prefill.
+        if (firstTokenAt !== undefined && result.completionTokens !== undefined
+          && result.completionTokens >= 2 && record.endedAt > firstTokenAt) {
+          record.decodeMs = record.endedAt - firstTokenAt;
+          record.decodeTokensPerSecond =
+            Math.round(((result.completionTokens - 1) / record.decodeMs) * 1000 * 10) / 10;
+          if (record.status === "ok") {
+            this.histograms.decodeTokensPerSecond.observe(record.decodeTokensPerSecond);
+          }
         }
         if (record.status === "ok") this.totals.ok += 1;
         else if (record.status === "error") this.totals.errors += 1;

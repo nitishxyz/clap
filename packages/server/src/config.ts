@@ -26,7 +26,16 @@ const LlamaSectionSchema = z.object({
   batch: z.number().int().positive().optional(),
   ubatch: z.number().int().positive().optional(),
   prefill_budget: z.number().int().nonnegative().optional(),
+  // Admin memory budget for active-slot derivation (bytes, net of weights;
+  // e.g. a VRAM budget on a discrete GPU). Zero/absent derives the budget
+  // from measured startup availability.
+  slot_memory_budget_bytes: z.number().int().positive().optional(),
   gpu_layers: z.number().int().nonnegative().optional(),
+  // Multi-GPU split (T4.13): default layer split with llama.cpp automatic
+  // distribution; tensor_split lists per-device proportions (e.g. "3,1").
+  split_mode: z.enum(["none", "layer", "row"]).optional(),
+  main_gpu: z.number().int().nonnegative().optional(),
+  tensor_split: z.string().regex(/^\d+(\.\d+)?(,\d+(\.\d+)?)*$/).optional(),
   kv_type: KvTypeSchema.optional(),
   // Lifecycle policy (per-model sections; ignored in [llama] globals)
   pinned: z.boolean().optional(),
@@ -174,7 +183,11 @@ const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> =
   ["batch", "CLAP_LLAMA_BATCH"],
   ["ubatch", "CLAP_LLAMA_UBATCH"],
   ["prefill_budget", "CLAP_LLAMA_PREFILL_BUDGET"],
+  ["slot_memory_budget_bytes", "CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES"],
   ["gpu_layers", "CLAP_LLAMA_GPU_LAYERS"],
+  ["split_mode", "CLAP_LLAMA_SPLIT_MODE"],
+  ["main_gpu", "CLAP_LLAMA_MAIN_GPU"],
+  ["tensor_split", "CLAP_LLAMA_TENSOR_SPLIT"],
   ["kv_type", "CLAP_LLAMA_KV_TYPE"],
 ];
 

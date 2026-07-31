@@ -338,6 +338,12 @@ clap_cache_status_t clap_cache_register_slot(clap_cache_t *cache,
                                               clap_cache_slot_ref_t *out_slot);
 clap_cache_status_t clap_cache_set_anchor_protected(
     clap_cache_t *cache, clap_cache_slot_ref_t slot, uint8_t protected_anchor);
+/* Sets or clears (quota_bytes == 0) an advisory per-tenant physical byte
+ * quota. Quota pressure is an eviction input only: retained state owned by a
+ * tenant above its quota is reclaimed first under byte pressure. */
+clap_cache_status_t clap_cache_set_tenant_quota(clap_cache_t *cache,
+                                                uint64_t tenant,
+                                                uint64_t quota_bytes);
 clap_cache_status_t clap_cache_invalidate(clap_cache_t *cache,
                                           clap_cache_slot_ref_t slot,
                                           uint64_t *out_generation);

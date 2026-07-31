@@ -190,6 +190,46 @@ fn ffi_rejects_nulls_and_version_mismatches_without_unwinding() {
 }
 
 #[test]
+fn ffi_tenant_quota_rejects_nulls_and_invalid_tenants() {
+    unsafe {
+        assert_eq!(
+            clap_cache_set_tenant_quota(ptr::null_mut(), 1, 10),
+            ClapCacheStatus::InvalidArgument
+        );
+        let config = ClapCacheConfig {
+            version: CLAP_CACHE_ABI_VERSION,
+            struct_size: size_of::<ClapCacheConfig>() as u32,
+            slot_count: 1,
+            max_anchors: 1,
+            min_reuse_tokens: 1,
+            logical_token_capacity: 10,
+            automatic_checkpoint_mode: 0,
+            automatic_checkpoint_max: 0,
+            automatic_checkpoint_min_tokens: 0,
+            automatic_checkpoint_interval_tokens: 0,
+            automatic_checkpoint_memory_basis_points: 0,
+            reserved: 0,
+            automatic_checkpoint_memory_cap_bytes: 0,
+        };
+        let mut cache = ptr::null_mut();
+        assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
+        assert_eq!(
+            clap_cache_set_tenant_quota(cache, 0, 10),
+            ClapCacheStatus::InvalidArgument
+        );
+        assert_eq!(
+            clap_cache_set_tenant_quota(cache, 7, 1_024),
+            ClapCacheStatus::Ok
+        );
+        assert_eq!(
+            clap_cache_set_tenant_quota(cache, 7, 0),
+            ClapCacheStatus::Ok
+        );
+        clap_cache_destroy(cache);
+    }
+}
+
+#[test]
 fn ffi_abort_releases_plan_and_reset_changes_epoch() {
     unsafe {
         let config = ClapCacheConfig {

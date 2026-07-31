@@ -463,3 +463,57 @@ fn retained_pressure_cannot_reject_an_executable_session_target() {
     assert_eq!(plan.operation, clap_cache_core::Operation::Fresh);
     cache.abort(plan.id).unwrap();
 }
+
+#[test]
+fn tenant_quota_validation_and_roundtrip() {
+    let mut cache = manager(2, 2);
+    assert_eq!(cache.set_tenant_quota(0, 10), Err(Error::InvalidArgument));
+    assert_eq!(cache.tenant_quota(5), None);
+    cache.set_tenant_quota(5, 10).unwrap();
+    assert_eq!(cache.tenant_quota(5), Some(10));
+    cache.set_tenant_quota(5, 0).unwrap();
+    assert_eq!(cache.tenant_quota(5), None);
+}
+
+#[test]
+fn tenant_over_quota_is_evicted_first_despite_priority() {
+    // labels() maps tenant = session, so tenant 1 is interactive and over
+    // quota while tenant 2 is background and within quota.
+    for quota in [Some(40), None] {
+        let mut cache = manager(4, 4);
+        let (over_quota, _) = seed_priority(&mut cache, &[1, 1], namespace(1), 1,
+            SlotState::Session, 45, Priority::Interactive);
+        let (background, _) = seed_priority(&mut cache, &[2, 2], namespace(2), 2,
+            SlotState::Session, 40, Priority::Background);
+        if let Some(bytes) = quota {
+            cache.set_tenant_quota(1, bytes).unwrap();
+        }
+        let plan = cache
+            .plan(request(&[9, 9], namespace(3), 9, SlotState::Session))
+            .unwrap();
+        let victims: Vec<_> = plan.evictions.iter().map(|slot| slot.slot).collect();
+        // Without a quota, the background slot is the priority-first victim.
+        let expected = if quota.is_some() { over_quota } else { background };
+        assert_eq!(victims, vec![expected]);
+        cache.abort(plan.id).unwrap();
+    }
+}
+
+#[test]
+fn tenant_fair_share_orders_victims_across_namespaces() {
+    // Tenant 1 holds two namespaces at 30 bytes each (over its tenant fair
+    // share); tenant 2 holds one older 30-byte slot (within share). Recency
+    // and namespace fair-share alone would evict tenant 2 first.
+    let mut cache = manager(6, 6);
+    let (t2, _) = seed(&mut cache, &[2, 2], namespace(3), 2, SlotState::Session, 30);
+    let (t1a, _) = seed(&mut cache, &[1, 0], namespace(1), 1, SlotState::Session, 30);
+    let (t1b, _) = seed(&mut cache, &[1, 1], namespace(2), 1, SlotState::Session, 30);
+
+    let plan = cache
+        .plan(request(&[7; 10], namespace(4), 7, SlotState::Session))
+        .unwrap();
+    let victims: Vec<_> = plan.evictions.iter().map(|slot| slot.slot).collect();
+    assert_eq!(victims, vec![t1a, t1b]);
+    assert!(!victims.contains(&t2));
+    cache.abort(plan.id).unwrap();
+}

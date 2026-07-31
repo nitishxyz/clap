@@ -94,8 +94,11 @@ is about protecting interactive latency, not raw throughput.
   `max(128, batch/4)`; sole-active requests keep the full batch). The MLX
   latency scheduler quanta can be clamped with `CLAP_MLX_PREFILL_QUANTUM` /
   `[mlx] prefill_quantum`.
-- Remaining: tune `CLAP_LLAMA_UBATCH` for the CUDA path; report decode-only
-  tok/s separately in metrics so contention is visible
+- DONE: decode-only tok/s is reported separately (`decodeTokensPerSecond` on
+  request records, `clap_request_decode_tokens_per_second` histogram):
+  completion tokens after the first emitted token divided by decode wall
+  time, so prefill contention never hides in the throughput number.
+- Remaining: tune `CLAP_LLAMA_UBATCH` for the CUDA path
 - Note: per-stream tok/s below solo speed under concurrency is expected
   physics (memory-bandwidth-bound decode); MoE models (e.g. Qwen3.6-35B-A3B,
   3B active) shrink the per-token cost ~8x and are the recommended org
@@ -177,14 +180,16 @@ at load and halves the automatic context allocation until the estimated
 unified pool fits measured availability minus weights and headroom
 (`native/llama/include/clap/llama/kv-fit.h`; floor 8k cells; disable with
 `CLAP_LLAMA_KV_AUTOFIT=0`; explicit `CLAP_LLAMA_CONTEXT` is never adjusted).
-Slot count derives from the fitted context. Remaining (GPU rig): validate
-the estimate against measured VRAM and derive slot count from a VRAM budget
-directly.
-
-Replace fixed `4 slots` with derived values: measure per-token KV cost at
-load, then `slots ≈ f(VRAM budget, per-session ctx cap, expected sessions)`.
-Admin overrides in config. Per-session context caps (`max_session_ctx`)
-instead of promising train_ctx (262k) to every session.
+Slot count derives from the fitted context. Active-slot derivation now uses
+the same KV estimate (`native/llama/active-concurrency.h`): the per-active
+reserve is one session's estimated KV cost at its `max_session_ctx` reserve
+(256 MiB floor for compute scratch), and the budget is either measured
+availability minus weights and headroom or an explicit admin budget via
+`[llama] slot_memory_budget_bytes` / `CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES`
+(net of weights; use this to hand a discrete GPU's VRAM budget to the
+policy). `max_session_ctx` also replaces the fixed 4k-cell context reserve.
+Remaining (GPU rig): validate the estimate against measured VRAM on real
+hardware.
 
 ### 7. KV quantization surfacing
 Worker flag exists (`CLAP_LLAMA_KV_TYPE`). Add:
@@ -201,7 +206,13 @@ realized reuse value (`reuse_count`, `saved_us`), idle recency (`last_used`),
 and size, with stable slot IDs as the deterministic tie-breaker
 (`eviction_value` in `native/cache/crates/clap-cache-core/src/lib.rs`).
 Anchors use a scope-aware variant protecting structural harness/tenant
-prefixes. Remaining: per-key quota pressure as an eviction input.
+prefixes. Per-key quota pressure shipped as an eviction input:
+`clap_cache_set_tenant_quota` (core `set_tenant_quota`) records an advisory
+per-tenant physical byte quota, and under byte pressure retained state owned
+by a tenant above its quota is reclaimed first, before priority ordering.
+Tenant fair-share (retained bytes per authenticated tenant vs an equal split
+of the budget) also ranks victims even without explicit quotas. Quotas order
+eviction only; they never partition correctness.
 
 ## Tier 3 — Multi-tenant operations
 
@@ -296,9 +307,14 @@ several.
 ## Tier 4 — More hardware (single logical deployment)
 
 ### 13. Multi-GPU tensor split (llama worker)
-llama.cpp built-in (`split_mode`, `tensor_split`, NCCL already linked when
-present). Plumb through config; default `layer` split. Enables 70B+ Q8 or
-more concurrent sessions.
+Status: DONE (config plumbed; GPU-rig validation pending). llama.cpp
+built-in split is exposed via `[llama] split_mode = "none"|"layer"|"row"`
+(default `layer`), `main_gpu`, and `tensor_split = "3,1"` (per-device
+proportions), mapped to `CLAP_LLAMA_SPLIT_MODE` / `CLAP_LLAMA_MAIN_GPU` /
+`CLAP_LLAMA_TENSOR_SPLIT` and validated at load by
+`native/llama/include/clap/llama/gpu-split.h` — misconfiguration fails the
+load with a described error instead of silently changing placement. Enables
+70B+ Q8 or more concurrent sessions. Remaining: validate on a multi-GPU rig.
 
 ### 14. MLX distributed (research track)
 MLX has a distributed layer (ring/MPI; RDMA over Thunderbolt 5 on macOS
@@ -321,9 +337,13 @@ process-boundary worker protocol. Explore when a multi-Mac test rig exists.
 6. Queue fairness (T1.3) — DONE
 7. Prometheus metrics (T3.11) — DONE (request/queue series; worker-side series with GPU work)
 8. Shared-prefix dedup (T2.5) — DONE
-9. Adaptive capacity + session ctx caps (T2.6) — PARTIAL (ctx caps done; slot autoderivation on GPU rig)
-10. Session-aware eviction (T2.8)
-11. Multi-GPU split (T4.13)
+9. Adaptive capacity + session ctx caps (T2.6) — DONE (ctx caps, KV autofit,
+   KV-derived slot autoderivation with admin budget; GPU-rig validation
+   pending)
+10. Session-aware eviction (T2.8) — DONE (including per-tenant quota
+    pressure as an eviction input)
+11. Multi-GPU split (T4.13) — DONE (config plumbed + validated parsing;
+    multi-GPU rig validation pending)
 12. Batched decode latency tuning (T1.1b) — fold into 2/7 where natural:
     prefill budget cap alongside admission control, decode-only tok/s with
     metrics

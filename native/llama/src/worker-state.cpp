@@ -53,7 +53,13 @@ void WorkerState::load(const std::string& model_path) {
       env_int("CLAP_MAX_ACTIVE", 0), runtime_.startup_available_bytes(),
       runtime_.model_file_bytes(),
       static_cast<int>(std::max(1u, std::thread::hardware_concurrency())), context,
-      retained, runtime_.hybrid(), runtime_.has_encoder()});
+      retained, runtime_.hybrid(), runtime_.has_encoder(),
+      // Slot derivation inputs (scale plan T2.6): per-token KV cost, the
+      // per-session context cap, and an optional admin memory budget (net of
+      // weights, e.g. a VRAM budget) replace the fixed per-active reserve.
+      runtime_.kv_bytes_per_token(),
+      env_int("CLAP_LLAMA_MAX_SESSION_CTX", 0),
+      env_u64("CLAP_LLAMA_SLOT_MEMORY_BUDGET_BYTES", 0)});
   max_active_ = active_policy_.selected_max;
   try {
     CacheExecutorConfig config;
