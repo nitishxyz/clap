@@ -43,6 +43,10 @@ void WorkerState::load(const std::string& model_path) {
   runtime_.load(model_path);
   const int32_t context = runtime_.backend_allocation_cap();
   const int32_t retained = runtime_.retained_max();
+  // Aggregate prompt-ingest tokens per contended scheduler step. Bounds mixed
+  // batch latency so decode streams keep near-solo pace during heavy prefill.
+  prefill_budget_ = env_int("CLAP_LLAMA_PREFILL_BUDGET",
+      std::max(128, batch_capacity() / 4));
   slots_.assign(static_cast<std::size_t>(retained), {});
   use_counter_ = 0;
   active_policy_ = clap::llama_active::select({
@@ -220,7 +224,7 @@ void WorkerState::reconcile(const GenerationEvent& event) {
 std::vector<GenerationEvent> WorkerState::step(
     const std::vector<ActiveRequest*>& ordered, bool sole_active) {
   GenerationStepper stepper(runtime_, cache_executor_.get(), fingerprint);
-  auto events = stepper.step(ordered, batch_capacity(), sole_active);
+  auto events = stepper.step(ordered, batch_capacity(), sole_active, prefill_budget_);
   for (const auto& event : events) reconcile(event);
   return events;
 }

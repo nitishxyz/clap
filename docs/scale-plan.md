@@ -82,17 +82,20 @@ Status: DONE. The MLX worker now matches the llama worker's contract:
   per-model `[models.…]` sections mirror shared keys to both backends
 
 ### 1b. Batched decode latency tuning
-Observed on the pod: per-stream decode drops to 3-10 tok/s when other
-sessions run large prefills, because prefill chunks dominate the 2048-token
-batch budget and decode tokens ride at prefill pace. Aggregate throughput is
-correct (batching amortizes weight reads: ~100+ tok/s summed vs ~42 solo);
-this item is about protecting interactive latency, not raw throughput.
+Status: DONE (aggregate prefill cap shipped). Observed on the pod:
+per-stream decode drops to 3-10 tok/s when other sessions run large
+prefills, because prefill chunks dominate the 2048-token batch budget and
+decode tokens ride at prefill pace. Aggregate throughput is correct
+(batching amortizes weight reads: ~100+ tok/s summed vs ~42 solo); this item
+is about protecting interactive latency, not raw throughput.
 
-- Cap the prefill share per scheduler step (e.g. 512 of 2048) so decode
-  streams keep near-solo pace during heavy ingest; make the cap configurable
-  (`CLAP_LLAMA_PREFILL_BUDGET`, later config file)
-- Tune `CLAP_LLAMA_UBATCH` for the CUDA path
-- Report decode-only tok/s separately in metrics so contention is visible
+- DONE: contended scheduler steps cap aggregate prompt-ingest tokens via
+  `CLAP_LLAMA_PREFILL_BUDGET` / `[llama] prefill_budget` (default
+  `max(128, batch/4)`; sole-active requests keep the full batch). The MLX
+  latency scheduler quanta can be clamped with `CLAP_MLX_PREFILL_QUANTUM` /
+  `[mlx] prefill_quantum`.
+- Remaining: tune `CLAP_LLAMA_UBATCH` for the CUDA path; report decode-only
+  tok/s separately in metrics so contention is visible
 - Note: per-stream tok/s below solo speed under concurrency is expected
   physics (memory-bandwidth-bound decode); MoE models (e.g. Qwen3.6-35B-A3B,
   3B active) shrink the per-token cost ~8x and are the recommended org
@@ -167,9 +170,16 @@ prefix entirely.
 Status: PARTIAL — per-session context caps shipped: `[llama] max_session_ctx`
 (global or per-model in config, or CLAP_LLAMA_MAX_SESSION_CTX) rejects
 oversized sessions at admission with a structured 400 naming the cap, so one
-conversation cannot promise itself the whole unified pool. Remaining
-(GPU rig): measure per-token KV cost at load and derive slot count from
-VRAM budget automatically.
+conversation cannot promise itself the whole unified pool. KV-fit
+autoderivation shipped for automatic contexts: the llama worker estimates
+per-token KV bytes from model metadata (layers, KV heads, head dim, KV type)
+at load and halves the automatic context allocation until the estimated
+unified pool fits measured availability minus weights and headroom
+(`native/llama/include/clap/llama/kv-fit.h`; floor 8k cells; disable with
+`CLAP_LLAMA_KV_AUTOFIT=0`; explicit `CLAP_LLAMA_CONTEXT` is never adjusted).
+Slot count derives from the fitted context. Remaining (GPU rig): validate
+the estimate against measured VRAM and derive slot count from a VRAM budget
+directly.
 
 Replace fixed `4 slots` with derived values: measure per-token KV cost at
 load, then `slots ≈ f(VRAM budget, per-session ctx cap, expected sessions)`.
@@ -185,9 +195,13 @@ Worker flag exists (`CLAP_LLAMA_KV_TYPE`). Add:
 - Dashboard: per-model settings panel with the same semantics
 
 ### 8. Session-aware eviction (needs Tier 3 identity)
-Eviction ordered by policy, not just LRU: idle time, client priority
-(interactive > batch), per-key quota pressure. Eviction cost is only a
-re-prefill; report evictions per session in metrics.
+Status: DONE in the Rust cache coordinator: eviction candidates are ordered
+by priority class (background first), side-request flag, anchor status,
+realized reuse value (`reuse_count`, `saved_us`), idle recency (`last_used`),
+and size, with stable slot IDs as the deterministic tie-breaker
+(`eviction_value` in `native/cache/crates/clap-cache-core/src/lib.rs`).
+Anchors use a scope-aware variant protecting structural harness/tenant
+prefixes. Remaining: per-key quota pressure as an eviction input.
 
 ## Tier 3 — Multi-tenant operations
 

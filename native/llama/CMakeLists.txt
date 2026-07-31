@@ -315,6 +315,12 @@ if(BUILD_TESTING)
   target_include_directories(clap-llama-environment PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
   add_test(NAME clap-llama-environment COMMAND clap-llama-environment)
 
+  add_executable(clap-llama-kv-fit
+    tests/kv-fit.test.cpp
+  )
+  target_include_directories(clap-llama-kv-fit PRIVATE "${CLAP_LLAMA_INCLUDE_DIR}")
+  add_test(NAME clap-llama-kv-fit COMMAND clap-llama-kv-fit)
+
   add_executable(clap-llama-model-runtime
     tests/model-runtime.test.cpp
     src/environment.cpp
@@ -456,6 +462,7 @@ if(BUILD_TESTING)
     clap-llama-characterization
     clap-llama-environment
     clap-llama-generation-stepper
+    clap-llama-kv-fit
     clap-llama-model-runtime
     clap-llama-prompt
     clap-llama-protocol

@@ -76,4 +76,19 @@ final class LatencySchedulerTests: XCTestCase {
     XCTAssertEqual(round.prefix(3).map(\.id), ["same", "other", "same"])
     XCTAssertTrue(round.allSatisfy { $0.turns == 1 })
   }
+
+  func testMaxPrefillQuantumClampsSoloAndContendedQuanta() {
+    let solo = LatencyScheduler.round(
+      [request("solo", 1, residual: 10_000)], maxPrefillQuantum: 128)
+    XCTAssertEqual(solo.map(\.prefillQuantum), [128])
+
+    let contended = LatencyScheduler.round([
+      request("a", 1, residual: 10_000),
+      request("b", 2, residual: 10_000),
+    ], maxPrefillQuantum: 64)
+    XCTAssertTrue(contended.allSatisfy { $0.prefillQuantum <= 64 })
+
+    let unclamped = LatencyScheduler.round([request("solo", 1, residual: 10_000)])
+    XCTAssertEqual(unclamped.map(\.prefillQuantum), [512])
+  }
 }

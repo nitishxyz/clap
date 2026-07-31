@@ -8,6 +8,8 @@ const names = [
   "CLAP_CACHE_CHECKPOINT_MAX",
   "CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS",
   "CLAP_CACHE_CHECKPOINT_BUDGET_BYTES",
+  "CLAP_LLAMA_PREFILL_BUDGET",
+  "CLAP_MLX_PREFILL_QUANTUM",
 ] as const;
 
 const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -51,5 +53,22 @@ describe("automatic checkpoint config", () => {
     expect(process.env.CLAP_CACHE_CHECKPOINT_BUDGET_BYTES).toBe("33554432");
     expect(() => ClapConfigSchema.parse({ cache: { checkpoints: { budget_fraction: 1.1 } } })).toThrow();
     expect(() => ClapConfigSchema.parse({ cache: { checkpoints: { max_checkpoints: 0 } } })).toThrow();
+  });
+});
+
+describe("prefill latency controls", () => {
+  test("maps [llama].prefill_budget and [mlx].prefill_quantum to worker env", () => {
+    delete process.env.CLAP_LLAMA_PREFILL_BUDGET;
+    delete process.env.CLAP_MLX_PREFILL_QUANTUM;
+    const config = ClapConfigSchema.parse({
+      llama: { prefill_budget: 256 },
+      mlx: { prefill_quantum: 192 },
+    });
+    applyConfigToEnv(config);
+    const env: Record<string, string | undefined> = process.env;
+    expect(env.CLAP_LLAMA_PREFILL_BUDGET).toBe("256");
+    expect(env.CLAP_MLX_PREFILL_QUANTUM).toBe("192");
+    expect(() => ClapConfigSchema.parse({ llama: { prefill_budget: -1 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ mlx: { prefill_quantum: 0 } })).toThrow();
   });
 });

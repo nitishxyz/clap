@@ -35,6 +35,8 @@ struct WorkerConfiguration {
   let kvBits: Int?
   let outputOverride: Int
   let explicitMaxActive: Int?
+  // Clamps every scheduler prefill quantum (0 = built-in latency defaults).
+  let prefillQuantum: Int
   let checkpoints: CheckpointConfiguration
   let debugPrompt: Bool
 
@@ -59,6 +61,7 @@ struct WorkerConfiguration {
     }
     outputOverride = Int(environment["CLAP_MLX_MAX_OUTPUT"] ?? "") ?? 0
     explicitMaxActive = Int(environment["CLAP_MAX_ACTIVE"] ?? "")
+    prefillQuantum = max(0, Int(environment["CLAP_MLX_PREFILL_QUANTUM"] ?? "") ?? 0)
     checkpoints = CheckpointConfiguration(
       enabled: environment["CLAP_CACHE_CHECKPOINTS_ENABLED"] != "0",
       minimumTokens: Int(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048,

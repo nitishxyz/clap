@@ -75,15 +75,33 @@ Do not commit local model paths, API keys, installation secrets, prompts contain
 
 ## Runner and output design
 
-Add a separate benchmark runner rather than overloading correctness probes. Suggested files, to be implemented in the follow-up:
+The benchmark runner is implemented as a separate tool rather than
+overloading correctness probes:
 
 ```text
 config/inference-benchmark-matrix.json
 scripts/run-inference-benchmarks.ts
+scripts/inference-benchmark-lib.ts
 scripts/sanitize-inference-benchmark-log.ts
 ```
 
-The runner should:
+Run it against an already-running server (local or remote):
+
+```sh
+bun run bench -- --model <id> [--base-url http://host:11435] \
+  [--suite load-residency|single-generation|concurrency] \
+  [--samples n] [--warmups n] [--label name]
+bun run bench:sanitize -- <input> <output>
+```
+
+Suites: `load-residency` (unload/load wall time plus residency provenance),
+`single-generation` (cold prompt, exact continuation, shared-prefix branch —
+TTFT, decode tok/s, and `/metrics` deltas for prompt/completion/kv-reused
+tokens per sample), and `concurrency` (solo control versus N parallel
+streams sharing a prefix, one stream marked interactive). Raw samples are
+written as JSONL next to `meta.json` and a derived `summary.json`
+(p50/p95/p99); artifacts are sanitized before write and `bench-results/` is
+gitignored. The runner keeps these behaviors:
 
 1. validate immutable assets and host prerequisites;
 2. build or verify the exact workers under test;
@@ -136,9 +154,9 @@ Start this follow-up only when:
 
 A benchmark milestone is complete when the runner and schema are reviewed, reference artifacts are reproducible, variance is characterized, regressions have agreed thresholds, and operator-facing tuning recommendations distinguish measured facts from estimates. README performance claims, if any, require a separate review and are not part of this document change.
 
-## Commands available before runner implementation
+## Prerequisite gates
 
-Use existing correctness and telemetry gates as prerequisites:
+Run correctness and telemetry gates before and after any tuning change:
 
 ```sh
 bun run typecheck
@@ -149,4 +167,7 @@ CLAP_CACHE_TEST_REQUIRE_ASSETS=1 bun run native:cache:tier-b
 CLAP_CACHE_TEST_REQUIRE_ASSETS=1 bun run native:cache:tier-c
 ```
 
-There is intentionally no `benchmark` package script yet. Adding the runner, its script entry, pinned benchmark matrix, sanitizer tests, and collected reference results is future implementation work.
+The `bench` / `bench:sanitize` package scripts, the pinned benchmark matrix,
+and sanitizer tests are implemented. Collected cross-hardware reference
+results, agreed regression thresholds, and cohort variance characterization
+remain future work; until they exist no benchmark number is a release claim.

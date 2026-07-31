@@ -41,8 +41,10 @@ public enum LatencyScheduler {
 
   // Every runnable request appears exactly once in each round. Priority only
   // changes order within the round, so a stream of short arrivals cannot
-  // starve older prefills or decode work.
-  public static func round(_ requests: [LatencySchedulerRequest]) -> [LatencySchedulerStep] {
+  // starve older prefills or decode work. maxPrefillQuantum optionally clamps
+  // every prefill quantum so operators can bound per-turn ingest latency.
+  public static func round(_ requests: [LatencySchedulerRequest],
+                           maxPrefillQuantum: Int? = nil) -> [LatencySchedulerStep] {
     let runnable = requests.filter { !$0.cancelled }
     let contended = runnable.count > 1
     let ordered = runnable.sorted {
@@ -50,8 +52,12 @@ public enum LatencyScheduler {
       let lhs = phasePriority($0), rhs = phasePriority($1)
       return lhs == rhs ? $0.admissionOrder < $1.admissionOrder : lhs < rhs
     }
+    let clamp = { (quantum: Int) in
+      maxPrefillQuantum.map { max(1, min(quantum, $0)) } ?? quantum
+    }
     let step = { (request: LatencySchedulerRequest) in
-      LatencySchedulerStep(id: request.id, prefillQuantum: contended ? quantum(request.priority) : normalPrefillQuantum,
+      LatencySchedulerStep(id: request.id,
+        prefillQuantum: clamp(contended ? quantum(request.priority) : normalPrefillQuantum),
         turns: 1)
     }
     guard contended else { return ordered.map(step) }

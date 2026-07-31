@@ -65,7 +65,9 @@ final class ExecutableWorkerScheduler {
   }
 
   func runRound(using state: WorkerState, decodeLimit: Int) {
-    for turn in core.latencyRound(view: Self.view) {
+    let maxQuantum = state.configuration.prefillQuantum
+    for turn in core.latencyRound(view: Self.view,
+      maxPrefillQuantum: maxQuantum > 0 ? maxQuantum : nil) {
       let request = turn.request
       for _ in 0..<turn.turns where !Self.view(request).terminal {
         state.step(request, prefillQuantum: turn.prefillQuantum, decodeLimit: decodeLimit)

@@ -75,10 +75,15 @@ export function deriveCacheIdentity(
   const sessionDigest = deriveOptionalScope(secret.key, tenantDigest, "session", display.session);
   const selected = selectScope(tenantDigest, projectDigest, harnessDigest, agentDigest, sessionDigest);
   const physicalDigest = derivePhysicalDomain(secret.key, physical);
+  // The namespace is the isolation wall: authenticated tenant, the caller's
+  // explicit namespace label, and the physical model domain. Scope labels
+  // (project/harness/agent/session) intentionally stay out of it — they are
+  // non-authoritative reuse/ranking labels carried separately to the worker,
+  // and folding the selected scope into the namespace would place every
+  // session in its own namespace and structurally forbid the cross-session
+  // shared-prefix reuse (branch/anchor) the coordinator implements.
   const namespaceDigest = hmacSha256(secret.key, `${DOMAIN_PREFIX}/namespace`, [
     tenantDigest,
-    selected.kind,
-    selected.digest,
     display.namespace ?? "",
     physicalDigest,
   ]);

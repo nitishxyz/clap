@@ -49,6 +49,7 @@ class WorkerState {
   int32_t context_override() const noexcept { return runtime_.context_override(); }
   const std::string& kv_format() const noexcept { return runtime_.kv_format(); }
   int32_t retained_capacity() const noexcept { return runtime_.retained_max(); }
+  int32_t prefill_budget() const noexcept { return prefill_budget_; }
 
   void load(const std::string& model_path);
   void unload();
@@ -79,6 +80,7 @@ class WorkerState {
 
   ModelRuntime runtime_;
   int32_t max_active_ = 0;
+  int32_t prefill_budget_ = 0;
   clap::llama_active::Decision active_policy_{};
   std::string last_eviction_reason_;
   int32_t previous_max_active_ = 0;

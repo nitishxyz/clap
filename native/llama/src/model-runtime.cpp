@@ -1,6 +1,7 @@
 #include "clap/llama/model-runtime.h"
 
 #include "clap/llama/environment.h"
+#include "clap/llama/kv-fit.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -75,6 +76,34 @@ bool ModelRuntime::load(const std::string& model_path) {
   int32_t context_size = train_context > 0 && env_context > 0
       ? std::min(train_context, env_context)
       : (env_context > 0 ? env_context : train_context);
+  const char* kv_type_env = std::getenv("CLAP_LLAMA_KV_TYPE");
+  const std::string kv_type_name = kv_type_env && *kv_type_env ? kv_type_env : "f16";
+  if (env_context <= 0 && env_int("CLAP_LLAMA_KV_AUTOFIT", 1) != 0) {
+    // Automatic context: shrink the unified KV pool allocation until its
+    // estimated cost fits measured availability (scale plan T2.6). The
+    // estimate is a scheduling input, never reported as measured KV bytes.
+    const int32_t n_head = llama_model_n_head(model_);
+    const int32_t head_dim = n_head > 0 ? llama_model_n_embd(model_) / n_head : 0;
+    clap::llama_kv::FitInputs fit_inputs;
+    fit_inputs.requested_context = 0;
+    fit_inputs.train_context = context_size;
+    fit_inputs.kv_bytes_per_token = clap::llama_kv::estimate_kv_bytes_per_token(
+        llama_model_n_layer(model_), llama_model_n_head_kv(model_), head_dim,
+        kv_type_name);
+    fit_inputs.available_bytes = startup_available;
+    fit_inputs.model_file_bytes = file_size_error ? 0 : model_file_bytes;
+    const auto fit = clap::llama_kv::fit_context(fit_inputs);
+    if (fit.clamped) {
+      fprintf(stderr,
+          "clap-llama: auto context reduced %d -> %d cells (%s; estimated KV pool "
+          "%llu bytes, budget %llu bytes); set CLAP_LLAMA_CONTEXT or "
+          "CLAP_LLAMA_KV_AUTOFIT=0 to override\n",
+          context_size, fit.context_cells, fit.reason.c_str(),
+          static_cast<unsigned long long>(fit.estimated_pool_bytes),
+          static_cast<unsigned long long>(fit.budget_bytes));
+      context_size = fit.context_cells;
+    }
+  }
   context_params.n_batch = env_int("CLAP_LLAMA_BATCH", 2048);
   context_params.n_ubatch = env_int("CLAP_LLAMA_UBATCH", 512);
   const int32_t retained_override = env_int("CLAP_LLAMA_RETAINED_MAX", 0);
@@ -123,8 +152,7 @@ bool ModelRuntime::load(const std::string& model_path) {
   prompt_boundary_snapshots_ = !hybrid_ &&
       (!has_architecture || std::string(architecture) != "gemma4");
   has_encoder_ = llama_model_has_encoder(model_);
-  const char* kv_type = std::getenv("CLAP_LLAMA_KV_TYPE");
-  kv_format_ = kv_type && *kv_type ? kv_type : "f16";
+  kv_format_ = kv_type_name;
   unified_kv_ = context_params.kv_unified;
   cache_domain_ = model_path + "|llama|ctx=" + std::to_string(backend_allocation_cap_) +
       "|kv=" + kv_format_ +

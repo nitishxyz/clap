@@ -294,25 +294,32 @@ void GenerationStepper::isolated(ActiveRequest& request, bool sole_active,
 }
 
 std::vector<GenerationEvent> GenerationStepper::step(
-    const std::vector<ActiveRequest*>& ordered, int32_t batch_budget, bool sole_active) {
+    const std::vector<ActiveRequest*>& ordered, int32_t batch_budget, bool sole_active,
+    int32_t prefill_budget) {
   std::vector<GenerationEvent> events;
   std::vector<DecodeContribution> batch;
   std::vector<ActiveRequest*> contributors;
   int32_t budget = batch_budget;
+  int32_t prefill_left = !sole_active && prefill_budget > 0
+      ? std::min(prefill_budget, batch_budget) : batch_budget;
   std::size_t runnable_left = std::count_if(ordered.begin(), ordered.end(),
       [](const ActiveRequest* request) { return request && !request->done; });
   for (ActiveRequest* request : ordered) {
     if (!request || request->done || budget <= 0) continue;
+    const bool prefilling = request->phase == ActiveRequest::Phase::Prefill;
+    if (prefilling && prefill_left <= 0) continue;
     const int32_t reserved_for_others = static_cast<int32_t>(runnable_left > 0 ? runnable_left - 1 : 0);
     const int32_t quantum = sole_active ? batch_budget
         : request->priority == CLAP_CACHE_PRIORITY_INTERACTIVE ? 192
         : request->priority == CLAP_CACHE_PRIORITY_BACKGROUND ? 48 : 96;
-    const int32_t request_budget = std::max(1, std::min(quantum, budget - reserved_for_others));
+    int32_t request_budget = std::max(1, std::min(quantum, budget - reserved_for_others));
+    if (prefilling) request_budget = std::min(request_budget, prefill_left);
     const std::size_t before = batch.size();
     add_contribution(batch, *request, request_budget);
     const int32_t added = static_cast<int32_t>(batch.size() - before);
     if (added == 0) continue;
     budget -= added;
+    if (prefilling) prefill_left -= added;
     contributors.push_back(request);
     runnable_left -= 1;
   }

@@ -59,8 +59,8 @@ describe("cache identity derivation", () => {
       },
       physical: {
         fingerprint: "5befd882f13033f62c62fd673e60b7758564412e14c6f18cbb799b541847ecb5",
-        namespace: "40d51ffb8e7b5c35e3a4519b9ce017396cc5c8d6c89a2c7652d087742b216329",
-        namespaceId: 4671675353754459189n,
+        namespace: "a12866ee2b1c3e3fcf3d8120768d486a2ea362f37fa673a5c08b90bdb86bdf4e",
+        namespaceId: 11612644812286344767n,
       },
     });
     expect(allHex(identity).every((value) => /^[0-9a-f]{64}$/.test(value))).toBe(true);
@@ -88,6 +88,25 @@ describe("cache identity derivation", () => {
 
     expect(local).toEqual(localAgain);
     expect(local.tenantRoot).not.toBe(api.tenantRoot);
+  });
+
+  test("scope labels select reuse scope without partitioning the namespace", () => {
+    // Sessions of one tenant/namespace/model must share a cache namespace:
+    // cross-session branch/anchor reuse is coordinator policy, not an
+    // identity wall. Only tenant, explicit namespace label, and physical
+    // domain partition the namespace.
+    const first = deriveCacheIdentity(secret, apiKeyPrincipal("record-1"), { session: "session-a" }, physical);
+    const second = deriveCacheIdentity(secret, apiKeyPrincipal("record-1"), { session: "session-b" }, physical);
+    const agent = deriveCacheIdentity(secret, apiKeyPrincipal("record-1"), { agent: "planner" }, physical);
+    const unlabeled = deriveCacheIdentity(secret, apiKeyPrincipal("record-1"), {}, physical);
+
+    expect(first.physical.namespace).toBe(second.physical.namespace);
+    expect(first.physical.namespace).toBe(agent.physical.namespace);
+    expect(first.physical.namespace).toBe(unlabeled.physical.namespace);
+    expect(first.scope.fingerprint).not.toBe(second.scope.fingerprint);
+
+    const labeled = deriveCacheIdentity(secret, apiKeyPrincipal("record-1"), { namespace: "team-a", session: "session-a" }, physical);
+    expect(labeled.physical.namespace).not.toBe(first.physical.namespace);
   });
 
   test("domain-separates scopes and derives each independently under the tenant", () => {

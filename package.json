@@ -25,6 +25,8 @@
     "memory:honesty:check": "bun run scripts/check-honest-memory-telemetry.ts",
     "structured-output:gate": "bun run scripts/check-structured-output-gates.ts",
     "capability-priority:gate": "bun run scripts/check-capability-priority.ts",
+    "bench": "bun run scripts/run-inference-benchmarks.ts",
+    "bench:sanitize": "bun run scripts/sanitize-inference-benchmark-log.ts",
     "native:cache:tier-b": "bun run scripts/run-cache-correctness-matrix.ts",
     "native:cache:tier-c": "bun run scripts/run-cache-correctness-matrix.ts --tier c",
     "cache:identity:check": "bun run scripts/check-cache-identity-security.ts",

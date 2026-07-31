@@ -56,5 +56,8 @@ clap-server.log
 /models/
 /downloads/
 
+# Benchmark artifacts (raw local runs; share sanitized copies only)
+bench-results/
+
 # Local-only files
 *.local

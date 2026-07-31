@@ -59,7 +59,8 @@ public final class WorkerScheduler<Payload, Active> {
     return CancellationResult(pending: cancelledPending, active: cancelledActive)
   }
 
-  public func latencyRound(view: (Active) -> ActiveRequestView) -> [SchedulerTurn<Active>] {
+  public func latencyRound(view: (Active) -> ActiveRequestView,
+                           maxPrefillQuantum: Int? = nil) -> [SchedulerTurn<Active>] {
     let byOrder = Dictionary(uniqueKeysWithValues: active.map {
       (view($0).admissionOrder, $0)
     })
@@ -70,7 +71,7 @@ public final class WorkerScheduler<Payload, Active> {
         residualPrefillTokens: facts.residualPrefillTokens,
         decoding: facts.decoding, emittedFirstToken: facts.emittedFirstToken,
         cancelled: facts.cancelled, priority: facts.priority)
-    }).compactMap { step in
+    }, maxPrefillQuantum: maxPrefillQuantum).compactMap { step in
       guard let order = UInt64(step.id), let request = byOrder[order] else { return nil }
       return SchedulerTurn(request: request, prefillQuantum: step.prefillQuantum,
         turns: step.turns)

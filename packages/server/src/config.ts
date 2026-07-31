@@ -25,6 +25,7 @@ const LlamaSectionSchema = z.object({
   max_output: z.number().int().positive().optional(),
   batch: z.number().int().positive().optional(),
   ubatch: z.number().int().positive().optional(),
+  prefill_budget: z.number().int().nonnegative().optional(),
   gpu_layers: z.number().int().nonnegative().optional(),
   kv_type: KvTypeSchema.optional(),
   // Lifecycle policy (per-model sections; ignored in [llama] globals)
@@ -46,6 +47,7 @@ const MlxSectionSchema = z.object({
   max_session_ctx: z.number().int().positive().optional(),
   max_output: z.number().int().positive().optional(),
   kv_type: KvTypeSchema.optional(),
+  prefill_quantum: z.number().int().positive().optional(),
 }).partial();
 
 export const ClapConfigSchema = z.object({
@@ -171,6 +173,7 @@ const LLAMA_ENV_MAP: Array<[keyof z.infer<typeof LlamaSectionSchema>, string]> =
   ["max_output", "CLAP_LLAMA_MAX_OUTPUT"],
   ["batch", "CLAP_LLAMA_BATCH"],
   ["ubatch", "CLAP_LLAMA_UBATCH"],
+  ["prefill_budget", "CLAP_LLAMA_PREFILL_BUDGET"],
   ["gpu_layers", "CLAP_LLAMA_GPU_LAYERS"],
   ["kv_type", "CLAP_LLAMA_KV_TYPE"],
 ];
@@ -189,6 +192,7 @@ const MLX_ENV_MAP: Array<[keyof z.infer<typeof MlxSectionSchema>, string]> = [
   ["max_session_ctx", "CLAP_MLX_MAX_SESSION_CTX"],
   ["max_output", "CLAP_MLX_MAX_OUTPUT"],
   ["kv_type", "CLAP_MLX_KV_TYPE"],
+  ["prefill_quantum", "CLAP_MLX_PREFILL_QUANTUM"],
 ];
 
 // Applies [llama] globals to the process environment. Explicit environment

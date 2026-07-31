@@ -77,6 +77,8 @@ This ordering prevents a logical hit from being published before physical materi
 
 The server derives an opaque v1 identity from the authenticated principal, installation secret generation, bounded display labels, project/harness/agent/session scope, and physical model identity. Secret-bearing labels are HMAC-derived before crossing the worker boundary. The wire contract contains fixed-width fingerprints and a numeric namespace ID; raw API keys and installation secrets are never sent to native workers or persisted in cache-decision records.
 
+The isolation namespace is derived from exactly three inputs: the authenticated tenant root, the caller's explicit `cache.namespace` label, and the physical model domain. Scope labels (`project`/`harness`/`agent`/`session`) select the reuse scope and rank donors but intentionally do not partition the namespace — sessions of one authenticated caller on one model share a namespace so the coordinator's cross-session branch/anchor reuse is reachable. Verified end-to-end: distinct sessions sharing a declared harness prefix reuse ~3,100 tokens with branch TTFT within ~1.1x of exact continuation.
+
 Remote requests carrying cache intent require a valid API key. Loopback/embedded behavior follows server authentication policy. Rotate identity material with:
 
 ```sh
@@ -135,8 +137,8 @@ Important controls:
 | Runtime discovery | `CLAP_LLAMA_WORKER`, `CLAP_MLX_WORKER`, `CLAP_HOME` |
 | Lifecycle/admission | `CLAP_KEEP_ALIVE`, `CLAP_MAX_ACTIVE`, `CLAP_MODEL_OS_HEADROOM_BYTES`, `CLAP_MODEL_RUNTIME_HEADROOM_BYTES`, `CLAP_UNKNOWN_MODEL_MEMORY_MIN_BYTES` |
 | Request queue | `[limits] max_inflight`, `queue_depth`, `max_active` (environment equivalents are consumed by the server) |
-| GGUF | `[llama]` or `CLAP_LLAMA_CONTEXT`, `CLAP_LLAMA_MAX_SESSION_CTX`, `CLAP_LLAMA_MAX_OUTPUT`, `CLAP_LLAMA_BATCH`, `CLAP_LLAMA_UBATCH`, `CLAP_LLAMA_GPU_LAYERS`, `CLAP_LLAMA_KV_TYPE`, `CLAP_LLAMA_RETAINED_MAX` |
-| MLX | `[mlx]` or `CLAP_MLX_CONTEXT`, `CLAP_MLX_MAX_SESSION_CTX`, `CLAP_MLX_MAX_OUTPUT`, `CLAP_MLX_KV_TYPE`, retained initial/max/budget/watermark/growth controls |
+| GGUF | `[llama]` or `CLAP_LLAMA_CONTEXT`, `CLAP_LLAMA_KV_AUTOFIT`, `CLAP_LLAMA_MAX_SESSION_CTX`, `CLAP_LLAMA_MAX_OUTPUT`, `CLAP_LLAMA_BATCH`, `CLAP_LLAMA_UBATCH`, `CLAP_LLAMA_PREFILL_BUDGET`, `CLAP_LLAMA_GPU_LAYERS`, `CLAP_LLAMA_KV_TYPE`, `CLAP_LLAMA_RETAINED_MAX` |
+| MLX | `[mlx]` or `CLAP_MLX_CONTEXT`, `CLAP_MLX_MAX_SESSION_CTX`, `CLAP_MLX_MAX_OUTPUT`, `CLAP_MLX_KV_TYPE`, `CLAP_MLX_PREFILL_QUANTUM`, retained initial/max/budget/watermark/growth controls |
 | Checkpoints | `[cache.checkpoints]` or `CLAP_CACHE_CHECKPOINTS_ENABLED`, minimum/interval/max and budget controls |
 | Launch logs | `CLAP_WORKER_LOG_MAX_LAUNCHES_PER_MODEL`, `CLAP_WORKER_LOG_MAX_BYTES_PER_BACKEND`, `CLAP_WORKER_SHUTDOWN_TIMEOUT_MS` |
 | Auth/telemetry | `[auth] require_api_key`, `CLAP_REQUIRE_API_KEY`, `[telemetry] cache_decisions_enabled`, maximum MiB and age |

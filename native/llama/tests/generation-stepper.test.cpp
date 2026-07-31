@@ -181,4 +181,42 @@ int main() {
     sole_stepper.step({&sole}, 512, true);
     assert(sole.ingested == 512);
   }
+
+  {
+    // Aggregate prefill budget caps contended prompt ingest so decode streams
+    // keep near-solo step latency; decode contributions are never capped.
+    FakeBackend backend;
+    backend.sampled = {10};
+    backend.pieces[10] = "x";
+    std::vector<llama_token> prompt(600, 1);
+    auto decode = request({}, 0);
+    decode.phase = clap::llama::ActiveRequest::Phase::Decode;
+    decode.pending_token = 7;
+    auto first = request(prompt, 1);
+    auto second = request(prompt, 2);
+    clap::llama::GenerationStepper stepper(backend);
+    stepper.step({&decode, &first, &second}, 2048, false, 100);
+    assert(backend.calls.size() == 1);
+    // 1 decode token + at most 100 aggregate prefill tokens.
+    assert(backend.calls[0].size() <= 101);
+    assert(decode.pending_token == 10);
+    assert(first.ingested + second.ingested <= 100);
+    assert(first.ingested + second.ingested > 0);
+
+    // Sole active requests ignore the cap entirely.
+    FakeBackend sole_backend;
+    auto sole = request(prompt, 3);
+    clap::llama::GenerationStepper sole_stepper(sole_backend);
+    sole_stepper.step({&sole}, 512, true, 100);
+    assert(sole.ingested == 512);
+
+    // Uncapped contended steps keep the existing quantum behavior.
+    FakeBackend uncapped_backend;
+    auto third = request(prompt, 4);
+    auto fourth = request(prompt, 5);
+    clap::llama::GenerationStepper uncapped_stepper(uncapped_backend);
+    uncapped_stepper.step({&third, &fourth}, 2048, false, 0);
+    assert(third.ingested == 96);
+    assert(fourth.ingested == 96);
+  }
 }

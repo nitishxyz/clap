@@ -274,9 +274,11 @@ CLAP_LLAMA_WORKER="/path/to/clap-llama" bun run cli run ./model.gguf "hello"
 
 GGUF runtime knobs for large models or Metal memory pressure (also via `[llama]` in `clap.toml`):
 
-- `CLAP_LLAMA_CONTEXT` — context size (default `4096`)
+- `CLAP_LLAMA_CONTEXT` — pinned context size (default: model training context, auto-fitted to memory)
+- `CLAP_LLAMA_KV_AUTOFIT` — automatic contexts estimate per-token KV bytes from model metadata and halve the allocation until the estimated pool fits measured available memory (floor 8192 cells); set `0` to disable
 - `CLAP_LLAMA_MAX_SESSION_CTX` / `CLAP_LLAMA_MAX_OUTPUT` — session and output bounds
-- `CLAP_LLAMA_BATCH` / `CLAP_LLAMA_UBATCH` — logical batch and micro-batch (defaults `128` / `64`)
+- `CLAP_LLAMA_BATCH` / `CLAP_LLAMA_UBATCH` — logical batch and micro-batch (defaults `2048` / `512`)
+- `CLAP_LLAMA_PREFILL_BUDGET` — aggregate prompt-ingest tokens per contended scheduler step so decode streams keep near-solo latency during heavy prefill (default `max(128, batch/4)`)
 - `CLAP_LLAMA_GPU_LAYERS` — GPU offload (default `999`; `0` for CPU)
 - `CLAP_LLAMA_KV_TYPE` / `CLAP_LLAMA_RETAINED_MAX` — KV type and retention
 

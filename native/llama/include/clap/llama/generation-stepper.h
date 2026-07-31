@@ -72,8 +72,12 @@ class GenerationStepper {
   GenerationStepper(const GenerationStepper&) = delete;
   GenerationStepper& operator=(const GenerationStepper&) = delete;
 
+  // prefill_budget caps aggregate prompt-ingest tokens per step when multiple
+  // requests are active so decode streams keep near-solo latency during heavy
+  // ingest. <= 0 means uncapped. Decode contributions are never capped.
   std::vector<GenerationEvent> step(const std::vector<ActiveRequest*>& ordered,
-                                    int32_t batch_budget, bool sole_active);
+                                    int32_t batch_budget, bool sole_active,
+                                    int32_t prefill_budget = 0);
 
  private:
   void add_contribution(std::vector<DecodeContribution>& batch, ActiveRequest& request,
