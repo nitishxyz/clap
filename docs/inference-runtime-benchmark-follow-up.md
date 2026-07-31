@@ -90,7 +90,8 @@ Run it against an already-running server (local or remote):
 ```sh
 bun run bench -- --model <id> [--base-url http://host:11435] \
   [--suite load-residency|single-generation|concurrency] \
-  [--samples n] [--warmups n] [--label name]
+  [--samples n] [--warmups n] [--streams n] [--label name] \
+  [--matrix config/inference-benchmark-matrix-gpu-rig.json]
 bun run bench:sanitize -- <input> <output>
 ```
 

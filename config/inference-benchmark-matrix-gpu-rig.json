@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "warmups": 1,
+    "samples": 3,
+    "timeoutMs": 600000,
+    "maxTokens": 64,
+    "temperature": 0
+  },
+  "prompts": {
+    "seed": 20260731,
+    "coldPromptWords": 2000,
+    "sharedPrefixWords": 12000,
+    "divergenceWords": 60
+  },
+  "suites": {
+    "load-residency": {
+      "enabled": true,
+      "samples": 3,
+      "warmups": 0
+    },
+    "single-generation": {
+      "enabled": true,
+      "cases": ["cold", "continuation", "branch"]
+    },
+    "concurrency": {
+      "enabled": true,
+      "streams": 8,
+      "samples": 2,
+      "warmups": 1,
+      "maxTokens": 48
+    }
+  }
+}

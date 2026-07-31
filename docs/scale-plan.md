@@ -189,7 +189,7 @@ availability minus weights and headroom or an explicit admin budget via
 (net of weights; use this to hand a discrete GPU's VRAM budget to the
 policy). `max_session_ctx` also replaces the fixed 4k-cell context reserve.
 Remaining (GPU rig): validate the estimate against measured VRAM on real
-hardware.
+hardware — runbook: `docs/gpu-rig-validation.md`.
 
 ### 7. KV quantization surfacing
 Worker flag exists (`CLAP_LLAMA_KV_TYPE`). Add:
@@ -314,7 +314,8 @@ proportions), mapped to `CLAP_LLAMA_SPLIT_MODE` / `CLAP_LLAMA_MAIN_GPU` /
 `CLAP_LLAMA_TENSOR_SPLIT` and validated at load by
 `native/llama/include/clap/llama/gpu-split.h` — misconfiguration fails the
 load with a described error instead of silently changing placement. Enables
-70B+ Q8 or more concurrent sessions. Remaining: validate on a multi-GPU rig.
+70B+ Q8 or more concurrent sessions. Remaining: validate on a multi-GPU
+rig — runbook: `docs/gpu-rig-validation.md`.
 
 ### 14. MLX distributed (research track)
 MLX has a distributed layer (ring/MPI; RDMA over Thunderbolt 5 on macOS

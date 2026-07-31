@@ -30,6 +30,8 @@ type RunnerOptions = {
   label: string;
   samplesOverride: number | null;
   warmupsOverride: number | null;
+  streamsOverride: number | null;
+  matrixPath: string;
   apiKey: string | undefined;
 };
 
@@ -42,6 +44,8 @@ function parseArgs(argv: string[]): RunnerOptions {
     label: "run",
     samplesOverride: null,
     warmupsOverride: null,
+    streamsOverride: null,
+    matrixPath: resolve(import.meta.dir, "../config/inference-benchmark-matrix.json"),
     apiKey: process.env.CLAP_API_KEY,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -59,20 +63,21 @@ function parseArgs(argv: string[]): RunnerOptions {
     else if (arg === "--label") options.label = next();
     else if (arg === "--samples") options.samplesOverride = Number(next());
     else if (arg === "--warmups") options.warmupsOverride = Number(next());
+    else if (arg === "--streams") options.streamsOverride = Number(next());
+    else if (arg === "--matrix") options.matrixPath = resolve(process.cwd(), next());
     else if (arg === "--api-key") options.apiKey = next();
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (options.models.length === 0) {
     throw new Error("usage: run-inference-benchmarks.ts --model <id> [--model <id>] " +
       "[--base-url http://host:11435] [--suite name] [--out dir] [--label name] " +
-      "[--samples n] [--warmups n]");
+      "[--samples n] [--warmups n] [--streams n] [--matrix path]");
   }
   return options;
 }
 
 const options = parseArgs(process.argv.slice(2));
-const matrix = JSON.parse(await readFile(
-  resolve(import.meta.dir, "../config/inference-benchmark-matrix.json"), "utf8")) as MatrixConfig;
+const matrix = JSON.parse(await readFile(options.matrixPath, "utf8")) as MatrixConfig;
 if (matrix.schemaVersion !== 1) throw new Error("unsupported benchmark matrix schema");
 
 const headers: Record<string, string> = { "content-type": "application/json" };
@@ -319,7 +324,8 @@ for (const model of options.models) {
   const config = suiteConfig("concurrency");
   if (!config) break;
   const { warmups, samples } = counts(config);
-  const streams = typeof config.streams === "number" ? config.streams : 4;
+  const streams = options.streamsOverride
+    ?? (typeof config.streams === "number" ? config.streams : 4);
   const maxTokens = typeof config.maxTokens === "number" ? config.maxTokens : matrix.defaults.maxTokens;
   const total = warmups + samples;
   for (let round = 0; round < total; round += 1) {
