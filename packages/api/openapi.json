@@ -81,6 +81,49 @@
           "uptimeMs"
         ]
       },
+      "HuggingFaceAuthLoginRequest": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "HuggingFaceAuthStatus": {
+        "type": "object",
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "env",
+              "keychain",
+              "libsecret",
+              "file",
+              "none"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "tokenPreview": {
+            "type": "string"
+          },
+          "envVar": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authenticated",
+          "source"
+        ]
+      },
       "RuntimeResponse": {
         "type": "object",
         "properties": {
@@ -546,6 +589,12 @@
                 },
                 "error": {
                   "type": "string"
+                },
+                "errorCode": {
+                  "type": "string",
+                  "enum": [
+                    "hf_auth_required"
+                  ]
                 },
                 "startedAt": {
                   "type": "string"
@@ -3084,6 +3133,12 @@
               },
               "error": {
                 "type": "string"
+              },
+              "errorCode": {
+                "type": "string",
+                "enum": [
+                  "hf_auth_required"
+                ]
               },
               "startedAt": {
                 "type": "string"
@@ -6787,6 +6842,12 @@
                           "error": {
                             "type": "string"
                           },
+                          "errorCode": {
+                            "type": "string",
+                            "enum": [
+                              "hf_auth_required"
+                            ]
+                          },
                           "startedAt": {
                             "type": "string"
                           },
@@ -6866,6 +6927,320 @@
                   },
                   "required": [
                     "downloads"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clap/v1/auth/huggingface": {
+      "get": {
+        "summary": "Hugging Face credential status",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "env",
+                        "keychain",
+                        "libsecret",
+                        "file",
+                        "none"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "tokenPreview": {
+                      "type": "string"
+                    },
+                    "envVar": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "authenticated",
+                    "source"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Save a Hugging Face token in the local credential store",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "env",
+                        "keychain",
+                        "libsecret",
+                        "file",
+                        "none"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "tokenPreview": {
+                      "type": "string"
+                    },
+                    "envVar": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "authenticated",
+                    "source"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "default": "invalid_request_error"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "nullable": true
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove the stored Hugging Face token",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "env",
+                        "keychain",
+                        "libsecret",
+                        "file",
+                        "none"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "tokenPreview": {
+                      "type": "string"
+                    },
+                    "envVar": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "authenticated",
+                    "source"
                   ]
                 }
               }
@@ -10402,6 +10777,12 @@
                         "error": {
                           "type": "string"
                         },
+                        "errorCode": {
+                          "type": "string",
+                          "enum": [
+                            "hf_auth_required"
+                          ]
+                        },
                         "startedAt": {
                           "type": "string"
                         },
@@ -10613,6 +10994,12 @@
                         },
                         "error": {
                           "type": "string"
+                        },
+                        "errorCode": {
+                          "type": "string",
+                          "enum": [
+                            "hf_auth_required"
+                          ]
                         },
                         "startedAt": {
                           "type": "string"

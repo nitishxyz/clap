@@ -383,11 +383,21 @@ export type DashboardDownload = {
   model: string;
   file?: string;
   backend?: "gguf" | "mlx";
+  targetKey?: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   bytesReceived: number;
   totalBytes?: number;
   currentFile?: string;
   error?: string;
+  errorCode?: "hf_auth_required";
+};
+
+export type HuggingFaceAuthStatus = {
+  authenticated: boolean;
+  source: "env" | "keychain" | "libsecret" | "file" | "none";
+  detail?: string;
+  tokenPreview?: string;
+  envVar?: string;
 };
 
 export type ModelResolveOption = {
@@ -478,4 +488,8 @@ export function resolveModel(model: string): Promise<ModelResolveResponse> {
 
 export function cancelDownload(id: string): Promise<unknown> {
   return post(`/clap/v1/downloads/${id}/cancel`, {});
+}
+
+export function saveHuggingFaceToken(token: string): Promise<HuggingFaceAuthStatus> {
+  return post("/clap/v1/auth/huggingface", { token }) as Promise<HuggingFaceAuthStatus>;
 }

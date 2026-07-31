@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { ClapApiError, clapVersion, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
-import { configPaths, createApiKey, keysFilePath, listApiKeys, loadClapConfig, revokeApiKey, startServer } from "@clap/server";
+import { configPaths, createApiKey, keysFilePath, listApiKeys, loadClapConfig, revokeApiKey, startServer, updateUserConfig } from "@clap/server";
 import { ensureCudaWorker } from "./cuda-worker";
 import { ensureEmbeddedWorkers } from "./embedded-workers";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -81,7 +81,9 @@ try {
 }
 
 async function serve(argv: string[] = []) {
-  if (argv.includes("--network")) process.env.CLAP_HOST = "0.0.0.0";
+  const { flags } = parseFlags(argv);
+  if (flags.network === "true") process.env.CLAP_HOST = "0.0.0.0";
+  applyApiKeyFlag(flags);
   const server = startServer();
   console.log(`clap server listening on http://${server.hostname}:${server.port}`);
   await new Promise(() => undefined);
@@ -133,21 +135,22 @@ async function serverCommand(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const action = rest[0] ?? "status";
   const force = flags.force === "true";
+  const apiKeyMode = apiKeyModeFromFlags(flags);
   if (action === "start") {
-    await startBackgroundServer({ network: flags.network === "true" });
+    await startBackgroundServer({ network: flags.network === "true", apiKeyMode });
   } else if (action === "stop") {
     await stopBackgroundServer({ force });
   } else if (action === "status") {
     await serverStatus();
   } else if (action === "restart") {
     await stopBackgroundServer({ quiet: true, force });
-    await startBackgroundServer({ network: flags.network === "true" });
+    await startBackgroundServer({ network: flags.network === "true", apiKeyMode });
   } else if (action === "logs") {
     await serverLogs(Number(rest[1] ?? "80"));
   } else if (action === "install") {
     await installServiceTemplate();
   } else {
-    throw new Error("usage: clap server <start|stop|status|restart|logs|install> [--network] [--force]");
+    throw new Error("usage: clap server <start|stop|status|restart|logs|install> [--network] [--no-api-key|--require-api-key] [--force]");
   }
 }
 
@@ -215,7 +218,7 @@ async function unloadCommand(argv: string[]) {
   console.log(`not loaded: ${model}`);
 }
 
-async function startBackgroundServer({ quiet = false, network = false } = {}): Promise<ServerMetadata> {
+async function startBackgroundServer({ quiet = false, network = false, apiKeyMode }: { quiet?: boolean; network?: boolean; apiKeyMode?: "disabled" | "required" } = {}): Promise<ServerMetadata> {
   return withServerStartLock(async () => {
     const paths = serverPaths();
     const baseURL = baseURLFromEnv();
@@ -225,6 +228,7 @@ async function startBackgroundServer({ quiet = false, network = false } = {}): P
       if (!quiet) {
         console.log(`clap server already running at ${baseURL} (pid ${existingMetadata.pid})`);
         if (network) console.log("note: --network ignored; restart to change the bind address: clap server restart --network");
+        if (apiKeyMode) console.log(`note: API-key flag ignored; restart to change enforcement: clap server restart --${apiKeyMode === "required" ? "require" : "no"}-api-key`);
       }
       return existingMetadata;
     }
@@ -257,6 +261,7 @@ async function startBackgroundServer({ quiet = false, network = false } = {}): P
         CLAP_BASE_URL: baseURL,
         PORT: String(portFromBaseURL(baseURL)),
         ...(network ? { CLAP_HOST: "0.0.0.0" } : {}),
+        ...(apiKeyMode ? { CLAP_REQUIRE_API_KEY: apiKeyMode === "required" ? "1" : "0" } : {}),
       },
       stdout,
       stderr,
@@ -358,7 +363,10 @@ async function authCommand(argv: string[]) {
   if (action === "login") {
     await authLogin(argv.slice(1));
   } else if (action === "logout") {
-    const status = await deleteStoredHfToken();
+    const baseURL = baseURLFromEnv();
+    const status = await healthCheck(baseURL)
+      ? await createClapClient({ baseURL }).deleteHuggingFaceToken()
+      : await deleteStoredHfToken();
     console.log(`status: logged_out`);
     console.log(`detail: ${status.detail}`);
   } else if (action === "status") {
@@ -371,7 +379,10 @@ async function authCommand(argv: string[]) {
 async function authLogin(argv: string[]) {
   const { flags, rest } = parseFlags(argv);
   const token = flags.token ?? rest[0] ?? await readTokenForLogin();
-  const status = await storeHfToken(token);
+  const baseURL = baseURLFromEnv();
+  const status = await healthCheck(baseURL)
+    ? await createClapClient({ baseURL }).setHuggingFaceToken({ token })
+    : await storeHfToken(token);
   console.log("status: logged_in");
   console.log(`source: ${status.source}`);
   if (status.tokenPreview) console.log(`token: ${status.tokenPreview}`);
@@ -389,8 +400,9 @@ async function keysCommand(argv: string[]) {
     console.log(`key: ${key}`);
     console.log("");
     console.log("Store this key now; it is shown only once.");
-    console.log("Remote clients must send: Authorization: Bearer <key>");
+    console.log("Remote clients must send this key in automatic or required auth mode: Authorization: Bearer <key>");
     console.log("Local (loopback) requests stay open unless CLAP_REQUIRE_API_KEY=1.");
+    console.log("Change enforcement with: clap keys auth off|on|status");
   } else if (action === "list") {
     const keys = listApiKeys();
     if (!keys.length) {
@@ -405,8 +417,59 @@ async function keysCommand(argv: string[]) {
     if (!id) throw new Error("usage: clap keys revoke <id>");
     if (!revokeApiKey(id)) throw new Error(`no active key with id ${id}`);
     console.log(`revoked: ${id}`);
+  } else if (action === "auth") {
+    await apiKeyAuthCommand(argv.slice(1));
   } else {
-    throw new Error("usage: clap keys <create|list|revoke>");
+    throw new Error("usage: clap keys <create|list|revoke|auth off|on|status>");
+  }
+}
+
+async function apiKeyAuthCommand(argv: string[]) {
+  const setting = argv[0] ?? "status";
+  if (setting === "status") {
+    const { config } = loadClapConfig();
+    const configured = config.auth.require_api_key;
+    const env = process.env.CLAP_REQUIRE_API_KEY;
+    const mode = env === "1" ? "required (CLAP_REQUIRE_API_KEY=1)"
+      : env === "0" ? "disabled (CLAP_REQUIRE_API_KEY=0)"
+        : configured === true ? "required"
+          : configured === false ? "disabled"
+            : "automatic (remote requests require a key when an active key exists)";
+    console.log(`api-key auth: ${mode}`);
+    console.log(`active keys: ${listApiKeys().filter((key) => !key.revoked).length}`);
+    console.log(`config: ${configPaths().at(-1)}`);
+    return;
+  }
+  if (setting !== "off" && setting !== "on") {
+    throw new Error("usage: clap keys auth <off|on|status>");
+  }
+
+  const requireApiKey = setting === "on";
+  if (requireApiKey && !listApiKeys().some((key) => !key.revoked)) {
+    throw new Error("create an API key before requiring authentication: clap keys create <name>");
+  }
+  const updated = updateUserConfig({ auth: { require_api_key: requireApiKey } });
+  const baseURL = baseURLFromEnv();
+  let appliedLive = false;
+  if (await healthCheck(baseURL)) {
+    try {
+      await createClapClient({ baseURL }).updateConfig({ auth: { require_api_key: requireApiKey } });
+      appliedLive = true;
+    } catch (error) {
+      if (!(error instanceof ClapApiError) || (error.status !== 401 && error.status !== 403)) throw error;
+    }
+  }
+
+  console.log(`api-key auth: ${requireApiKey ? "required" : "disabled"}`);
+  console.log(`config: ${updated.path}`);
+  if (appliedLive) console.log("running server: updated");
+  else if (await healthCheck(baseURL)) console.log("running server: restart required (`clap server restart --network` if using network mode)");
+  else console.log("applies on next server start");
+  if (!requireApiKey) {
+    console.log("warning: unauthenticated clients can use the API and dashboard; only expose Clap on a trusted network");
+    if (process.env.CLAP_REQUIRE_API_KEY === "1") {
+      console.log("warning: CLAP_REQUIRE_API_KEY=1 overrides this setting; unset it or start with --no-api-key");
+    }
   }
 }
 
@@ -424,7 +487,10 @@ function configCommand() {
 }
 
 async function printAuthStatus() {
-  const status = await hfAuthStatus();
+  const baseURL = baseURLFromEnv();
+  const status = await healthCheck(baseURL)
+    ? await createClapClient({ baseURL }).huggingFaceAuthStatus()
+    : await hfAuthStatus();
   console.log(`status: ${status.authenticated ? "logged_in" : "logged_out"}`);
   console.log(`source: ${status.source}`);
   if (status.envVar) console.log(`env: ${status.envVar}`);
@@ -671,7 +737,7 @@ async function executePull(
       }
       console.error("Hugging Face authentication is required for this repo.");
       const token = await readSecret("Hugging Face token: ");
-      const status = await storeHfToken(token);
+      const status = await client.setHuggingFaceToken({ token });
       console.error(`Saved Hugging Face token (${status.source}${status.tokenPreview ? `, ${status.tokenPreview}` : ""}); retrying pull...`);
       const retry = await client.pullModel(request);
       activeDownloadId = retry.download.id;
@@ -739,7 +805,7 @@ async function pullWithAuthRetry(client: ReturnType<typeof createClapClient>, re
     }
     console.error("Hugging Face authentication is required for this repo.");
     const token = await readSecret("Hugging Face token: ");
-    const status = await storeHfToken(token);
+    const status = await client.setHuggingFaceToken({ token });
     console.error(`Saved Hugging Face token (${status.source}${status.tokenPreview ? `, ${status.tokenPreview}` : ""}); retrying pull...`);
     return client.pullModel(request);
   }
@@ -765,6 +831,10 @@ function parseFlags(argv: string[]) {
       flags.force = "true";
     } else if (arg === "--network") {
       flags.network = "true";
+    } else if (arg === "--no-api-key") {
+      flags.noApiKey = "true";
+    } else if (arg === "--require-api-key") {
+      flags.requireApiKey = "true";
     } else if (arg === "--yes" || arg === "-y") {
       flags.yes = "true";
     } else if (arg === "--model" || arg === "-m") {
@@ -785,6 +855,20 @@ function parseFlags(argv: string[]) {
   }
 
   return { flags, rest };
+}
+
+function apiKeyModeFromFlags(flags: Record<string, string>): "disabled" | "required" | undefined {
+  if (flags.noApiKey === "true" && flags.requireApiKey === "true") {
+    throw new Error("--no-api-key and --require-api-key cannot be used together");
+  }
+  if (flags.noApiKey === "true") return "disabled";
+  if (flags.requireApiKey === "true") return "required";
+  return undefined;
+}
+
+function applyApiKeyFlag(flags: Record<string, string>): void {
+  const mode = apiKeyModeFromFlags(flags);
+  if (mode) process.env.CLAP_REQUIRE_API_KEY = mode === "required" ? "1" : "0";
 }
 
 function parseBackend(value: string | undefined): "gguf" | "mlx" | undefined {
@@ -853,11 +937,11 @@ function printError(error: unknown) {
 function help() {
   console.log(`Usage:
   clap --version
-  clap serve [--network]
+  clap serve [--network] [--no-api-key|--require-api-key]
   clap auth login|logout|status
-  clap keys create <name> | list | revoke <id>
+  clap keys create <name> | list | revoke <id> | auth off|on|status
   clap config
-  clap server start|stop|status|restart|logs|install [--network] [--force]
+  clap server start|stop|status|restart|logs|install [--network] [--no-api-key|--require-api-key] [--force]
   clap models [list] [--aliases] [--json] [--active]
   clap load <model|alias|path> [--backend mlx|gguf] [--keep-alive 15m|1h|always]
   clap unload <model|alias|path> [--backend mlx|gguf]
@@ -875,6 +959,7 @@ Environment:
   CLAP_HOST      Server bind address (default: 127.0.0.1; --network sets 0.0.0.0)
   PORT           Server port (default: 11435)
   CLAP_BASE_URL  Server URL (default: ${defaultBaseURL})
+  CLAP_REQUIRE_API_KEY  1=require for all requests; 0=disable enforcement
   CLAP_DEFAULT_MODEL  Default model for clap chat
   CLAP_HF_ENDPOINT  Hugging Face endpoint (default: https://huggingface.co)
   CLAP_HF_TOKEN, HF_TOKEN, HUGGINGFACE_HUB_TOKEN, HUGGINGFACE_TOKEN  Hugging Face token`);

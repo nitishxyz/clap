@@ -359,6 +359,37 @@ describe("clap server", () => {
     }
   });
 
+  test("explicitly disabled API-key auth keeps remote dashboard and API access open", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-keys-disabled-test-"));
+    const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
+    try {
+      process.env.CLAP_HOME = home;
+      delete process.env.CLAP_REQUIRE_API_KEY;
+      await writeFile(join(home, "clap.toml"), "[auth]\nrequire_api_key = false\n");
+      const app = createServer();
+      const created = await app.request("/clap/v1/keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "still-active" }),
+      });
+      expect(created.status).toBe(201);
+
+      expect((await app.request("/clap/v1/dashboard", undefined, remote)).status).toBe(200);
+      expect((await app.request("/v1/models", undefined, remote)).status).toBe(200);
+
+      const invalidPresented = await app.request("/v1/models", {
+        headers: { authorization: "Bearer invalid-presented-key" },
+      }, remote);
+      expect(invalidPresented.status).toBe(401);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("remote cache intent requires authenticated identity without changing non-cache policy", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
@@ -2091,6 +2122,42 @@ describe("clap server", () => {
     }
   });
 
+  test("manages Hugging Face credentials through local server endpoints without returning the token", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousBackend = process.env.CLAP_HF_AUTH_BACKEND;
+    const previousToken = process.env.CLAP_HF_TOKEN;
+    const dir = await mkdtemp(join(tmpdir(), "clap-auth-endpoint-test-"));
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_HF_AUTH_BACKEND = "file";
+      delete process.env.CLAP_HF_TOKEN;
+      const app = createServer();
+
+      const login = await app.request("/clap/v1/auth/huggingface", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "hf_abcdefghijklmnopqrstuvwxyz" }),
+      });
+      expect(login.status).toBe(200);
+      const loginBody = await login.json();
+      expect(loginBody).toMatchObject({ authenticated: true, source: "file", tokenPreview: "hf_abc...wxyz" });
+      expect(JSON.stringify(loginBody)).not.toContain("abcdefghijklmnopqrstuvwxyz");
+
+      const status = await app.request("/clap/v1/auth/huggingface");
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({ authenticated: true, source: "file", tokenPreview: "hf_abc...wxyz" });
+
+      const logout = await app.request("/clap/v1/auth/huggingface", { method: "DELETE" });
+      expect(logout.status).toBe(200);
+      expect(await logout.json()).toMatchObject({ authenticated: false, source: "none" });
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_HF_AUTH_BACKEND", previousBackend);
+      restoreEnv("CLAP_HF_TOKEN", previousToken);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("file-backed Hugging Face auth uses restrictive permissions, redacts status, and logs out", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousBackend = process.env.CLAP_HF_AUTH_BACKEND;
@@ -2180,6 +2247,7 @@ describe("clap server", () => {
       const download = await waitForDownload(body.download.id, "failed");
       expect(download.error).toContain("Hugging Face authentication failed (401)");
       expect(download.error).toContain("CLAP_HF_TOKEN");
+      expect(download.errorCode).toBe("hf_auth_required");
     } finally {
       hf.stop(true);
       restoreEnv("CLAP_HOME", previousHome);

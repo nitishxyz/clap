@@ -149,6 +149,7 @@ export const DownloadSchema = z.object({
   totalBytes: z.number().int().nonnegative().optional(),
   modelPath: z.string().optional(),
   error: z.string().optional(),
+  errorCode: z.enum(["hf_auth_required"]).optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   selected: ModelResolveOptionSchema.optional(),
@@ -160,6 +161,18 @@ export const PullModelResponseSchema = z.object({
 
 export const DownloadsResponseSchema = z.object({
   downloads: z.array(DownloadSchema),
+});
+
+export const HuggingFaceAuthStatusSchema = z.object({
+  authenticated: z.boolean(),
+  source: z.enum(["env", "keychain", "libsecret", "file", "none"]),
+  detail: z.string().optional(),
+  tokenPreview: z.string().optional(),
+  envVar: z.string().optional(),
+});
+
+export const HuggingFaceAuthLoginRequestSchema = z.object({
+  token: z.string().trim().min(1, "Hugging Face token cannot be empty"),
 });
 
 export const KeepAliveSchema = z.union([z.literal("always"), z.string().regex(/^\d+(ms|s|m|h|d)$/)]);
@@ -744,6 +757,8 @@ export type ModelResolveResponse = z.infer<typeof ModelResolveResponseSchema>;
 export type Download = z.infer<typeof DownloadSchema>;
 export type PullModelResponse = z.infer<typeof PullModelResponseSchema>;
 export type DownloadsResponse = z.infer<typeof DownloadsResponseSchema>;
+export type HuggingFaceAuthStatus = z.infer<typeof HuggingFaceAuthStatusSchema>;
+export type HuggingFaceAuthLoginRequest = z.infer<typeof HuggingFaceAuthLoginRequestSchema>;
 export type LoadModelRequest = z.infer<typeof LoadModelRequestSchema>;
 export type UnloadModelRequest = z.infer<typeof UnloadModelRequestSchema>;
 export type ModelTokenCapabilities = z.infer<typeof ModelTokenCapabilitiesSchema>;

@@ -5,6 +5,8 @@ import {
   clapVersion,
   defaultBaseURL,
   ErrorResponseSchema,
+  HuggingFaceAuthLoginRequestSchema,
+  HuggingFaceAuthStatusSchema,
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
@@ -26,7 +28,7 @@ import {
   type LoadedModel,
   type ResponseRequest,
 } from "@clap/api";
-import { cachedPullResultForTarget, clapHome, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, type ResolvedModel } from "@clap/models";
+import { cachedPullResultForTarget, clapHome, deleteStoredHfToken, hfAuthStatus, isHfAuthError, listAliases, listModels, listModelsAsync, pullModel, removeModel, resolveModel, resolveModelOptions, resolvePullTarget, storeHfToken, type ResolvedModel } from "@clap/models";
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
 import type { StructuredOutputContract } from "@clap/worker-protocol";
@@ -47,7 +49,7 @@ import {
   sessionDisplayIdentity,
 } from "./dashboard-identity";
 import { applyConfigToEnv, loadClapConfig, updateUserConfig, workerEnvForModel } from "./config";
-export { configPaths, loadClapConfig } from "./config";
+export { configPaths, loadClapConfig, updateUserConfig } from "./config";
 import { limiterFromEnv, QueueFullError } from "./limits";
 import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
@@ -343,9 +345,10 @@ export function createServer(
     uptimeMs: Date.now() - startedAt,
   }));
 
-  // API key auth. Loopback clients (CLI, dashboard on the box) stay open
-  // unless CLAP_REQUIRE_API_KEY=1 or [auth] require_api_key = true; remote
-  // clients must present a valid Bearer key once any active key exists.
+  // API key auth. Unset is automatic: loopback stays open and remote clients
+  // require a key once any active key exists. Explicit true/1 requires a key
+  // everywhere; explicit false/0 disables enforcement for requests that do
+  // not carry cache identity. Invalid presented credentials still fail.
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
@@ -378,9 +381,11 @@ export function createServer(
         },
       }), 401);
     }
-    const requireAlways = process.env.CLAP_REQUIRE_API_KEY === "1"
-      || (process.env.CLAP_REQUIRE_API_KEY === undefined && config.auth.require_api_key === true);
-    const required = requireAlways || (!identity.loopback && apiKeys.hasActiveKeys());
+    const configuredRequirement = process.env.CLAP_REQUIRE_API_KEY === "1" ? true
+      : process.env.CLAP_REQUIRE_API_KEY === "0" ? false
+        : config.auth.require_api_key;
+    const required = configuredRequirement === true
+      || (configuredRequirement === undefined && !identity.loopback && apiKeys.hasActiveKeys());
     if (!required || identity.credentialValid) return next();
     return invalidApiKey(c);
   });
@@ -389,6 +394,16 @@ export function createServer(
     return c.json(ErrorResponseSchema.parse({
       error: { message: "missing or invalid API key; pass Authorization: Bearer <key>", type: "invalid_request_error", code: "invalid_api_key" },
     }), 401);
+  }
+
+  function credentialAccessDenied(c: Context<ServerEnv>) {
+    return c.json(ErrorResponseSchema.parse({
+      error: {
+        message: "Hugging Face credentials can only be managed from the local server or with a valid API key",
+        type: "authentication_error",
+        code: "credential_access_denied",
+      },
+    }), 403);
   }
 
   app.post("/clap/v1/cache/identity/rotate", async (c) => {
@@ -489,6 +504,29 @@ export function createServer(
   app.get("/clap/v1/downloads", (c) => c.json(DownloadsResponseSchema.parse({
     downloads: [...downloads.values()],
   })));
+
+  app.get("/clap/v1/auth/huggingface", async (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.loopback && !identity.credentialValid) return credentialAccessDenied(c);
+    return c.json(HuggingFaceAuthStatusSchema.parse(await hfAuthStatus()));
+  });
+
+  app.post("/clap/v1/auth/huggingface", async (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.loopback && !identity.credentialValid) return credentialAccessDenied(c);
+    const request = HuggingFaceAuthLoginRequestSchema.parse(await c.req.json());
+    const status = await storeHfToken(request.token);
+    metrics.event("server", `Hugging Face credential saved (${status.source})`);
+    return c.json(HuggingFaceAuthStatusSchema.parse(status));
+  });
+
+  app.delete("/clap/v1/auth/huggingface", async (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.loopback && !identity.credentialValid) return credentialAccessDenied(c);
+    const status = await deleteStoredHfToken();
+    metrics.event("server", "Hugging Face credential removed");
+    return c.json(HuggingFaceAuthStatusSchema.parse(status));
+  });
 
   app.get("/clap/v1/runtime/models", (c) => c.json(LoadedModelsResponseSchema.parse({
     models: lifecycle.list().map((entry) => ({
@@ -844,6 +882,7 @@ export function createServer(
       }
       download.status = "failed";
       download.error = error instanceof Error ? error.message : String(error);
+      download.errorCode = isHfAuthError(error) ? "hf_auth_required" : undefined;
       download.completedAt = new Date().toISOString();
       metrics.event("error", `pull failed: ${download.model} — ${download.error}`, { model: download.model });
     }).finally(() => {

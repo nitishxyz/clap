@@ -197,8 +197,11 @@ Status: PARTIAL — keys shipped (sha256-hashed at rest in
 `/clap/v1/keys` admin API, `Authorization: Bearer clap_sk_*` or `x-api-key`).
 Enforcement: loopback clients stay open (CLI/dashboard on the box) unless
 `CLAP_REQUIRE_API_KEY=1`; remote clients require a key once any active key
-exists; `/clap/v1/health` always open. Remaining: per-key rate limits and
-token quotas (with T1.3 queue fairness), dashboard key management UI.
+exists in automatic mode; explicit `[auth] require_api_key = false`,
+`CLAP_REQUIRE_API_KEY=0`, `clap keys auth off`, or the startup flag
+`--no-api-key` disables enforcement for trusted-network deployments.
+`/clap/v1/health` is always open. Remaining: per-key rate limits and token
+quotas (with T1.3 queue fairness), dashboard key management UI.
 
 API keys (`Authorization: Bearer`): hashed at rest, per-key rate limits and
 token quotas, key management via CLI + admin API + dashboard. An org box on

@@ -6,6 +6,8 @@ import {
   ClapModelsResponseSchema,
   DownloadsResponseSchema,
   HealthResponseSchema,
+  HuggingFaceAuthLoginRequestSchema,
+  HuggingFaceAuthStatusSchema,
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
@@ -26,6 +28,8 @@ import {
   type ClapModelsResponse,
   type DownloadsResponse,
   type HealthResponse,
+  type HuggingFaceAuthLoginRequest,
+  type HuggingFaceAuthStatus,
   type LoadedModelsResponse,
   type LoadModelRequest,
   type LoadModelResponse,
@@ -91,6 +95,23 @@ export class ClapClient {
 
   async downloads(): Promise<DownloadsResponse> {
     return DownloadsResponseSchema.parse(await this.getJson("/clap/v1/downloads"));
+  }
+
+  async huggingFaceAuthStatus(): Promise<HuggingFaceAuthStatus> {
+    return HuggingFaceAuthStatusSchema.parse(await this.getJson("/clap/v1/auth/huggingface"));
+  }
+
+  async setHuggingFaceToken(request: HuggingFaceAuthLoginRequest): Promise<HuggingFaceAuthStatus> {
+    const body = HuggingFaceAuthLoginRequestSchema.parse(request);
+    return HuggingFaceAuthStatusSchema.parse(await this.postJson("/clap/v1/auth/huggingface", body));
+  }
+
+  async deleteHuggingFaceToken(): Promise<HuggingFaceAuthStatus> {
+    return HuggingFaceAuthStatusSchema.parse(await this.deleteJson("/clap/v1/auth/huggingface"));
+  }
+
+  async updateConfig(patch: Record<string, unknown>): Promise<unknown> {
+    return this.patchJson("/clap/v1/config", patch);
   }
 
   async loadedModels(): Promise<LoadedModelsResponse> {
@@ -182,6 +203,22 @@ export class ClapClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!response.ok) throw await this.toError(response);
+    return response.json();
+  }
+
+  private async patchJson(path: string, body: unknown): Promise<unknown> {
+    const response = await this.fetchImpl(this.url(path), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw await this.toError(response);
+    return response.json();
+  }
+
+  private async deleteJson(path: string): Promise<unknown> {
+    const response = await this.fetchImpl(this.url(path), { method: "DELETE" });
     if (!response.ok) throw await this.toError(response);
     return response.json();
   }

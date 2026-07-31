@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel, type ModelResolveOption, type ModelResolveResponse } from "@/lib/api";
+import { cancelDownload, loadModel, pullModel, removeModel, resolveModel, saveHuggingFaceToken, unloadModel, type DashboardDownload, type DashboardLoadedModel, type DashboardModel, type ModelResolveOption, type ModelResolveResponse } from "@/lib/api";
 import { fmtBytes, fmtDuration, fmtMaxOutputTokens, fmtTokens } from "@/lib/format";
 import type { ActionState } from "@/hooks/useActions";
 import { Empty, Panel, Table, Tag, Td } from "./Shared";
@@ -34,6 +34,23 @@ function TableBarCell({ pct, value, tone, dim, title }: { pct?: number; value?: 
       <span className={`w-14 shrink-0 truncate text-right tabular-nums ${dim || pct === undefined ? "text-muted" : ""}`}>{value ?? "-"}</span>
     </span>
   );
+}
+
+export function isHuggingFaceAuthFailure(downloadOrError: DashboardDownload | string | undefined): boolean {
+  if (!downloadOrError) return false;
+  if (typeof downloadOrError === "string") return downloadOrError.includes("Hugging Face authentication failed");
+  return downloadOrError.errorCode === "hf_auth_required"
+    || downloadOrError.error?.includes("Hugging Face authentication failed") === true;
+}
+
+export function latestActionableAuthFailure(downloads: DashboardDownload[]): DashboardDownload | undefined {
+  const newerTargets = new Set<string>();
+  return [...downloads].reverse().find((download) => {
+    const target = download.targetKey ?? `${download.model}\u0000${download.file ?? ""}\u0000${download.backend ?? ""}`;
+    if (newerTargets.has(target)) return false;
+    newerTargets.add(target);
+    return download.status === "failed" && isHuggingFaceAuthFailure(download);
+  });
 }
 
 function DetailItem({ label, children }: { label: string; children: ReactNode }) {
@@ -304,8 +321,17 @@ export function Downloads({ downloads, actions }: { downloads: DashboardDownload
   const [resolving, setResolving] = useState(false);
   const [resolved, setResolved] = useState<ModelResolveResponse>();
   const [resolveError, setResolveError] = useState<string>();
+  const [hfToken, setHfToken] = useState("");
+  const [authSaving, setAuthSaving] = useState(false);
+  const [authError, setAuthError] = useState<string>();
+  const [handledAuthFailures, setHandledAuthFailures] = useState<Record<string, boolean>>({});
   const active = downloads.filter((download) => download.status === "running" || download.status === "queued");
   const shown = active.length ? active : downloads.slice(-5);
+  const latestAuthFailure = latestActionableAuthFailure(downloads);
+  const failedAuthDownload = latestAuthFailure && !handledAuthFailures[latestAuthFailure.id]
+    ? latestAuthFailure
+    : undefined;
+  const resolveNeedsAuth = isHuggingFaceAuthFailure(resolveError);
   const submitResolve = () => {
     const model = pullInput.trim();
     if (!model || resolving) return;
@@ -327,6 +353,45 @@ export function Downloads({ downloads, actions }: { downloads: DashboardDownload
     setResolved(undefined);
     setResolveError(undefined);
   };
+  const saveTokenAndRetry = async () => {
+    const token = hfToken.trim();
+    if (!token || authSaving) {
+      if (!token) setAuthError("Enter a Hugging Face token to continue.");
+      return;
+    }
+    setAuthSaving(true);
+    setAuthError(undefined);
+    try {
+      await saveHuggingFaceToken(token);
+      if (resolveNeedsAuth) {
+        const model = pullInput.trim();
+        if (!model) throw new Error("Enter the model again, then retry.");
+        const response = await resolveModel(model);
+        setResolved(response);
+        setPullInput("");
+        setResolveError(undefined);
+      } else if (failedAuthDownload) {
+        await pullModel(failedAuthDownload.model, {
+          file: failedAuthDownload.file,
+          backend: failedAuthDownload.backend,
+        });
+        setHandledAuthFailures((current) => ({ ...current, [failedAuthDownload.id]: true }));
+      }
+      setHfToken("");
+    } catch (cause) {
+      setAuthError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAuthSaving(false);
+    }
+  };
+  const dismissAuthPrompt = () => {
+    if (failedAuthDownload) {
+      setHandledAuthFailures((current) => ({ ...current, [failedAuthDownload.id]: true }));
+    }
+    if (resolveNeedsAuth) setResolveError(undefined);
+    setAuthError(undefined);
+    setHfToken("");
+  };
   return (
     <Panel
       title="downloads"
@@ -346,7 +411,46 @@ export function Downloads({ downloads, actions }: { downloads: DashboardDownload
         </span>
       }
     >
-      {resolveError ? (
+      {resolveNeedsAuth || failedAuthDownload ? (
+        <div className="border-b border-err/40 bg-err/[0.04] px-3 py-2.5">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="text-[0.72rem] uppercase tracking-[0.06em] text-err">Hugging Face authentication required</div>
+              <div className="mt-0.5 text-[0.74rem] text-muted">
+                Paste a read token to save it in this machine&apos;s secure credential store and retry{" "}
+                <span className="text-foreground">{failedAuthDownload?.model ?? pullInput.trim()}</span>.{" "}
+                <a
+                  className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+                  href="https://huggingface.co/settings/tokens"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Create a token
+                </a>
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <input
+                type="password"
+                value={hfToken}
+                onChange={(event) => setHfToken(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void saveTokenAndRetry();
+                }}
+                aria-label="Hugging Face token"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="hf_…"
+                className="w-56 border border-err/40 bg-background px-2 py-0.5 text-[0.72rem] text-foreground placeholder:text-muted focus:outline-none"
+              />
+              <ActionButton label="save + retry" busy={authSaving} onClick={() => void saveTokenAndRetry()} />
+              <ActionButton label="dismiss" onClick={dismissAuthPrompt} />
+            </div>
+          </div>
+          {authError ? <div className="mt-2 text-[0.74rem] text-err">{authError}</div> : null}
+        </div>
+      ) : null}
+      {resolveError && !resolveNeedsAuth ? (
         <div className="flex items-start justify-between gap-3 border-b border-soft-border px-3 py-2 text-[0.78rem] text-err">
           <span className="break-words">{resolveError}</span>
           <ActionButton label="dismiss" onClick={() => setResolveError(undefined)} />

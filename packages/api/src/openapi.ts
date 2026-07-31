@@ -9,6 +9,8 @@ import {
   DownloadsResponseSchema,
   ErrorResponseSchema,
   HealthResponseSchema,
+  HuggingFaceAuthLoginRequestSchema,
+  HuggingFaceAuthStatusSchema,
   LoadedModelsResponseSchema,
   LoadModelRequestSchema,
   LoadModelResponseSchema,
@@ -91,6 +93,8 @@ export function createOpenApiDocument(): object {
 
   registry.register("ErrorResponse", ErrorResponseSchema);
   registry.register("HealthResponse", HealthResponseSchema);
+  registry.register("HuggingFaceAuthLoginRequest", HuggingFaceAuthLoginRequestSchema);
+  registry.register("HuggingFaceAuthStatus", HuggingFaceAuthStatusSchema);
   registry.register("RuntimeResponse", RuntimeResponseSchema);
   registry.register("BackendsResponse", BackendsResponseSchema);
   registry.register("ClapModelsResponse", ClapModelsResponseSchema);
@@ -159,6 +163,28 @@ export function createOpenApiDocument(): object {
     path: "/clap/v1/downloads",
     summary: "Model download status",
     responses: jsonResponses(DownloadsResponseSchema),
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/clap/v1/auth/huggingface",
+    summary: "Hugging Face credential status",
+    responses: jsonResponses(HuggingFaceAuthStatusSchema),
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/clap/v1/auth/huggingface",
+    summary: "Save a Hugging Face token in the local credential store",
+    request: { body: { content: { "application/json": { schema: HuggingFaceAuthLoginRequestSchema } } } },
+    responses: jsonResponses(HuggingFaceAuthStatusSchema),
+  });
+
+  registry.registerPath({
+    method: "delete",
+    path: "/clap/v1/auth/huggingface",
+    summary: "Remove the stored Hugging Face token",
+    responses: jsonResponses(HuggingFaceAuthStatusSchema),
   });
 
   registry.registerPath({
