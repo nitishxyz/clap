@@ -8,7 +8,7 @@ import { UsagePanel } from "@/components/dashboard/Usage";
 import { useActions } from "@/hooks/useActions";
 import { useDashboard } from "@/hooks/useDashboard";
 import { fmtBytes, fmtClock, fmtDuration } from "@/lib/format";
-import { resetDashboard } from "@/lib/api";
+import { cancelRequest, resetDashboard } from "@/lib/api";
 
 export function App() {
   const { data, connected, refreshedAt, mode } = useDashboard();
@@ -17,6 +17,17 @@ export function App() {
   const actions = useActions();
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string>();
+  const [cancelling, setCancelling] = useState<string[]>([]);
+  const stopRequest = async (id: string) => {
+    setCancelling((current) => (current.includes(id) ? current : [...current, id]));
+    try {
+      await cancelRequest(id);
+    } catch (error) {
+      setResetError(error instanceof Error ? error.message : String(error));
+      // Allow a retry when the cancel itself failed to reach the server.
+      setCancelling((current) => current.filter((entry) => entry !== id));
+    }
+  };
   const resetHistory = async () => {
     if (!window.confirm("Reset dashboard request history and metrics? Model workers and KV caches will stay loaded.")) return;
     setResetting(true);
@@ -75,7 +86,15 @@ export function App() {
           <Tiles data={data} />
           <UsagePanel data={data} />
           <LoadedModels models={data.loaded} now={now} actions={actions} platform={data.server.platform} systemMemoryBytes={data.server.systemMemoryBytes} cpuCount={data.server.cpuCount} />
-          <ActiveRequests requests={data.active} now={now} onSelect={setSelectedRequest} />
+          <ActiveRequests
+            requests={data.active}
+            now={now}
+            onSelect={setSelectedRequest}
+            onCancel={stopRequest}
+            // Derive pending state from live data so finished requests drop
+            // out of the "stopping" set without extra bookkeeping.
+            cancelling={cancelling.filter((id) => data.active.some((request) => request.id === id))}
+          />
           <RecentRequests requests={data.requests} onSelect={setSelectedRequest} />
           <Events events={data.events ?? []} />
           <Downloads downloads={data.downloads} actions={actions} />

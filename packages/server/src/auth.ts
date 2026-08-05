@@ -143,6 +143,14 @@ export type RequestIdentityInput = {
   address?: string;
   /** Missing transport metadata denotes trusted embedded use. */
   embedded?: boolean;
+  /**
+   * Treat unauthenticated remote callers as trusted, granting them the same
+   * shared principal loopback already receives. Only set this when the
+   * operator explicitly disabled API key enforcement: it removes the
+   * per-caller cache isolation that distinct API keys provide, so every
+   * anonymous client shares one cache namespace.
+   */
+  trustUnauthenticated?: boolean;
 };
 
 /** Resolves credentials exactly once. A presented credential never falls back to local trust. */
@@ -176,6 +184,19 @@ export function resolveRequestIdentity(
       clientId: "local",
       cachePrincipal: trustedLocalPrincipal(),
       loopback: true,
+      credentialPresented: false,
+      credentialValid: false,
+    };
+  }
+  if (input.trustUnauthenticated) {
+    // Enforcement is explicitly off, so remote callers are treated exactly
+    // like loopback: one shared trusted principal. Keep the address-derived
+    // clientId so fair-queue accounting still separates callers even though
+    // their cache namespace is shared.
+    return {
+      clientId: `remote:${input.address ?? "unknown"}`,
+      cachePrincipal: trustedLocalPrincipal(),
+      loopback: false,
       credentialPresented: false,
       credentialValid: false,
     };

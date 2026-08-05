@@ -56,6 +56,7 @@ import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainin
 import { inferParserFamilies, resolveParserTemplateInfo } from "./parsers/traits";
 export { inferParserFamilies } from "./parsers/traits";
 import { MetricsCollector, type RequestHandle } from "./metrics";
+import { RequestCancellationRegistry } from "./request-cancellation";
 import { sampleGpuUsage } from "./gpu-usage";
 import { cpuCoreCount, processRssBytes, sampleProcessUsage, systemCpuPercent, systemMemoryBytes,
   systemMemorySnapshot, systemMemoryUsedBytes } from "./process-usage";
@@ -66,6 +67,17 @@ const downloads = new Map<string, Download>();
 const activeDownloads = new Map<string, { id: string; controller: AbortController }>();
 const defaultIdleTimeoutSeconds = 240;
 const maxBunIdleTimeoutSeconds = 255;
+
+// Generation endpoints always derive an authenticated cache identity, so a
+// missing cache principal is an authentication failure rather than a server
+// fault. Listing them here keeps the rejection at the auth boundary instead
+// of deep inside request handling.
+const CACHE_PRINCIPAL_PATHS = new Set([
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/api/chat",
+  "/api/generate",
+]);
 
 async function requestCarriesCacheIntent(request: Request): Promise<boolean> {
   if (request.method === "GET" || request.method === "HEAD") return false;
@@ -352,6 +364,7 @@ export function createServer(
   // Health stays open for probes.
   const apiKeys = new ApiKeyVerifier();
   const limiter = limiterFromEnv(config.limits.max_inflight, config.limits.queue_depth);
+  const cancellations = new RequestCancellationRegistry();
   const installationSecrets = new InstallationSecretProvider();
   app.use("*", async (c, next) => {
     let address: string | undefined;
@@ -362,17 +375,25 @@ export function createServer(
     } catch {
       // No transport info denotes embedded use.
     }
+    const configuredRequirement = process.env.CLAP_REQUIRE_API_KEY === "1" ? true
+      : process.env.CLAP_REQUIRE_API_KEY === "0" ? false
+        : config.auth.require_api_key;
     const identity = resolveRequestIdentity(apiKeys, {
       authorization: c.req.header("authorization"),
       apiKey: c.req.header("x-api-key"),
       address,
       embedded,
+      // Explicitly disabling enforcement has to disable it for generation too.
+      // Those endpoints always derive a cache identity, so without a principal
+      // they would keep answering 401 and "auth off" would not actually work.
+      trustUnauthenticated: configuredRequirement === false,
     });
     c.set("requestIdentity", identity);
     if (c.req.path === "/clap/v1/health") return next();
 
     if (identity.credentialPresented && !identity.credentialValid) return invalidApiKey(c);
-    if (!identity.cachePrincipal && await requestCarriesCacheIntent(c.req.raw)) {
+    if (!identity.cachePrincipal
+      && (CACHE_PRINCIPAL_PATHS.has(c.req.path) || await requestCarriesCacheIntent(c.req.raw))) {
       return c.json(ErrorResponseSchema.parse({
         error: {
           message: "cache identity requires a valid API key for remote requests",
@@ -381,9 +402,6 @@ export function createServer(
         },
       }), 401);
     }
-    const configuredRequirement = process.env.CLAP_REQUIRE_API_KEY === "1" ? true
-      : process.env.CLAP_REQUIRE_API_KEY === "0" ? false
-        : config.auth.require_api_key;
     const required = configuredRequirement === true
       || (configuredRequirement === undefined && !identity.loopback && apiKeys.hasActiveKeys());
     if (!required || identity.credentialValid) return next();
@@ -638,6 +656,29 @@ export function createServer(
   };
 
   app.get("/clap/v1/dashboard", async (c) => c.json(await dashboardPayload()));
+
+  // Operator kill switch for in-flight generation. Client disconnects remain
+  // the normal path, but a long prefill can outlive the caller, so the
+  // dashboard needs to stop a specific request by the id it already shows.
+  app.post("/clap/v1/requests/:id/cancel", (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.cachePrincipal) return invalidApiKey(c);
+    const id = c.req.param("id");
+    const outcome = cancellations.cancel(id);
+    if (outcome === "not_found") {
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: `no in-flight request with id ${id}`, type: "not_found_error", code: "request_not_found" },
+      }), 404);
+    }
+    return c.json({ id, status: outcome });
+  });
+
+  app.post("/clap/v1/requests/cancel-all", (c) => {
+    const identity = c.get("requestIdentity");
+    if (!identity.cachePrincipal) return invalidApiKey(c);
+    const cancelled = cancellations.cancelAll();
+    return c.json({ cancelled, count: cancelled.length });
+  });
 
   app.delete("/clap/v1/dashboard", (c) => {
     const identity = c.get("requestIdentity");
@@ -927,56 +968,92 @@ export function createServer(
   app.post("/v1/chat/completions", async (c) => {
     const request = normalizeCacheIntent(ChatCompletionRequestSchema.parse(await c.req.json()));
     const handle = metrics.start(request.model, "/v1/chat/completions", request.stream);
-    handle.capture(request);
-    const resolved = resolveAvailableModel(request.model, request.backend);
-    if ("response" in resolved) {
-      handle.finish({ status: "error", errorCode: "model_not_found" });
-      return resolved.response(c);
-    }
-    handle.capture({ ...request, backend: resolved.model.backend });
-    if (resolved.model.backend === "llama" && resolved.model.modelPath) {
-      await assertGgufModelPath(resolved.model.modelPath);
-    }
-
-    // Prepare the immutable physical cache descriptor once cache intent is
-    // present. Dispatch integration consumes this in the next phase; content
-    // hashes are memoized by canonical path and stat signature.
-    const physicalModelDomain = await preparePhysicalModelDomain(resolved.model);
-    const principal = c.get("requestIdentity").cachePrincipal;
-    if (!principal) throw new Error("Authenticated cache principal is unavailable");
-
-    const templateInfo = await resolveParserTemplateInfo(resolved.model);
-    const secretLease = await installationSecrets.acquireSecret();
-    let derivedIdentity: DerivedCacheIdentity;
+    // Cancellation is registered as soon as the request becomes visible on the
+    // dashboard. Registering later (at dispatch) leaves a window covering model
+    // resolution and load during which the operator sees the request but
+    // cancelling it answers 404 and the work continues. That window is exactly
+    // when a slow load most needs stopping.
+    const aborter = new AbortController();
+    const clientSignal = c.req.raw.signal;
+    if (clientSignal.aborted) aborter.abort();
+    else clientSignal.addEventListener("abort", () => aborter.abort(), { once: true });
+    const unregisterCancel = cancellations.register(handle.record.id, () => aborter.abort());
+    // Every exit after start() must settle the handle. An unsettled record
+    // stays in the active map forever, so a failed request would keep
+    // inflating clap_requests_active and the dashboard's live list.
     try {
-      derivedIdentity = deriveCacheIdentity(secretLease.secret, principal, request.cache ?? {}, {
-        backend: physicalModelDomain.backend,
-        modelRevision: physicalModelDomain.modelRevision,
-        tokenizer: physicalModelDomain.tokenizerFingerprint,
-        contextAllocation: physicalModelDomain.contextAllocation,
-        kvFormat: physicalModelDomain.kvFormat,
-        unifiedKv: physicalModelDomain.unifiedKv,
-        layoutVersion: physicalModelDomain.layoutVersion,
-      });
-    } catch (error) {
+      handle.capture(request);
+      const resolved = resolveAvailableModel(request.model, request.backend);
+      if ("response" in resolved) {
+        unregisterCancel();
+        handle.finish({ status: "error", errorCode: "model_not_found" });
+        return resolved.response(c);
+      }
+      handle.capture({ ...request, backend: resolved.model.backend });
+      if (resolved.model.backend === "llama" && resolved.model.modelPath) {
+        await assertGgufModelPath(resolved.model.modelPath);
+      }
+
+      // Prepare the immutable physical cache descriptor once cache intent is
+      // present. Dispatch integration consumes this in the next phase; content
+      // hashes are memoized by canonical path and stat signature.
+      const physicalModelDomain = await preparePhysicalModelDomain(resolved.model);
+      const principal = c.get("requestIdentity").cachePrincipal;
+      // The auth boundary already rejects generation without a principal; this
+      // stays as a defensive invariant for embedded callers.
+      if (!principal) throw new Error("Authenticated cache principal is unavailable");
+
+      const templateInfo = await resolveParserTemplateInfo(resolved.model);
+      const secretLease = await installationSecrets.acquireSecret();
+      let derivedIdentity: DerivedCacheIdentity;
+      try {
+        derivedIdentity = deriveCacheIdentity(secretLease.secret, principal, request.cache ?? {}, {
+          backend: physicalModelDomain.backend,
+          modelRevision: physicalModelDomain.modelRevision,
+          tokenizer: physicalModelDomain.tokenizerFingerprint,
+          contextAllocation: physicalModelDomain.contextAllocation,
+          kvFormat: physicalModelDomain.kvFormat,
+          unifiedKv: physicalModelDomain.unifiedKv,
+          layoutVersion: physicalModelDomain.layoutVersion,
+        });
+      } catch (error) {
+        secretLease.release();
+        throw error;
+      }
+      const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
+      const localModelPath = resolved.model.modelPath ?? request.model;
+      if (isGgufModel(localModelPath)) {
+        try {
+          await assertGgufModelPath(localModelPath);
+        } catch (error) {
+          secretLease.release();
+          throw error;
+        }
+        return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity,
+          secretLease.release, aborter, unregisterCancel);
+      }
+      if (await isMlxModelDirectory(localModelPath)) {
+        return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity,
+          secretLease.release, aborter, unregisterCancel);
+      }
+
+      unregisterCancel();
       secretLease.release();
+      handle.finish({ status: "error", errorCode: "not_cached" });
+      return c.json(ErrorResponseSchema.parse({
+        error: { message: `Model ${request.model} is not cached as a GGUF file or MLX directory. Run: clap pull ${request.model}, or pass a local .gguf file / MLX directory.`, type: "model_error", code: "not_cached" },
+      }), 404);
+    } catch (error) {
+      unregisterCancel();
+      // finish() is idempotent, so paths that already settled stay unchanged.
+      handle.finish({
+        status: aborter.signal.aborted ? "cancelled" : "error",
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: "request_failed",
+        finishReason: aborter.signal.aborted ? "cancel" : undefined,
+      });
       throw error;
     }
-    const cacheIdentity = workerCacheIdentity(derivedIdentity, physicalModelDomain, request.cache?.side_request ?? false);
-    const localModelPath = resolved.model.modelPath ?? request.model;
-    if (isGgufModel(localModelPath)) {
-      await assertGgufModelPath(localModelPath);
-      return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity, secretLease.release);
-    }
-    if (await isMlxModelDirectory(localModelPath)) {
-      return dispatchWithLimit(c, resolved.model, request, templateInfo, handle, cacheIdentity, secretLease.release);
-    }
-
-    secretLease.release();
-    handle.finish({ status: "error", errorCode: "not_cached" });
-    return c.json(ErrorResponseSchema.parse({
-      error: { message: `Model ${request.model} is not cached as a GGUF file or MLX directory. Run: clap pull ${request.model}, or pass a local .gguf file / MLX directory.`, type: "model_error", code: "not_cached" },
-    }), 404);
   });
 
   // Admission gate shared by both backends: bounded in-flight + fair queue.
@@ -1016,12 +1093,18 @@ export function createServer(
     handle: RequestHandle,
     cacheIdentity: CacheIdentity,
     releaseIdentityLease: () => void,
+    // Owned by the caller: one controller drives cancellation for the whole
+    // request, so a client disconnect and an operator cancel converge on the
+    // same abort and the request is cancellable from the moment it is visible.
+    aborter: AbortController,
+    unregisterCancel: () => void,
   ) {
     let release: () => void;
     try {
       release = await limiter.acquire(c.get("requestIdentity").clientId,
-        request.cache?.priority ?? "normal", c.req.raw.signal);
+        request.cache?.priority ?? "normal", aborter.signal);
     } catch (error) {
+      unregisterCancel();
       if (error instanceof QueueFullError) {
         releaseIdentityLease();
         handle.finish({ status: "error", error: error.message, errorCode: "server_overloaded" });
@@ -1045,6 +1128,7 @@ export function createServer(
               && templateInfo?.hasToolCalls === true },
         );
       } catch (error) {
+        unregisterCancel();
         release();
         releaseIdentityLease();
         handle.finish({
@@ -1060,29 +1144,32 @@ export function createServer(
         const loaded = lifecycle.beginUsage(model);
         return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
           lifecycle.finishUsage(loaded);
+          unregisterCancel();
           release();
           releaseIdentityLease();
-        }, handle, cacheIdentity);
+        }, handle, cacheIdentity, aborter);
       }
-      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle, cacheIdentity));
+      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle, cacheIdentity, aborter.signal));
+      unregisterCancel();
       release();
       releaseIdentityLease();
       return response;
     } catch (error) {
+      unregisterCancel();
       release();
       releaseIdentityLease();
       // worker.load() happens before the streaming/non-streaming response
       // helpers take ownership of the metrics handle. Admission, spawn, and
       // handshake failures here must therefore be finalized explicitly.
       handle.finish({
-        status: c.req.raw.signal.aborted ? "cancelled" : "error",
+        status: aborter.signal.aborted ? "cancelled" : "error",
         error: error instanceof Error ? error.message : String(error),
         errorCode: error instanceof InsufficientModelMemoryError
           ? "insufficient_model_memory"
           : error instanceof LlamaWorkerError || error instanceof MlxWorkerError
             ? error.code
             : "resident_worker_error",
-        finishReason: c.req.raw.signal.aborted ? "cancel" : undefined,
+        finishReason: aborter.signal.aborted ? "cancel" : undefined,
       });
       throw error;
     }
@@ -1539,7 +1626,7 @@ function configuredContextForBackend(backend: ResolvedModel["backend"]): number 
   return Number.isSafeInteger(value) && value > 0 ? value : 4_096;
 }
 
-async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity) {
+async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, cancelSignal: AbortSignal) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   let result: ResidentChatResult | undefined;
   try {
@@ -1552,7 +1639,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     // queued until worker prefill progress or the first token proves it is
     // actually running.
     handle?.phase("queued");
-    result = await worker.chat(request, () => handle?.firstToken(), c.req.raw.signal,
+    result = await worker.chat(request, () => handle?.firstToken(), cancelSignal,
       (done, total) => handle?.prefill(done, total), () => handle?.phase("prefill"),
       { cacheIdentity, structuredOutput: structuredOutputContract(request) });
     entry.worker = worker.info();
@@ -1560,7 +1647,10 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
     handle?.finish({
-      status: result.finishReason === "cancel" ? "cancelled" : "ok",
+      // A cancelled request stays cancelled in the record even if the worker
+      // raced to a normal completion: the operator's intent is what the
+      // dashboard must reflect, matching the streaming path.
+      status: result.finishReason === "cancel" || cancelSignal.aborted ? "cancelled" : "ok",
       ...workerResultMetrics(result),
       promptTokens: result.usage?.promptTokens,
       completionTokens: result.usage?.completionTokens,
@@ -1662,15 +1752,14 @@ function strictStreamSSE(c: Parameters<typeof streamSSE>[0], callback: (stream: 
   return c.newResponse(responseReadable);
 }
 
-function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, onDone: (() => void) | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity) {
+function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, onDone: (() => void) | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, aborter: AbortController) {
   const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
   return strictStreamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();
-    const aborter = new AbortController();
+    // The caller owns the controller so operator cancellation can reach this
+    // request; the SSE transport only adds its own disconnect signal to it.
     stream.onAbort(() => aborter.abort());
-    if (c.req.raw.signal.aborted) aborter.abort();
-    else c.req.raw.signal.addEventListener("abort", () => aborter.abort(), { once: true });
     let wroteRole = false;
     let writeQueue = Promise.resolve();
     const enqueueWrite = (write: () => Promise<void>) => {

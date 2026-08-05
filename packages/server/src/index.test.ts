@@ -93,7 +93,10 @@ describe("clap server", () => {
     const home = await mkdtemp(join(tmpdir(), "clap-dashboard-reset-"));
     try {
       process.env.CLAP_HOME = home;
-      process.env.CLAP_REQUIRE_API_KEY = "0";
+      // Default posture: enforcement unset. Explicitly disabling enforcement
+      // intentionally opens this to remote callers, so the boundary is tested
+      // under the default rather than under an opt-out.
+      delete process.env.CLAP_REQUIRE_API_KEY;
       const app = createServer();
       const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
       const denied = await app.request("/clap/v1/dashboard", { method: "DELETE" }, remote);
@@ -402,7 +405,11 @@ describe("clap server", () => {
     };
     try {
       process.env.CLAP_HOME = home;
-      process.env.CLAP_REQUIRE_API_KEY = "0";
+      // Default posture (enforcement unset). Explicitly disabling enforcement
+      // is a separate, opt-in decision covered by its own test; here the
+      // protective default must keep anonymous remote callers out of cache
+      // identity while leaving plain read endpoints open.
+      delete process.env.CLAP_REQUIRE_API_KEY;
       const app = createServer();
 
       const nonCache = await app.request("/v1/models", undefined, remote);
@@ -427,6 +434,132 @@ describe("clap server", () => {
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
       restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("explicitly disabling API key enforcement serves remote generation without a key", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const dir = await mkdtemp(join(tmpdir(), "clap-open-auth-test-"));
+    const modelPath = join(dir, "open.Q4_K_M.gguf");
+    const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_REQUIRE_API_KEY = "0";
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      // Generation derives a cache identity, so "enforcement off" only works
+      // if an unauthenticated remote caller still receives a principal.
+      const generated = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hi" }] }),
+      }, remote);
+      expect(generated.status).toBe(200);
+
+      // Management endpoints that gate on a principal open up the same way.
+      const dashboard = await app.request("/clap/v1/dashboard", undefined, remote);
+      expect(dashboard.status).toBe(200);
+
+      // An invalid credential is still rejected: presenting a bad key is an
+      // error, not a request to fall back to anonymous trust.
+      const badKey = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer clap_sk_wrong" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hi" }] }),
+      }, remote);
+      expect(badKey.status).toBe(401);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("remote generation without cache intent is rejected as unauthenticated, not a server fault", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousRequire = process.env.CLAP_REQUIRE_API_KEY;
+    const home = await mkdtemp(join(tmpdir(), "clap-generation-auth-test-"));
+    const remote = { requestIP: () => ({ address: "203.0.113.9" }) };
+    // No `cache` field: a plain OpenAI-shaped request from a remote client.
+    // Generation still derives an authenticated cache identity, so it must
+    // fail at the auth boundary instead of throwing deeper in the handler.
+    const plainRequest = {
+      model: "missing/cache-model",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    try {
+      process.env.CLAP_HOME = home;
+      // Protective default: enforcement unset, so anonymous remote generation
+      // is refused rather than served or crashed.
+      delete process.env.CLAP_REQUIRE_API_KEY;
+      const app = createServer();
+
+      for (const path of ["/v1/chat/completions", "/v1/responses", "/api/chat", "/api/generate"]) {
+        const body = path === "/api/generate"
+          ? { model: plainRequest.model, prompt: "hello" }
+          : path === "/v1/responses"
+            ? { model: plainRequest.model, input: "hello" }
+            : plainRequest;
+        const denied = await app.request(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }, remote);
+        expect({ path, status: denied.status }).toEqual({ path, status: 401 });
+        expect(await denied.json()).toMatchObject({
+          error: { type: "authentication_error", code: "cache_identity_required" },
+        });
+      }
+
+      // The rejected requests must not linger in the active-request registry.
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const payload = await dashboard.json() as { requests?: Array<{ phase?: string }> };
+      expect((payload.requests ?? []).filter((entry) => entry.phase !== "done")).toEqual([]);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_REQUIRE_API_KEY", previousRequire);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a generation failure raised after metrics start does not leak an active request record", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const home = await mkdtemp(join(tmpdir(), "clap-active-leak-test-"));
+    try {
+      process.env.CLAP_HOME = home;
+      const app = createServer();
+
+      // A local .gguf path routes to the llama backend and passes model
+      // resolution, then throws in assertGgufModelPath because the file does
+      // not exist. That throw happens after metrics.start(), which is exactly
+      // the shape that used to strand the record in the active map.
+      const failed = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: join(home, "definitely-missing-model.gguf"),
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      expect(failed.ok).toBe(false);
+
+      // clap_requests_active is a gauge of in-flight work. A stranded record
+      // pins it above zero for the lifetime of the process.
+      const metricsText = await (await app.request("/metrics")).text();
+      const active = /^clap_requests_active (\d+)$/m.exec(metricsText)?.[1];
+      expect(active).toBe("0");
+
+      const dashboard = await app.request("/clap/v1/dashboard");
+      const payload = await dashboard.json() as { requests?: Array<{ phase?: string }> };
+      expect((payload.requests ?? []).filter((entry) => entry.phase !== "done")).toEqual([]);
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
       await rm(home, { recursive: true, force: true });
     }
   });
@@ -647,6 +780,122 @@ describe("clap server", () => {
       restoreEnv("CLAP_QUEUE_DEPTH", previousDepth);
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("dashboard cancel stops an in-flight request and frees its inflight slot", async () => {
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const dir = await mkdtemp(join(tmpdir(), "clap-cancel-test-"));
+    const modelPath = join(dir, "cancel.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      // Long enough to still be generating while the cancel is issued.
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(Array.from({ length: 4000 }, () => "x"));
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const inFlight = app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+
+      // Wait for this request to appear as active, then cancel it by its id.
+      // Match on the model path so an unrelated leftover record from another
+      // test can never be picked up here.
+      let id: string | undefined;
+      for (let attempt = 0; attempt < 200 && !id; attempt += 1) {
+        const payload = await (await app.request("/clap/v1/dashboard")).json() as {
+          active?: Array<{ id: string; model?: string }>;
+        };
+        id = payload.active?.find((entry) => entry.model === modelPath)?.id;
+        if (!id) await Bun.sleep(10);
+      }
+      expect(id).toBeDefined();
+
+      const cancelled = await app.request(`/clap/v1/requests/${id}/cancel`, { method: "POST" });
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toEqual({ id, status: "cancelled" });
+
+      // A second cancel is idempotent rather than a spurious success or 404.
+      const again = await app.request(`/clap/v1/requests/${id}/cancel`, { method: "POST" });
+      expect(await again.json()).toMatchObject({ status: "already_cancelling" });
+
+      await (await inFlight).text();
+
+      const after = await (await app.request("/clap/v1/dashboard")).json() as {
+        active?: Array<{ model?: string }>;
+        queue?: { inflight: number };
+        requests?: Array<{ id: string; status?: string }>;
+      };
+      // Scope every assertion to this request: the suite runs servers in
+      // parallel, so global gauges may legitimately be non-zero here.
+      expect((after.active ?? []).filter((entry) => entry.model === modelPath)).toEqual([]);
+      // Settled as cancelled rather than left in flight or recorded as ok.
+      expect(after.requests?.find((entry) => entry.id === id)?.status).toBe("cancelled");
+    } finally {
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a request is cancellable from the moment it appears on the dashboard", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousTokens = process.env.CLAP_FAKE_WORKER_TOKENS;
+    const dir = await mkdtemp(join(tmpdir(), "clap-cancel-window-"));
+    const modelPath = join(dir, "window.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_TOKENS = JSON.stringify(Array.from({ length: 4000 }, () => "x"));
+      await writeFile(modelPath, "gguf bytes");
+      const app = createServer();
+
+      const inFlight = app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath, messages: [{ role: "user", content: "hey" }] }),
+      });
+
+      // Cancel as soon as the id is visible. Registration used to happen only
+      // at dispatch, so a cancel issued during model resolution or load
+      // answered 404 while the work kept running.
+      let cancelStatus: number | undefined;
+      let id: string | undefined;
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const payload = await (await app.request("/clap/v1/dashboard")).json() as {
+          active?: Array<{ id: string; model?: string }>;
+        };
+        id = payload.active?.find((entry) => entry.model === modelPath)?.id;
+        if (id) {
+          cancelStatus = (await app.request(`/clap/v1/requests/${id}/cancel`, { method: "POST" })).status;
+          break;
+        }
+        await Bun.sleep(1);
+      }
+      expect(id).toBeDefined();
+      // Never 404: a visible request is always cancellable.
+      expect(cancelStatus).toBe(200);
+
+      await (await inFlight).text();
+      const after = await (await app.request("/clap/v1/dashboard")).json() as {
+        requests?: Array<{ id: string; status?: string }>;
+      };
+      expect(after.requests?.find((entry) => entry.id === id)?.status).toBe("cancelled");
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_TOKENS", previousTokens);
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("cancelling an unknown request id reports not found instead of succeeding", async () => {
+    const response = await createServer().request("/clap/v1/requests/r_does_not_exist/cancel", { method: "POST" });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: "request_not_found" } });
   });
 
   test("model remove endpoint 404s for unknown models", async () => {
@@ -3508,6 +3757,8 @@ const send = (type, id, fields = {}) => {
   const next = sequence.get(id) ?? 0; sequence.set(id, next + 1);
   console.log(JSON.stringify({ protocol: 1, type, request_id: id, sequence: next, ...fields }));
 };
+const cancelled = new Set();
+const streaming = new Set();
 const structuredMode = process.env.CLAP_FAKE_WORKER_STRUCTURED_MODE ?? "native";
 const toolTemplateSupport = process.env.CLAP_FAKE_WORKER_TOOL_TEMPLATE_SUPPORT === "1";
 const workerCapabilities = { backend: "llama", streaming: true, scheduling: { fused_multi_sequence_batching: true, interleaved: true, priority_aware: true } };
@@ -3538,7 +3789,10 @@ for await (const chunk of Bun.stdin.stream()) {
       continue;
     }
     if (request.type === "cancel") {
-      send("completed", request.target_request_id, { result: { kind: "cancelled", finish_reason: "cancel" } });
+      cancelled.add(request.target_request_id);
+      if (!streaming.has(request.target_request_id)) {
+        send("completed", request.target_request_id, { result: { kind: "cancelled", finish_reason: "cancel" } });
+      }
       send("completed", id, { result: { kind: "cancelled" } });
       continue;
     }
@@ -3553,12 +3807,22 @@ for await (const chunk of Bun.stdin.stream()) {
       process.exit(Number(process.env.CLAP_FAKE_WORKER_EXIT_ON_CHAT));
     }
     if (process.env.CLAP_FAKE_WORKER_TOKENS) {
-      for (const token of JSON.parse(process.env.CLAP_FAKE_WORKER_TOKENS)) {
-        send("token", id, { text: token });
-        await Bun.sleep(2);
-      }
-      const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
-      send("completed", id, { result: { kind: "generated", content: "", ...doneExtras } });
+      // Emit tokens without blocking the stdin loop so an inbound cancel is
+      // actually read mid-generation, the way a resident worker behaves.
+      streaming.add(id);
+      void (async () => {
+        for (const token of JSON.parse(process.env.CLAP_FAKE_WORKER_TOKENS)) {
+          if (cancelled.has(id)) break;
+          send("token", id, { text: token });
+          await Bun.sleep(2);
+        }
+        const doneExtras = process.env.CLAP_FAKE_WORKER_DONE ? JSON.parse(process.env.CLAP_FAKE_WORKER_DONE) : {};
+        streaming.delete(id);
+        // A real worker still reports its cache decision when cancelled, so
+        // configured completion telemetry rides along on the cancel result.
+        if (cancelled.has(id)) send("completed", id, { result: { kind: "cancelled", finish_reason: "cancel", ...doneExtras } });
+        else send("completed", id, { result: { kind: "generated", content: "", ...doneExtras } });
+      })();
       continue;
     }
     const content = process.env.CLAP_FAKE_WORKER_ECHO_MAX_TOKENS ? String(body.max_tokens) : (process.env.CLAP_FAKE_WORKER_OUTPUT ?? "ok");

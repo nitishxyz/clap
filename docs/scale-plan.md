@@ -228,6 +228,18 @@ exists in automatic mode; explicit `[auth] require_api_key = false`,
 `/clap/v1/health` is always open. Remaining: per-key rate limits and token
 quotas (with T1.3 queue fairness), dashboard key management UI.
 
+Disabling enforcement is all-or-nothing by design. Generation endpoints always
+derive an authenticated cache identity, so when enforcement is explicitly off
+an unauthenticated remote caller is granted the same shared trusted principal
+that loopback already receives; otherwise those endpoints would keep answering
+`401 cache_identity_required` and "auth off" would serve nothing. The
+consequence is explicit: every anonymous caller shares one cache namespace,
+including with local CLI traffic, so per-caller cache isolation only exists
+when callers present distinct API keys. Caller-supplied `cache` labels are
+non-authoritative and only partition within a principal, so this shares a
+namespace rather than granting cross-principal access. An invalid presented
+credential still fails closed.
+
 API keys (`Authorization: Bearer`): hashed at rest, per-key rate limits and
 token quotas, key management via CLI + admin API + dashboard. An org box on
 `0.0.0.0` without auth is a non-starter. SSO/OIDC later.
