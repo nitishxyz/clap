@@ -43,12 +43,23 @@ public struct RetentionConfiguration: Equatable, Sendable {
       // This is a conservative startup allowance, not a live runtime budget.
       // Reserve at least 8 GiB and 25% of physical memory for the OS, model,
       // and runtime, then clamp against the memory available before model load.
+      //
+      // The headroom divisor is what decides whether a long prompt can be
+      // cached at all. Anchors cost `fixed_state + tokens * bytes_per_token`,
+      // and large hybrid models (Qwen3.6's 48 linear-attention layers carry a
+      // ~72 MiB fixed state plus 64 KiB/token) need hundreds of MiB for one
+      // full-context anchor. Dividing startup headroom by 8 left ~2.4 GiB on a
+      // 32 GiB machine, and the automatic-checkpoint share of that could not
+      // hold a single 8k-token anchor, so long prompts were re-prefilled every
+      // turn. Quartering instead keeps the same reserve discipline while
+      // admitting one full-length anchor; the budget is a retention ceiling
+      // with watermark eviction, not an allocation.
       let gib: UInt64 = 1_073_741_824
       let proportionalReserve = physicalMemoryBytes / 4
       let reserve = min(physicalMemoryBytes, max(8 * gib, proportionalReserve))
       let availableAfterReserve = physicalMemoryBytes - reserve
       let physicalBudget = min(availableAfterReserve / 4, physicalMemoryBytes / 5)
-      let headroomBudget = startupAvailableMemoryBytes.map { $0 / 8 } ?? physicalBudget
+      let headroomBudget = startupAvailableMemoryBytes.map { $0 / 4 } ?? physicalBudget
       budget = min(physicalBudget, headroomBudget)
     }
     let defaultCeiling = budget > 0 ? 256 : initial

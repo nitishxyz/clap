@@ -97,6 +97,19 @@ public enum PromptRenderer {
             kind: "messages", label: nil, requested: false)
         }
       }
+      // Also resolve the boundary through the final message, rendered without
+      // the generation prompt. That suffix (assistant header, and for thinking
+      // templates an empty reasoning block) is re-rendered differently once the
+      // reply becomes history, so a snapshot taken at prompt end is not a
+      // prefix of the next turn. Non-rewindable caches can only reuse an anchor
+      // whose whole state matches, so without this boundary a multi-turn
+      // conversation falls back to the coarser automatic checkpoint grid and
+      // re-prefills the tail of every turn. Templates that are append-only
+      // resolve to the same position the session slot already holds, where this
+      // is a no-op.
+      if structuredMessages.count > leading {
+        resolve(structuredMessages, tools: tools, kind: "messages", label: nil, requested: false)
+      }
       stable = Array(Set(stable)).sorted()
     }
     for descriptor in boundaries {

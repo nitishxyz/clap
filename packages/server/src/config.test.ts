@@ -33,7 +33,9 @@ describe("automatic checkpoint config", () => {
       minimum_tokens: 2_048,
       interval_tokens: 2_048,
       max_checkpoints: 8,
-      budget_fraction: 0.25,
+      // Half the retained-KV budget: enough for one full-length anchor on
+      // large hybrid models, which is what makes long prompts reusable.
+      budget_fraction: 0.5,
       budget_bytes: 0,
     });
   });

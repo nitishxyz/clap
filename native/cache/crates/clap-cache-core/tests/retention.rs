@@ -517,3 +517,50 @@ fn tenant_fair_share_orders_victims_across_namespaces() {
     assert!(!victims.contains(&t2));
     cache.abort(plan.id).unwrap();
 }
+
+#[test]
+fn automatic_checkpoint_share_admits_a_full_length_anchor_for_heavy_models() {
+    // Regression guard for a measured reuse cliff on large hybrid models.
+    //
+    // An anchor costs a fixed per-cache state plus `tokens * bytes_per_token`.
+    // Measured Qwen3.6-27B-4bit geometry: 16 full-attention layers at
+    // 64 KiB/token, plus 48 linear-attention layers whose recurrent state is a
+    // fixed ~72 MiB that every snapshot must carry. The checkpoint share is
+    // divided across the anchors retained concurrently, so that share sets the
+    // longest prefix a conversation can reuse.
+    //
+    // With a quarter share of the old retained budget the arithmetic yields
+    // ~2.1k reusable tokens, which is what the server actually reported for an
+    // 8.4k-token prompt: 24% reuse and a full re-prefill on every turn.
+    const MIB: u64 = 1024 * 1024;
+    const FIXED_STATE: u64 = 72 * MIB;
+    const BYTES_PER_TOKEN: u64 = 64 * 1024;
+    const PROMPT_TOKENS: u64 = 8_192;
+    const CONCURRENT_ANCHORS: u64 = 3;
+
+    let reusable_tokens = |budget: u64, basis_points: u64| -> u64 {
+        let share = budget * basis_points / 10_000;
+        let per_anchor = share / CONCURRENT_ANCHORS;
+        per_anchor.saturating_sub(FIXED_STATE) / BYTES_PER_TOKEN
+    };
+
+    // Budget observed on a 32 GiB host under the previous headroom divisor.
+    let old_budget = 2_616_598_528u64;
+    // Same host under the current divisor (startup headroom / 4).
+    let new_budget = 19_960_000_000u64 / 4;
+
+    let old = reusable_tokens(old_budget, 2_500);
+    assert!(
+        old < PROMPT_TOKENS,
+        "expected the documented cliff: {old} reusable tokens should fall short \
+         of a {PROMPT_TOKENS}-token prompt",
+    );
+
+    let defaults = clap_cache_core::AutomaticCheckpointConfig::default();
+    let current = reusable_tokens(new_budget, u64::from(defaults.memory_budget_basis_points));
+    assert!(
+        current >= PROMPT_TOKENS,
+        "automatic-checkpoint share admits only {current} reusable tokens; a \
+         {PROMPT_TOKENS}-token prompt would be re-prefilled every turn",
+    );
+}

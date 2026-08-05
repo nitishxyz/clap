@@ -160,6 +160,108 @@ Use these paths before inspecting process state manually:
 | `GET /metrics` | Prometheus counters, queues, priorities, residency, structured outcomes, and honest memory series |
 | `GET /openapi.json` | Machine-readable HTTP contract |
 
+### KV reuse capacity: what limits the reusable prefix
+
+Reuse is bounded by bytes, not by intent. A cached prefix (an anchor) costs:
+
+```txt
+anchor_bytes = fixed_state + tokens * bytes_per_token
+```
+
+`bytes_per_token` comes only from layers whose KV grows with sequence length,
+and `fixed_state` from layers that carry a constant-size state. Two measured
+examples show how far apart model families sit:
+
+| Model | Growing layers | `bytes_per_token` | `fixed_state` | 8k-token anchor |
+| --- | --- | --- | --- | --- |
+| Gemma-4-E4B-4bit | 7 full-attention (35 sliding capped at 512) | 14 KiB | 35 MiB (sliding window cap) | ~150 MiB |
+| Qwen3.6-27B-4bit | 16 full-attention (48 linear-attention) | 64 KiB | 72 MiB (recurrent state) | ~585 MiB |
+
+Anchors are funded from the automatic-checkpoint share of the retained-KV
+budget, and that share is divided across the anchors retained concurrently, so
+the longest reusable prefix is:
+
+```txt
+reusable_tokens = (checkpoint_share / concurrent_anchors - fixed_state) / bytes_per_token
+```
+
+When that value falls below the prompt length, every turn re-prefills the
+remainder: reuse degrades smoothly into a near-cold request rather than
+failing loudly. A model with a large `fixed_state` is hit twice, because the
+constant cost is charged to each anchor.
+
+### Anchor placement: why a snapshot at prompt end is not reusable
+
+A non-rewindable cache (MLX) can only reuse an anchor whose *whole* state is a
+prefix of the new prompt; it cannot trim a longer anchor down. Placement
+therefore decides everything.
+
+A rendered prompt ends with a generation prompt — the assistant header, and for
+thinking templates an empty reasoning block. Once that turn becomes history the
+template re-renders it differently, so the tail of turn N's prompt is *not* a
+prefix of turn N+1's. A snapshot captured at prompt end is unusable next turn,
+and reuse silently falls back to the coarser automatic checkpoint grid.
+
+The worker therefore resolves a boundary through the final message, rendered
+with `add_generation_prompt: false`, and offers it to the coordinator as a
+stable boundary. That position is exactly what the next turn shares. Templates
+that are append-only resolve to the position the session slot already holds,
+where this is a no-op; llama.cpp is unaffected because it trims instead of
+anchoring.
+
+Measured on Qwen3.6-27B-4bit with a ~6.1k-token prompt:
+
+| Anchor available | Reused | TTFT |
+| --- | --- | --- |
+| checkpoint grid only | 2,048 (24%) | 121 s |
+| message boundary | 6,083 (99%) | 2.2 s |
+
+Automatic checkpoints are a fallback for prompts with no matching semantic
+boundary, not a substitute for one. They are charged to the same byte budget,
+so a fine grid is actively harmful on heavy models: a 512-token grid spent
+~1.9 GiB of a 5.7 GiB budget on intermediate checkpoints for one 8.4k prompt
+and starved the message-boundary anchor, producing 47 evictions and reuse
+collapsing from 98% to 59% mid-conversation. The shipped 2048 grid keeps
+budget available for the anchor that actually carries a conversation.
+
+Under real multi-session load the binding constraint is anchor bytes, not hit
+rate. Eight concurrent otto sessions against Qwen3.6-27B (~8.4k prompts,
+~600 MiB per anchor) exceeded the budget on a 32 GiB host: the hit rate stayed
+high at 95.8% because every session still matched the shared prefix anchor,
+while reuse depth fell to the shared portion (~60%) because per-session
+anchors could not be retained. Check `pressureState`, `evictionCount`, and
+`retainedBytes` against `highWatermarkBytes` in `/clap/v1/runtime/models`
+before concluding a model or template is at fault.
+
+Sizing knobs, in the order worth reaching for:
+
+- `[cache.checkpoints] budget_fraction` — share of the retained budget usable
+  for anchors (`CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS`)
+- `[mlx] retained_budget_gib` / `retained_budget_percent` — the retained budget
+  itself, which by default is derived from memory available at startup
+- `[cache.checkpoints] interval_tokens` — anchors are planted on multiples of
+  this interval, so a coarse interval leaves up to `interval - 1` tokens to be
+  re-prefilled even when the budget is ample
+
+### KV reuse metrics: two intentionally different denominators
+
+`/metrics` reports cache reuse twice, because the two questions differ:
+
+| Series | Denominator | Answers |
+| --- | --- | --- |
+| `clap_kv_cache_total{outcome}`, `clap_kv_cache_eligibility_total`, `clap_kv_cache_miss_class_total` | Requests that supplied a `cache` intent block **and** received an admission decision | "Is the coordinator honoring the reuse contract callers asked for?" |
+| `clap_kv_cache_admitted_total{outcome}`, `clap_kv_cache_admitted_reused_tokens_total`, `clap_kv_cache_admitted_prompt_tokens_total` | Every request that received an admission decision, intent or not | "How much prompt work is the KV cache actually saving?" |
+
+Standard OpenAI clients never send `cache`, so they are `not_eligible` for the
+first family by design and would otherwise appear as zero reuse. The
+`admitted` family is a superset that covers them, so reuse is visible out of
+the box; the dashboard tiles read from it and fall back to the intent-gated
+KPI only when talking to a server that predates these fields.
+
+Neither family counts requests that failed before admission — those have no
+reuse outcome to report and stay out of both denominators rather than being
+recorded as misses.
+
 Per-launch artifacts are under:
 
 ```text

@@ -1,6 +1,7 @@
 use clap_cache_core::{
-    CacheManager, Capabilities, Commit, Config, Error, Labels, Namespace, Operation, Plan,
-    PlanRequest, Priority, RetentionConfig, Scope, SlotCapabilities, SlotState,
+    AutomaticCheckpointConfig, CacheManager, Capabilities, Commit, Config, Error, Labels,
+    Namespace, Operation, Plan, PlanRequest, Priority, RetentionConfig, Scope, SlotCapabilities,
+    SlotState,
 };
 
 fn namespace(byte: u8) -> Namespace {
@@ -1237,7 +1238,11 @@ fn automatic_checkpoint_budget_admits_a_fresh_namespace_baseline() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
-            automatic_checkpoints: Default::default(),
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                target_interval_tokens: 2_048,
+                max_checkpoints: 8,
+                ..Default::default()
+            },
         },
         RetentionConfig {
             hard_max_retained_entries: 8,
@@ -1285,7 +1290,11 @@ fn nontrimmable_full_donors_leave_deep_checkpoint_executable_across_projects() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 12,
-            automatic_checkpoints: Default::default(),
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                target_interval_tokens: 2_048,
+                max_checkpoints: 8,
+                ..Default::default()
+            },
         },
         RetentionConfig {
             hard_max_retained_entries: 16,

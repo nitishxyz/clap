@@ -131,9 +131,18 @@ impl Default for AutomaticCheckpointConfig {
         Self {
             enabled: true,
             minimum_prompt_tokens: 2_048,
+            // Each checkpoint is a full snapshot, so a fine grid consumes the
+            // anchor byte budget and evicts the semantic (message-boundary)
+            // anchor that carries multi-turn reuse. Measured on a heavy model:
+            // a 512 grid caused 47 evictions and reuse collapse; 2048 held.
             target_interval_tokens: 2_048,
             max_checkpoints: 8,
-            memory_budget_basis_points: 2_500,
+            // Half the retained budget. An anchor costs a fixed per-cache
+            // state plus `tokens * bytes_per_token`, so this share sets the
+            // longest reusable prefix. A quarter share could not hold one
+            // full-length anchor for large hybrid models, which forced a
+            // near-full re-prefill on every turn of a long conversation.
+            memory_budget_basis_points: 5_000,
             memory_budget_cap_bytes: 0,
         }
     }

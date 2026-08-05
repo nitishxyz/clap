@@ -12,9 +12,27 @@ const KvTypeSchema = z.enum(["f16", "q8_0", "q4_0"]);
 export const CheckpointConfigSchema = z.object({
   enabled: z.boolean().default(true),
   minimum_tokens: z.number().int().min(16).max(1_048_576).default(2_048),
+  // Anchors are planted on multiples of this interval. A fine grid looks
+  // attractive in isolation, but every checkpoint costs a full snapshot
+  // (fixed state + tokens x bytes_per_token). On a heavy model a 512 grid
+  // spent ~1.9 GiB of a 5.7 GiB budget on intermediate checkpoints for a
+  // single 8.4k prompt, which starved the message-boundary anchor that
+  // actually carries a conversation (measured: 47 evictions and reuse
+  // collapsing to 59%, versus 5 evictions at 2048). Semantic boundaries, not
+  // a fine grid, are what make multi-turn reuse deep.
   interval_tokens: z.number().int().min(16).max(1_048_576).default(2_048),
+  // Upper bound on checkpoints per prompt. Raising this multiplies snapshot
+  // bytes and evicts higher-value semantic anchors on memory-tight hosts.
   max_checkpoints: z.number().int().min(1).max(64).default(8),
-  budget_fraction: z.number().min(0).max(1).default(0.25),
+  // Share of the retained-KV budget automatic checkpoints may hold. An anchor
+  // costs `fixed_state + tokens * bytes_per_token`, so this fraction decides
+  // the longest prompt prefix that can be reused. At 25% a large hybrid model
+  // (Qwen3.6-27B: ~72 MiB fixed state + 64 KiB/token) could only retain a
+  // 2k-token anchor for an 8k prompt, re-prefilling ~76% of every turn; half
+  // the budget admits a full-length anchor. Checkpoints are evicted under
+  // watermark pressure, so a larger share yields ground rather than pinning
+  // memory.
+  budget_fraction: z.number().min(0).max(1).default(0.5),
   budget_bytes: z.number().int().nonnegative().default(0),
 });
 
