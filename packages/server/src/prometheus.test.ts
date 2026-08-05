@@ -6,7 +6,9 @@ function snapshot(): PromSnapshot {
   return {
     totals: { requests: 0, ok: 0, errors: 0, cancelled: 0, promptTokens: 0,
       completionTokens: 0, cacheHits: 0, cacheMisses: 0, cacheEligible: 0,
-      cacheNotEligible: 0, cacheIsolatedMisses: 0, cacheFreshMisses: 0, reusedTokens: 0 },
+      cacheNotEligible: 0, cacheIsolatedMisses: 0, cacheFreshMisses: 0, reusedTokens: 0,
+      physicalCacheHits: 0, physicalCacheMisses: 0, physicalReusedTokens: 0,
+      physicalPromptTokens: 0 },
     activeRequests: 0,
     queue: { inflight: 0, queued: 0, maxInflight: 1, queueDepth: 1,
       inflightByPriority: { interactive: 0, normal: 0, background: 0 },

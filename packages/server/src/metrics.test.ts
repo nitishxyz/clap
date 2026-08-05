@@ -228,6 +228,52 @@ describe("metrics queue accounting", () => {
     });
   });
 
+  test("physical reuse totals count requests without cache intent", () => {
+    const metrics = new MetricsCollector();
+    // A stock OpenAI client: no `cache` block anywhere in the request. The
+    // strict KPI must ignore it, while physical reuse must still report it.
+    const plain = (cacheHit: boolean, reusedTokens: number, promptTokens: number) => {
+      const handle = metrics.start("model", "/v1/chat/completions", false);
+      handle.capture({ messages: [{ role: "user", content: "hello" }] });
+      handle.finish({ status: "ok", cacheHit, reusedTokens, promptTokens });
+    };
+    plain(true, 8377, 8385);
+    plain(true, 94, 102);
+    plain(false, 0, 2048);
+
+    expect(metrics.totals).toMatchObject({
+      requests: 3,
+      // Intent-gated KPI stays untouched: these requests carry no intent.
+      cacheEligible: 0,
+      cacheNotEligible: 3,
+      cacheHits: 0,
+      cacheMisses: 0,
+      reusedTokens: 0,
+      // Physical reuse sees all three.
+      physicalCacheHits: 2,
+      physicalCacheMisses: 1,
+      physicalReusedTokens: 8471,
+      physicalPromptTokens: 10535,
+    });
+  });
+
+  test("physical reuse totals exclude requests that never reached admission", () => {
+    const metrics = new MetricsCollector();
+    const handle = metrics.start("model", "/v1/chat/completions", false);
+    handle.capture({ messages: [{ role: "user", content: "hello" }] });
+    // No cacheHit boolean: the request failed before an admission decision, so
+    // it is neither a hit nor a miss and must not enter the denominator.
+    handle.finish({ status: "error", promptTokens: 1024 });
+
+    expect(metrics.totals).toMatchObject({
+      requests: 1,
+      physicalCacheHits: 0,
+      physicalCacheMisses: 0,
+      physicalReusedTokens: 0,
+      physicalPromptTokens: 0,
+    });
+  });
+
   test("reset starts a new metrics epoch without admitting late old completions", () => {
     const metrics = new MetricsCollector();
     const old = metrics.start("model", "/v1/chat/completions", false);

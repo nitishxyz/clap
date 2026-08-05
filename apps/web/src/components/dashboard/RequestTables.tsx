@@ -118,10 +118,16 @@ const phaseOrder: Record<DashboardRequest["phase"], number> = { decode: 0, prefi
 
 // Share of the prompt served from the KV cache, clamped to 0-100. Undefined
 // when the prompt size is unknown so the UI never invents a percentage.
+//
+// 100 is reserved for genuinely complete reuse. Rounding gets us there from
+// 99.5%, which would claim no prefill happened on a multi-turn request that
+// really did re-prefill its newest message, so anything short of complete
+// reuse rounds down and tops out at 99.
 export function cacheReusePercent(request: Pick<DashboardRequest, "reusedTokens" | "promptTokens">): number | undefined {
   const { reusedTokens, promptTokens } = request;
   if (reusedTokens === undefined || promptTokens === undefined || promptTokens <= 0) return undefined;
-  return Math.max(0, Math.min(100, Math.round((reusedTokens / promptTokens) * 100)));
+  if (reusedTokens >= promptTokens) return 100;
+  return Math.max(0, Math.min(99, Math.floor((reusedTokens / promptTokens) * 100)));
 }
 
 // Intent is orthogonal to cache outcome: a side request can hit or miss.
@@ -148,13 +154,25 @@ export function HistoricalTag({ historical }: { historical?: boolean }) {
 }
 
 export function CacheTag({ request }: { request: DashboardRequest }) {
-  if (request.cacheEligibility === "no_intent") {
+  // A request without cache intent is outside the strict KPI, but the KV cache
+  // still either reused a prefix or did not. Reporting only "no intent" hid
+  // real reuse from every standard OpenAI client, so the physical outcome is
+  // shown whenever an admission decision exists and the intent caveat moves
+  // into the tooltip.
+  const noIntent = request.cacheEligibility === "no_intent";
+  if (noIntent && request.cacheHit === undefined) {
     return <Tag title="not cache-eligible: the request supplied no cache intent">cache n/a · no intent</Tag>;
   }
   if (request.cacheEligibility === "no_admission") {
     return <Tag title="not cache-eligible: the request ended before a cache admission decision">cache n/a · no admission</Tag>;
   }
-  const outcome = request.cacheOutcome;
+  const intentNote = noIntent
+    ? " (physical reuse; the request supplied no cache intent, so it is outside the cache KPI)"
+    : "";
+  // Coordinator categories (isolated, fresh_by_policy, ...) describe KPI
+  // semantics that do not apply without intent, so they stay suppressed here;
+  // only the physical hit/miss and reused tokens are reported.
+  const outcome = noIntent ? undefined : request.cacheOutcome;
   const slot = request.slot !== undefined ? ` · s${request.slot}` : "";
   const skipped = outcome?.boundariesSkipped && outcome.boundariesSkipped > 0
     ? ` · ${outcome.boundariesSkipped} boundary skip${outcome.boundariesSkipped === 1 ? "" : "s"}`
@@ -173,7 +191,7 @@ export function CacheTag({ request }: { request: DashboardRequest }) {
     return (
       <Tag
         tone={CACHE_OUTCOME_TONES[outcome.category]}
-        title={outcome.reason}
+        title={`${outcome.reason}${intentNote}`}
         ariaLabel={`cache ${label}${detail}${skipped}`}
       >
         {`cache ${label}${detail}${skipped}`}
@@ -183,14 +201,14 @@ export function CacheTag({ request }: { request: DashboardRequest }) {
 
   if (request.cacheHit === true) {
     return (
-      <Tag tone="hit" title="prefix cache hit: reused tokens came from the KV cache instead of being re-prefilled" ariaLabel="cache hit">
+      <Tag tone="hit" title={`prefix cache hit: reused tokens came from the KV cache instead of being re-prefilled${intentNote}`} ariaLabel="cache hit">
         {`cache hit · ${fmtTokens(request.reusedTokens ?? 0)} tok${pct !== undefined ? ` · ${pct}%` : ""}${slot}`}
       </Tag>
     );
   }
   if (request.cacheHit === false) {
     return (
-      <Tag title="prefix cache miss: the full prompt was prefilled" ariaLabel="cache miss">
+      <Tag title={`prefix cache miss: the full prompt was prefilled${intentNote}`} ariaLabel="cache miss">
         {`cache miss · ${fmtTokens(request.reusedTokens ?? 0)} tok${slot}`}
       </Tag>
     );
@@ -222,12 +240,19 @@ export function CacheOutcomeLegend() {
   );
 }
 
-export function ActiveRequests({ requests, now, onSelect }: { requests: DashboardRequest[]; now: number; onSelect: (id: string) => void }) {
+export function ActiveRequests({ requests, now, onSelect, onCancel, cancelling = [] }: {
+  requests: DashboardRequest[];
+  now: number;
+  onSelect: (id: string) => void;
+  onCancel?: (id: string) => void;
+  cancelling?: string[];
+}) {
   const sorted = [...requests].sort((a, b) => (phaseOrder[a.phase] - phaseOrder[b.phase]) || a.startedAt - b.startedAt);
+  const pending = new Set(cancelling);
   return (
     <Panel title="active requests" count={requests.length || ""}>
       {requests.length ? (
-        <Table headers={["started", "session / prefix", "model", "phase", "elapsed", { label: "msgs", numeric: true }, "endpoint", "stream"]}>
+        <Table headers={["started", "session / prefix", "model", "phase", "elapsed", { label: "msgs", numeric: true }, "endpoint", "stream", ""]}>
           {sorted.map((request) => (
             <tr key={request.id} className="cursor-pointer hover:bg-panel-strong" onClick={() => onSelect(request.id)}>
               <Td>{fmtClock(request.startedAt)}</Td>
@@ -238,6 +263,21 @@ export function ActiveRequests({ requests, now, onSelect }: { requests: Dashboar
               <Td numeric>{request.messageCount ?? "-"}</Td>
               <Td>{request.endpoint}</Td>
               <Td>{request.stream ? "sse" : "json"}</Td>
+              <Td>
+                {onCancel ? (
+                  <button
+                    type="button"
+                    // Row click opens detail; the button must not also select.
+                    onClick={(event) => { event.stopPropagation(); onCancel(request.id); }}
+                    disabled={pending.has(request.id)}
+                    aria-label={`cancel request ${request.id}`}
+                    title="stop this request and free its worker slot"
+                    className="border border-soft-border px-1.5 text-[0.7rem] text-muted hover:border-err hover:text-err disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {pending.has(request.id) ? "stopping" : "stop"}
+                  </button>
+                ) : null}
+              </Td>
             </tr>
           ))}
         </Table>

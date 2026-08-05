@@ -47,6 +47,12 @@ export type DashboardTotals = {
   cacheIsolatedMisses: number;
   cacheFreshMisses: number;
   reusedTokens: number;
+  // Physical reuse across every admitted request, including clients that send
+  // no cache intent. Optional so payloads from older servers still parse.
+  physicalCacheHits?: number;
+  physicalCacheMisses?: number;
+  physicalReusedTokens?: number;
+  physicalPromptTokens?: number;
 };
 
 export type DetailMessage = {
@@ -488,6 +494,10 @@ export function resolveModel(model: string): Promise<ModelResolveResponse> {
 
 export function cancelDownload(id: string): Promise<unknown> {
   return post(`/clap/v1/downloads/${id}/cancel`, {});
+}
+
+export function cancelRequest(id: string): Promise<{ id: string; status: string }> {
+  return post(`/clap/v1/requests/${encodeURIComponent(id)}/cancel`, {}) as Promise<{ id: string; status: string }>;
 }
 
 export function saveHuggingFaceToken(token: string): Promise<HuggingFaceAuthStatus> {

@@ -169,6 +169,14 @@ export type MetricsTotals = {
   cacheIsolatedMisses: number;
   cacheFreshMisses: number;
   reusedTokens: number;
+  // Physical reuse observed on every admitted request, including standard
+  // OpenAI clients that never send a cache intent block. The cache* fields
+  // above stay intent-gated for KPI reporting; these describe what the KV
+  // cache actually did, so out-of-the-box traffic is not invisible.
+  physicalCacheHits: number;
+  physicalCacheMisses: number;
+  physicalReusedTokens: number;
+  physicalPromptTokens: number;
 };
 
 export type RequestFinish = {
@@ -338,6 +346,10 @@ export class MetricsCollector {
     cacheIsolatedMisses: 0,
     cacheFreshMisses: 0,
     reusedTokens: 0,
+    physicalCacheHits: 0,
+    physicalCacheMisses: 0,
+    physicalReusedTokens: 0,
+    physicalPromptTokens: 0,
   };
 
   resetDashboard(): void {
@@ -746,6 +758,19 @@ export class MetricsCollector {
         record.cacheEligibility = record.cacheIntent !== true ? "no_intent"
           : typeof result.cacheHit !== "boolean" ? "no_admission"
           : "eligible";
+        // Physical reuse accounting is intent-independent: any request that
+        // reached a real admission decision reports what the KV cache did.
+        // This keeps standard OpenAI clients (which never send cache intent)
+        // visible in reuse metrics without widening the strict KPI above.
+        if (typeof result.cacheHit === "boolean") {
+          this.totals.physicalPromptTokens += result.promptTokens ?? 0;
+          if (result.cacheHit) {
+            this.totals.physicalCacheHits += 1;
+            this.totals.physicalReusedTokens += result.reusedTokens ?? 0;
+          } else {
+            this.totals.physicalCacheMisses += 1;
+          }
+        }
         const cacheEligible = record.cacheEligibility === "eligible";
         if (cacheEligible) {
           this.totals.cacheEligible += 1;

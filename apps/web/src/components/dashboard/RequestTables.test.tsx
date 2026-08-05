@@ -89,9 +89,14 @@ describe("recent request intent and cache badges", () => {
     expect(html).toContain("cache branch hit · 30 tok · 30%");
   });
 
-  test("explicit no-intent eligibility overrides raw coordinator telemetry", () => {
-    expect(row({ ...base, cacheHit: false, cacheEligibility: "no_intent",
-      cacheOutcome: outcome("isolated") })).toContain("cache n/a · no intent");
+  test("no-intent rows report physical outcome but suppress KPI classification", () => {
+    // Coordinator categories such as "isolated" describe cache-KPI semantics
+    // that do not apply to a request that supplied no intent, so the category
+    // stays hidden while the physical miss is still reported honestly.
+    const html = row({ ...base, cacheHit: false, cacheEligibility: "no_intent",
+      cacheOutcome: outcome("isolated") });
+    expect(html).toContain("cache miss · 0 tok");
+    expect(html).not.toContain(">cache isolated");
   });
 
   test("absent telemetry renders an explicit cache n/a badge", () => {
@@ -174,6 +179,28 @@ describe("recent request intent and cache badges", () => {
     const miss = row({ ...base, cacheHit: false, reusedTokens: 0 });
     expect(miss).toContain("cache miss · 0 tok");
   });
+
+  test("shows physical reuse for requests that supplied no cache intent", () => {
+    // Stock OpenAI clients never send cache intent. Reporting only "no intent"
+    // hid substantial real reuse, so the row shows what the cache actually did.
+    const html = row({
+      ...base,
+      cacheEligibility: "no_intent",
+      cacheHit: true,
+      reusedTokens: 8377,
+      promptTokens: 8385,
+    });
+    // 8377/8385 is 99.9% reuse, not complete: 8 tokens were still prefilled.
+    expect(html).toContain("cache hit · 8377 tok · 99%");
+    expect(html).not.toContain("cache n/a · no intent");
+    // The KPI caveat is preserved, just moved out of the label.
+    expect(html).toContain("outside the cache KPI");
+  });
+
+  test("still reports no intent when the request never reached an admission decision", () => {
+    const html = row({ ...base, cacheEligibility: "no_intent", cacheHit: undefined });
+    expect(html).toContain("cache n/a · no intent");
+  });
 });
 
 describe("session / prefix identity badges", () => {
@@ -236,9 +263,18 @@ describe("session / prefix identity badges", () => {
 });
 
 describe("cacheReusePercent", () => {
-  test("computes reusedTokens / promptTokens as a rounded percentage", () => {
+  test("computes reusedTokens / promptTokens as a percentage", () => {
     expect(cacheReusePercent({ reusedTokens: 64, promptTokens: 74 })).toBe(86);
     expect(cacheReusePercent({ reusedTokens: 1, promptTokens: 3 })).toBe(33);
+  });
+
+  test("never reports 100% while any part of the prompt was still prefilled", () => {
+    // Measured multi-turn shape: the newest message and generation prompt are
+    // re-prefilled, so reporting 100% would claim work that did happen away.
+    expect(cacheReusePercent({ reusedTokens: 5753, promptTokens: 5778 })).toBe(99);
+    expect(cacheReusePercent({ reusedTokens: 5757, promptTokens: 5758 })).toBe(99);
+    // Complete reuse still reads as 100.
+    expect(cacheReusePercent({ reusedTokens: 5778, promptTokens: 5778 })).toBe(100);
   });
 
   test("clamps out-of-range ratios", () => {

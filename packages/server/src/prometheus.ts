@@ -58,6 +58,10 @@ export type PromSnapshot = {
     cacheIsolatedMisses: number;
     cacheFreshMisses: number;
     reusedTokens: number;
+    physicalCacheHits: number;
+    physicalCacheMisses: number;
+    physicalReusedTokens: number;
+    physicalPromptTokens: number;
   };
   activeRequests: number;
   queue: { inflight: number; queued: number; maxInflight: number; queueDepth: number;
@@ -178,6 +182,18 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
     ['{class="isolated"}', snapshot.totals.cacheIsolatedMisses],
     ['{class="fresh_by_policy"}', snapshot.totals.cacheFreshMisses],
   ]);
+  // Intent-independent view: covers every admitted request, including clients
+  // that never send a cache identity block.
+  counter("clap_kv_cache_admitted_total", "Admitted requests by physical KV reuse outcome", [
+    ['{outcome="hit"}', snapshot.totals.physicalCacheHits],
+    ['{outcome="miss"}', snapshot.totals.physicalCacheMisses],
+  ]);
+  counter("clap_kv_cache_admitted_reused_tokens_total",
+    "Prompt tokens served from physical KV reuse on admitted requests",
+    [["", snapshot.totals.physicalReusedTokens]]);
+  counter("clap_kv_cache_admitted_prompt_tokens_total",
+    "Prompt tokens presented by admitted requests, the denominator for reuse ratio",
+    [["", snapshot.totals.physicalPromptTokens]]);
 
   gauge("clap_requests_active", "Requests currently executing or streaming", [["", snapshot.activeRequests]]);
   gauge("clap_queue_inflight", "Requests admitted past the fair limiter by priority",
