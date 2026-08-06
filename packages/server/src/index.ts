@@ -32,11 +32,13 @@ import { cachedPullResultForTarget, clapHome, deleteStoredHfToken, hfAuthStatus,
 import { assertGgufModelPath, isGgufModel, LlamaWorkerError } from "@clap/runtime-llama";
 import { assertMlxModelPath, isMlxModelDirectory, MlxWorkerError } from "@clap/runtime-mlx";
 import type { StructuredOutputContract } from "@clap/worker-protocol";
-import { InsufficientModelMemoryError, listBackends, ModelLifecycleManager, ResidentWorkerRegistry,
-  type CacheIdentity, type ResidentChatResult } from "@clap/runtime-router";
+import { CacheAwareRoutingDirectory, InsufficientModelMemoryError, listBackends, ModelLifecycleManager,
+  ResidentWorkerRegistry, stableRoutingWorkerId, type CacheIdentity, type ResidentChatResult,
+  type ResidentWorkerHandle, type RoutingDecision, type RoutingLocationKind } from "@clap/runtime-router";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { parseStructuredOutput, StructuredOutputError } from "./parsers/structured";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ApiKeyVerifier, createApiKey, listApiKeys, resolveRequestIdentity, revokeApiKey, type RequestIdentity } from "./auth";
@@ -55,7 +57,7 @@ import { renderPrometheus } from "./prometheus";
 import { parseAssistantOutput, prepareChatRequest, profileStreamExtras, remainingDelta, StreamingOutputFilter, type ParserTemplateInfo, type StreamDelta } from "./chat-compat";
 import { inferParserFamilies, resolveParserTemplateInfo } from "./parsers/traits";
 export { inferParserFamilies } from "./parsers/traits";
-import { MetricsCollector, type RequestHandle } from "./metrics";
+import { MetricsCollector, type RequestHandle, type RoutingTelemetry } from "./metrics";
 import { RequestCancellationRegistry } from "./request-cancellation";
 import { sampleGpuUsage } from "./gpu-usage";
 import { cpuCoreCount, processRssBytes, sampleProcessUsage, systemCpuPercent, systemMemoryBytes,
@@ -98,6 +100,40 @@ export type ServerOptions = {
   hostname?: string;
   idleTimeout?: number;
 };
+
+function estimatedPromptTokens(request: ChatCompletionRequest): number {
+  const encoded = JSON.stringify({ messages: request.messages, tools: request.tools });
+  return Math.max(1, Math.ceil(new TextEncoder().encode(encoded).byteLength / 4));
+}
+
+function replicaWorkerKey(model: ResolvedModel, replica: number): string {
+  return replica === 0 ? lifecycleKey(model) : JSON.stringify([
+    model.id,
+    model.backend,
+    model.modelPath ?? model.input,
+    "replica",
+    replica,
+  ]);
+}
+
+function routingTelemetry(decision: RoutingDecision): RoutingTelemetry {
+  return {
+    workerId: decision.workerId,
+    workerGeneration: decision.workerGeneration,
+    reason: decision.reason,
+    directoryHit: decision.directoryHit,
+    locationKind: decision.locationKind,
+    matchedTokens: decision.matchedTokens,
+    promptTokens: decision.promptTokens,
+    estimatedQueueWaitMs: Math.round(decision.queueWaitMs),
+    estimatedMissingPrefillMs: Math.round(decision.missingPrefillMs),
+    estimatedPressurePenaltyMs: Math.round(decision.pressurePenaltyMs),
+    estimatedColdLoadMs: Math.round(decision.coldLoadMs),
+    estimatedTotalCostMs: Math.round(decision.totalCostMs),
+    candidateCount: decision.candidateCount,
+    staleLocationsIgnored: decision.staleLocationsIgnored,
+  };
+}
 
 export function normalizeCacheIntent(request: ChatCompletionRequest): ChatCompletionRequest {
   if (!request.cache) return request;
@@ -156,11 +192,31 @@ type ServerEnv = {
 
 export function createServer(
   residents = new ResidentWorkerRegistry(),
-  lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdownAsync(entry.key)),
+  lifecycle?: ModelLifecycleManager,
   options: { memorySnapshot?: ResidentWorkerRegistry["memorySnapshot"] } = {},
 ) {
   const app = new Hono<ServerEnv>();
   const { config, sources: configSources } = loadClapConfig();
+  const routingDirectory = new CacheAwareRoutingDirectory({
+    workerTtlMs: config.routing.worker_ttl_ms,
+    locationTtlMs: config.routing.session_ttl_ms,
+    maxWorkers: config.routing.max_workers,
+    maxLocations: config.routing.max_locations,
+    pressurePenaltyMs: config.routing.pressure_penalty_ms,
+  });
+  const replicaKeysByModel = new Map<string, Set<string>>();
+  const routingWorkerIds = new Map<string, string>();
+  lifecycle ??= new ModelLifecycleManager(() => Date.now(), async (entry) => {
+    const keys = replicaKeysByModel.get(entry.key) ?? new Set([entry.key]);
+    await Promise.all([...keys].map(async (key) => {
+      const workerId = routingWorkerIds.get(key);
+      if (workerId) routingDirectory.invalidateWorker(workerId);
+      routingWorkerIds.delete(key);
+      await residents.shutdownAsync(key);
+    }));
+    replicaKeysByModel.delete(entry.key);
+  });
+  const modelLifecycle = lifecycle;
   const cacheEvents = new CacheEventStore({
     directory: join(clapHome(), "telemetry"),
     enabled: config.telemetry.cache_decisions_enabled,
@@ -186,6 +242,9 @@ export function createServer(
     for (const entry of lifecycle.list()) {
       const launchId = residents.get(entry.key)?.info().launchId;
       if (typeof launchId === "string" && launchId.length > 0) warm.add(launchId);
+    }
+    for (const worker of routingDirectory.snapshot().workers) {
+      if (!worker.generation.startsWith("cold:")) warm.add(worker.generation);
     }
     return warm;
   };
@@ -250,6 +309,160 @@ export function createServer(
     return tokenFingerprintKey
       ? { ...modelEnvironment, CLAP_TOKEN_FINGERPRINT_KEY: tokenFingerprintKey }
       : modelEnvironment;
+  };
+  type LocalRoutingStats = {
+    activeRequests: number;
+    averageServiceMs: number;
+    prefillTokensPerSecond: number;
+  };
+  type RoutedWorkerSelection = {
+    worker: ResidentWorkerHandle;
+    workerId: string;
+    telemetry: RoutingTelemetry;
+    loaded(): void;
+    finish(result?: ResidentChatResult, unavailable?: boolean): void;
+  };
+  const routingStats = new Map<string, LocalRoutingStats>();
+  const routingNodeId = config.routing.node_id ?? process.env.CLAP_ROUTER_NODE_ID ?? hostname();
+  const requestRoutingPrefixes = (request: ChatCompletionRequest) => {
+    const system = request.messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content);
+    const tools = request.tools ?? [];
+    return [
+      { kind: "system" as const, fingerprint: cacheEvents.fingerprint({ version: 1, kind: "system", system }) },
+      { kind: "tools" as const, fingerprint: cacheEvents.fingerprint({ version: 1, kind: "tools", tools }) },
+    ].filter((entry): entry is { kind: "system" | "tools"; fingerprint: string } => Boolean(entry.fingerprint));
+  };
+  const heartbeatWorker = (worker: ResidentWorkerHandle, workerId: string, modelDomain: string): string => {
+    const stats = routingStats.get(workerId) ?? {
+      activeRequests: 0,
+      averageServiceMs: config.routing.queue_wait_ms_per_request,
+      prefillTokensPerSecond: config.routing.default_prefill_tokens_per_second,
+    };
+    routingStats.set(workerId, stats);
+    const info = worker.info();
+    const retention = info.retention;
+    const activeCapacity = Math.max(1, retention?.maxActive ?? 1);
+    const queued = Math.max(0, stats.activeRequests - activeCapacity + 1);
+    const occupancy = retention?.hardCeiling
+      ? retention.retainedTotal / retention.hardCeiling
+      : 0;
+    const generation = info.launchId ?? `cold:${workerId}`;
+    routingDirectory.heartbeat({
+      workerId,
+      generation,
+      modelDomain,
+      state: info.loadState === "closing" ? "draining" : "ready",
+      observedAt: Date.now(),
+      activeRequests: stats.activeRequests,
+      queueDepth: queued,
+      estimatedQueueWaitMs: queued * stats.averageServiceMs,
+      pressure: retention?.underPressure ? 1 : Math.min(1, Math.max(0, occupancy)),
+      loaded: info.loadState === "resident",
+      estimatedColdLoadMs: config.routing.cold_load_ms,
+      prefillTokensPerSecond: stats.prefillTokensPerSecond,
+    });
+    return generation;
+  };
+  const selectRoutedWorker = (
+    model: ResolvedModel,
+    request: ChatCompletionRequest,
+    cacheIdentity: CacheIdentity,
+    excludedWorkerIds: ReadonlySet<string> = new Set(),
+  ): RoutedWorkerSelection => {
+    const modelKey = lifecycleKey(model);
+    const keys = replicaKeysByModel.get(modelKey) ?? new Set<string>();
+    replicaKeysByModel.set(modelKey, keys);
+    const byWorkerId = new Map<string, ResidentWorkerHandle>();
+    const replicas = config.routing.enabled ? config.routing.local_replicas : 1;
+    for (let replica = 0; replica < replicas; replica += 1) {
+      const key = replicaWorkerKey(model, replica);
+      keys.add(key);
+      const worker = residents.getOrCreate(key, model.backend, model.modelPath ?? model.input,
+        workerDescriptor(model));
+      const workerId = stableRoutingWorkerId(routingNodeId, cacheIdentity.physical.fingerprint, replica);
+      routingWorkerIds.set(key, workerId);
+      byWorkerId.set(workerId, worker);
+      heartbeatWorker(worker, workerId, cacheIdentity.physical.fingerprint);
+    }
+    const prefixes = requestRoutingPrefixes(request);
+    const decision = routingDirectory.select({
+      modelDomain: cacheIdentity.physical.fingerprint,
+      shareDomain: cacheIdentity.namespace_fingerprint,
+      sessionFingerprint: cacheIdentity.session_fingerprint,
+      prefixes,
+      promptTokens: estimatedPromptTokens(request),
+      affinityFingerprint: cacheIdentity.session_fingerprint ?? cacheIdentity.scope_fingerprint,
+      excludedWorkerIds,
+    });
+    if (!decision) throw new Error("No compatible resident worker is available");
+    const worker = byWorkerId.get(decision.workerId);
+    if (!worker) throw new Error("Routing selected an unknown resident worker");
+    const stats = routingStats.get(decision.workerId)!;
+    stats.activeRequests += 1;
+    const telemetry = routingTelemetry(decision);
+    const startedAt = Date.now();
+    let finished = false;
+    const publish = (kind: RoutingLocationKind, fingerprint: string | undefined, tokenCount: number | undefined) => {
+      if (!fingerprint || !Number.isSafeInteger(tokenCount) || tokenCount! <= 0) return;
+      const generation = worker.info().launchId;
+      if (!generation) return;
+      routingDirectory.publishLocation({
+        modelDomain: cacheIdentity.physical.fingerprint,
+        shareDomain: cacheIdentity.namespace_fingerprint,
+        kind,
+        fingerprint,
+        workerId: decision.workerId,
+        workerGeneration: generation,
+        tokenCount: tokenCount!,
+        lastSeenAt: Date.now(),
+      });
+    };
+    return {
+      worker,
+      workerId: decision.workerId,
+      telemetry,
+      loaded() {
+        const generation = heartbeatWorker(worker, decision.workerId, cacheIdentity.physical.fingerprint);
+        if (generation !== decision.workerGeneration) {
+          telemetry.workerGeneration = generation;
+          if (decision.directoryHit) telemetry.fallback = "stale_directory_miss";
+        }
+      },
+      finish(result, unavailable = false) {
+        if (finished) return;
+        finished = true;
+        stats.activeRequests = Math.max(0, stats.activeRequests - 1);
+        const elapsed = Math.max(1, Date.now() - startedAt);
+        stats.averageServiceMs = stats.averageServiceMs === 0
+          ? elapsed : stats.averageServiceMs * 0.8 + elapsed * 0.2;
+        const measuredPrefillMs = result?.timing?.prefillMs ?? result?.cache?.prefillMs;
+        const measuredPrefillTokens = result?.timing?.prefillTokens ?? result?.cache?.promptTokenCount
+          ?? result?.usage?.promptTokens;
+        if (measuredPrefillMs && measuredPrefillTokens) {
+          const measured = measuredPrefillTokens / (measuredPrefillMs / 1_000);
+          if (Number.isFinite(measured) && measured > 0) {
+            stats.prefillTokensPerSecond = stats.prefillTokensPerSecond * 0.8 + measured * 0.2;
+          }
+        }
+        if (unavailable) {
+          telemetry.fallback = "worker_unavailable";
+          routingDirectory.invalidateWorker(decision.workerId, telemetry.workerGeneration);
+          return;
+        }
+        const generation = heartbeatWorker(worker, decision.workerId, cacheIdentity.physical.fingerprint);
+        telemetry.workerGeneration = generation;
+        if (!result || result.finishReason === "cancel") return;
+        if (decision.directoryHit && result.cache?.hit !== true) telemetry.fallback = "stale_directory_miss";
+        const promptTokens = result.cache?.promptTokenCount ?? result.usage?.promptTokens;
+        publish("session", cacheIdentity.session_fingerprint, promptTokens);
+        const systemPrefix = prefixes.find((prefix) => prefix.kind === "system");
+        const toolsPrefix = prefixes.find((prefix) => prefix.kind === "tools");
+        publish("system", systemPrefix?.fingerprint, result.cache?.systemTokenCount);
+        publish("tools", toolsPrefix?.fingerprint, result.cache?.toolsTokenCount);
+      },
+    };
   };
   // Warm-on-boot: models marked pinned (or given keep_alive) in config load
   // shortly after startup so the first user request never pays a cold load.
@@ -757,6 +970,7 @@ export function createServer(
         plannedReuseTokens: persisted.cache?.plannedTokens,
         realizedReuseTokens: persisted.cache?.realizedTokens,
         cacheFallback: persisted.cache?.fallback,
+        routing: persisted.routing,
         timing: persisted.timing,
         finishReason: persisted.finishReason,
         cacheOutcome: persistedOutcome(persisted, firstIds),
@@ -788,6 +1002,12 @@ export function createServer(
     if (!event) return c.json({ error: { message: "cache decision not found", type: "invalid_request_error" } }, 404);
     return c.json(event);
   });
+
+  app.get("/clap/v1/router", (c) => c.json({
+    enabled: config.routing.enabled,
+    localReplicas: config.routing.enabled ? config.routing.local_replicas : 1,
+    ...routingDirectory.snapshot(),
+  }));
 
   const serveWeb = (path: string) => {
     const asset = webAsset(path);
@@ -1116,10 +1336,32 @@ export function createServer(
       releaseIdentityLease();
       throw error;
     }
+    let selected: RoutedWorkerSelection | undefined;
     try {
-      const worker = residents.getOrCreate(lifecycleKey(model), model.backend, model.modelPath ?? model.input,
-        workerDescriptor(model));
-      const workerInfo = await worker.load();
+      const excludedWorkerIds = new Set<string>();
+      const maxAttempts = config.routing.enabled ? config.routing.local_replicas : 1;
+      let workerInfo;
+      let workerUnavailableFallback = false;
+      let lastLoadError: unknown;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const candidate = selectRoutedWorker(model, request, cacheIdentity, excludedWorkerIds);
+        selected = candidate;
+        if (workerUnavailableFallback) candidate.telemetry.fallback = "worker_unavailable";
+        handle.routing(candidate.telemetry);
+        try {
+          workerInfo = await candidate.worker.load();
+          candidate.loaded();
+          break;
+        } catch (error) {
+          lastLoadError = error;
+          workerUnavailableFallback = true;
+          candidate.finish(undefined, true);
+          excludedWorkerIds.add(candidate.workerId);
+          selected = undefined;
+        }
+      }
+      if (!selected || !workerInfo) throw lastLoadError ?? new Error("No resident worker could be loaded");
+      const routed = selected;
       let routedRequest: ChatCompletionRequest;
       try {
         routedRequest = prepareChatRequest(
@@ -1128,6 +1370,7 @@ export function createServer(
               && templateInfo?.hasToolCalls === true },
         );
       } catch (error) {
+        routed.finish();
         unregisterCancel();
         release();
         releaseIdentityLease();
@@ -1141,20 +1384,25 @@ export function createServer(
         }), 400);
       }
       if (routedRequest.stream) {
-        const loaded = lifecycle.beginUsage(model);
-        return streamResidentResponse(c, residents, loaded, routedRequest, templateInfo, () => {
-          lifecycle.finishUsage(loaded);
+        const loaded = modelLifecycle.beginUsage(model);
+        return streamResidentResponse(c, routed.worker, loaded, routedRequest, templateInfo, (result, error) => {
+          routed.finish(result, error !== undefined && routed.worker.info().loadState !== "resident");
+          modelLifecycle.finishUsage(loaded);
           unregisterCancel();
           release();
           releaseIdentityLease();
         }, handle, cacheIdentity, aborter);
       }
-      const response = await lifecycle.withUsage(model, (entry) => jsonResidentResponse(c, residents, entry, routedRequest, templateInfo, handle, cacheIdentity, aborter.signal));
+      const response = await modelLifecycle.withUsage(model, (entry) => jsonResidentResponse(c, routed.worker,
+        entry, routedRequest, templateInfo, handle, cacheIdentity, aborter.signal,
+        (result, error) => routed.finish(result,
+          error !== undefined && routed.worker.info().loadState !== "resident")));
       unregisterCancel();
       release();
       releaseIdentityLease();
       return response;
     } catch (error) {
+      selected?.finish(undefined, selected.worker.info().loadState !== "resident");
       unregisterCancel();
       release();
       releaseIdentityLease();
@@ -1626,8 +1874,7 @@ function configuredContextForBackend(backend: ResolvedModel["backend"]): number 
   return Number.isSafeInteger(value) && value > 0 ? value : 4_096;
 }
 
-async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, cancelSignal: AbortSignal) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
+async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) => Response | Promise<Response>; req: { raw: Request } }, worker: ResidentWorkerHandle, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, cancelSignal: AbortSignal, onSettled?: (result?: ResidentChatResult, error?: unknown) => void) {
   let result: ResidentChatResult | undefined;
   try {
     handle?.phase("loading");
@@ -1646,6 +1893,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     const structuredOutput = validateStructuredResult(result, request, structuredMode);
     const body = chatResponse(request, result, templateInfo);
     const message = body.choices[0]?.message;
+    onSettled?.(result);
     handle?.finish({
       // A cancelled request stays cancelled in the record even if the worker
       // raced to a normal completion: the operator's intent is what the
@@ -1681,6 +1929,7 @@ async function jsonResidentResponse(c: { json: (body: ChatCompletionResponse) =>
     return c.json(body);
   } catch (error) {
     entry.worker = worker.info();
+    onSettled?.(result, error);
     handle?.finish({
       status: "error",
       error: error instanceof Error ? error.message : String(error),
@@ -1752,8 +2001,7 @@ function strictStreamSSE(c: Parameters<typeof streamSSE>[0], callback: (stream: 
   return c.newResponse(responseReadable);
 }
 
-function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: ResidentWorkerRegistry, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, onDone: (() => void) | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, aborter: AbortController) {
-  const worker = residents.getOrCreate(entry.key, entry.backend, entry.localPath, { modelId: entry.id });
+function streamResidentResponse(c: Parameters<typeof streamSSE>[0], worker: ResidentWorkerHandle, entry: LoadedModel, request: ChatCompletionRequest, templateInfo: ParserTemplateInfo | undefined, onSettled: ((result?: ResidentChatResult, error?: unknown) => void) | undefined, handle: RequestHandle | undefined, cacheIdentity: CacheIdentity, aborter: AbortController) {
   return strictStreamSSE(c, async (stream) => {
     const id = completionId();
     const created = nowSeconds();
@@ -1793,6 +2041,12 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, payload)) });
     };
     let result: ResidentChatResult | undefined;
+    let settled = false;
+    const settle = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      onSettled?.(result, error);
+    };
     try {
       handle?.phase("loading");
       const loadStarted = Date.now();
@@ -1826,6 +2080,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await writeQueue.catch(() => undefined);
       entry.worker = worker.info();
       if (result.finishReason === "cancel" || aborter.signal.aborted) {
+        settle();
         handle?.finish({
           status: "cancelled",
           ...workerResultMetrics(result),
@@ -1868,6 +2123,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       const finishReason = parsed.finishReason === "tool_calls" ? "tool_calls" : workerFinishReason(result) ?? parsed.finishReason;
       await stream.writeSSE({ data: JSON.stringify(chunk(id, created, request.model, {}, finishReason, usageFor(request, result))) });
       await stream.writeSSE({ data: "[DONE]" });
+      settle();
       handle?.finish({
         status: "ok",
         ...workerResultMetrics(result),
@@ -1901,9 +2157,11 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       entry.worker = worker.info();
       await writeQueue.catch(() => undefined);
       if (aborter.signal.aborted) {
+        settle();
         handle?.finish({ status: "cancelled", finishReason: "cancel", workerLaunchId: worker.info().launchId });
         return;
       }
+      settle(error);
       handle?.finish({
         status: "error",
         error: error instanceof Error ? error.message : String(error),
@@ -1916,7 +2174,7 @@ function streamResidentResponse(c: Parameters<typeof streamSSE>[0], residents: R
       await stream.writeSSE({ data: JSON.stringify({ error: backendErrorBody(error).error }) }).catch(() => undefined);
     } finally {
       clearInterval(heartbeat);
-      onDone?.();
+      settle();
     }
   });
 }

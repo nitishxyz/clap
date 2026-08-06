@@ -96,6 +96,19 @@ export const ClapConfigSchema = z.object({
     queue_depth: z.number().int().positive().optional(),
     max_active: z.number().int().positive().optional(),
   }).partial().default({}),
+  routing: z.object({
+    enabled: z.boolean().default(true),
+    node_id: z.string().trim().min(1).max(128).optional(),
+    local_replicas: z.number().int().min(1).max(8).default(1),
+    worker_ttl_ms: z.number().int().min(1_000).max(300_000).default(15_000),
+    session_ttl_ms: z.number().int().min(1_000).max(86_400_000).default(900_000),
+    max_workers: z.number().int().min(1).max(16_384).default(1_024),
+    max_locations: z.number().int().min(1).max(1_000_000).default(50_000),
+    default_prefill_tokens_per_second: z.number().positive().max(1_000_000).default(1_000),
+    queue_wait_ms_per_request: z.number().int().nonnegative().max(3_600_000).default(250),
+    pressure_penalty_ms: z.number().int().nonnegative().max(3_600_000).default(1_000),
+    cold_load_ms: z.number().int().nonnegative().max(3_600_000).default(5_000),
+  }).default({}),
   cache: z.object({
     // Includes semantic boundaries and automatic checkpoints. This is a
     // retained-state fairness limit, not a limit on conversation length.

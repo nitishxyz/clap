@@ -25,6 +25,11 @@ export { WORKER_LAUNCH_METADATA_VERSION, type LaunchRetentionLimits, type Worker
 export { classifyWorkerCrash, classifyWorkerExit, classifyWorkerExitPhase, type WorkerExitClassification,
   type WorkerExitPhase } from "./process/crash-classification";
 export { mapWorkerResultPayload } from "./process/result-mapper";
+export { CacheAwareRoutingDirectory, stableRoutingWorkerId,
+  type RoutingCandidate, type RoutingDecision, type RoutingDirectoryOptions,
+  type RoutingDirectorySnapshot, type RoutingLocation, type RoutingLocationKind,
+  type RoutingPrefix, type RoutingQuery, type RoutingWorkerHeartbeat,
+  type RoutingWorkerState } from "./routing";
 export * from "./residency";
 
 export function listBackends() {

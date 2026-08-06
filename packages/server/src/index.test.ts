@@ -87,6 +87,23 @@ describe("clap server", () => {
     expect(Array.isArray(body.gpus)).toBe(true);
   });
 
+  test("serves bounded cache-aware router diagnostics", async () => {
+    const response = await createServer().request("/clap/v1/router");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      enabled: true,
+      localReplicas: 1,
+      workers: [],
+      locations: [],
+      limits: {
+        workerTtlMs: 15_000,
+        locationTtlMs: 900_000,
+        maxWorkers: 1_024,
+        maxLocations: 50_000,
+      },
+    });
+  });
+
   test("dashboard reset is trusted-local or authenticated and leaves runtime loaded", async () => {
     const previousHome = process.env.CLAP_HOME;
     const previousRequire = process.env.CLAP_REQUIRE_API_KEY;

@@ -45,6 +45,24 @@ export type RequestTiming = {
   contendedPrefillQuantum?: number;
 };
 
+export type RoutingTelemetry = {
+  workerId: string;
+  workerGeneration: string;
+  reason: "session_locality" | "prefix_locality" | "lowest_cost" | "sticky_fallback";
+  directoryHit: boolean;
+  locationKind?: "session" | "system" | "tools" | "prefix";
+  matchedTokens: number;
+  promptTokens: number;
+  estimatedQueueWaitMs: number;
+  estimatedMissingPrefillMs: number;
+  estimatedPressurePenaltyMs: number;
+  estimatedColdLoadMs: number;
+  estimatedTotalCostMs: number;
+  candidateCount: number;
+  staleLocationsIgnored: number;
+  fallback?: "stale_directory_miss" | "worker_unavailable";
+};
+
 export type RequestDetail = {
   params: {
     temperature?: number;
@@ -114,6 +132,7 @@ export type RequestRecord = {
   cacheFallback?: string;
   finishReason?: string;
   cacheOutcome?: CacheOutcome;
+  routing?: RoutingTelemetry;
   timing?: RequestTiming;
   toolCalls?: number;
   messageCount?: number;
@@ -236,6 +255,7 @@ export type RequestFinish = {
 export type RequestHandle = {
   record: RequestRecord;
   capture(request: ChatLikeRequest): void;
+  routing(decision: RoutingTelemetry): void;
   phase(phase: RequestPhase): void;
   prefill(done: number, total: number): void;
   loaded(durationMs: number): void;
@@ -546,6 +566,9 @@ export class MetricsCollector {
           };
         }
       },
+      routing: (decision) => {
+        record.routing = decision;
+      },
       phase: (phase) => {
         if (phase === "queued") {
           if (queueStart === undefined) queueStart = Date.now();
@@ -726,6 +749,7 @@ export class MetricsCollector {
             errorCode: result.errorCode,
             structuredOutput: record.structuredOutput,
             cacheOutcome: record.cacheOutcome,
+            routing: record.routing,
             cache: {
               hit: result.cacheHit,
               missReason: result.cacheMissReason,

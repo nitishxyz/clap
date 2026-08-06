@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { CacheOutcome } from "./cache-outcome";
-import type { StructuredOutputFacts } from "./metrics";
+import type { RoutingTelemetry, StructuredOutputFacts } from "./metrics";
 
 export const CACHE_EVENT_SCHEMA_VERSION = 2;
 export const DEFAULT_CACHE_EVENT_MAX_BYTES = 32 * 1024 * 1024;
@@ -93,6 +93,7 @@ export type PersistedCacheDecision = {
   // Classification derived at finish time and persisted with the event. Older
   // records lack it; readers re-derive it reproducibly via classifyCacheOutcome.
   cacheOutcome?: CacheOutcome;
+  routing?: RoutingTelemetry;
   side?: boolean;
   priority?: "interactive" | "normal" | "background";
   cache?: {

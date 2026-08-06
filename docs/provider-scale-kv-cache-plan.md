@@ -529,10 +529,18 @@ low_watermark_basis_points = 8000
 enabled = false
 budget_bytes = 0
 
-[cache.routing]
-mode = "local"                       # local | sticky | cache_aware
-directory_ttl = "30s"
-max_locality_wait = "250ms"
+[routing]
+enabled = true
+node_id = "gpu-router-a"             # optional stable deployment identity
+local_replicas = 1                   # 1..8
+worker_ttl_ms = 15000
+session_ttl_ms = 900000
+max_workers = 1024
+max_locations = 50000
+default_prefill_tokens_per_second = 1000
+queue_wait_ms_per_request = 250
+pressure_penalty_ms = 1000
+cold_load_ms = 5000
 
 [cache.tenants.default]
 retained_device_bytes = 0
@@ -555,18 +563,21 @@ mandatory loop:
 3. review the diff and update this document's status/evidence
 4. commit the ready-to-test phase
 5. push the branch to GitHub
-6. create a fresh GPU pod for phases requiring CUDA validation
-7. connect through an interactive terminal/SSH session
-8. clone the branch from GitHub; do not copy an uncommitted working tree
-9. install Bun and declared system dependencies on the clean pod
-10. build Clap and the CUDA worker from source
-11. run correctness, saturation, cancellation, and telemetry probes
-12. record sanitized commands, hardware, model digest, configuration, and
+6. create a fresh GPU pod for phases requiring CUDA validation and explicitly
+   expose the Clap HTTP/dashboard port through the provider proxy
+7. start Clap on `0.0.0.0`, open the provider's public dashboard URL, and verify
+   the dashboard HTML and `/clap/v1/health` before workload testing
+8. connect through an interactive terminal/SSH session
+9. clone the branch from GitHub; do not copy an uncommitted working tree
+10. install Bun and declared system dependencies on the clean pod
+11. build Clap and the CUDA worker from source
+12. run correctness, saturation, cancellation, and telemetry probes
+13. record sanitized commands, hardware, model digest, configuration, and
     measurements in a checked-in validation artifact
-13. fix discovered issues locally, commit, push, and pull the updated branch on
+14. fix discovered issues locally, commit, push, and pull the updated branch on
     the pod before retesting
-14. only mark the phase complete after local and clean-pod gates pass
-15. stop and delete idle paid pods after artifacts are collected
+15. only mark the phase complete after local and clean-pod gates pass
+16. stop and delete idle paid pods after artifacts are collected
 
 Never commit secrets, pod SSH keys, signed URLs, API keys, or unsanitized prompt
 content. Pod creation and deletion IDs may be recorded only in ephemeral notes.
@@ -597,21 +608,22 @@ Gates:
 
 ### Phase 1 — Fleet-safe bounded sequence cache
 
-Status: IN PROGRESS; substantial local implementation complete and GPU
-validation intentionally deferred until the phase is consolidated. The branch
-now includes total retained-anchor and automatic-checkpoint caps per non-zero
-session, an optional policy-accounted byte cap that stays separate from
-measured physical memory, a 15-minute default idle TTL, explicit coordinator
-and adapter session release, physical-slot reconciliation in llama.cpp and
-MLX, ABI v6, lifecycle/publication telemetry, Prometheus series, and
-provider-shaped hard-ceiling churn tests. Defaults are four total anchors and
-two automatic checkpoints per session; the byte cap defaults to disabled until
-an operator supplies a model-appropriate budget. Session zero remains the
-explicitly unscoped/structural path and is governed by global and byte budgets.
-An external server/admin endpoint for explicit session release and a clean CUDA
-pod run remain before the phase is complete.
+Status: COMPLETE. Local verification and clean A100 CUDA validation completed
+on 2026-08-06 at implementation SHA
+`4c9168b3797dbdc1910af8a3cf3205416d5d2485`; the checked-in evidence commit is
+`cbda5871ed50edf5ab506e2ed51993823cdfe7dc`. The branch includes total
+retained-anchor and automatic-checkpoint caps per non-zero session, an optional
+policy-accounted byte cap that stays separate from measured physical memory, a
+15-minute default idle TTL, explicit coordinator and adapter session release,
+physical-slot reconciliation in llama.cpp and MLX, ABI v6,
+lifecycle/publication telemetry, Prometheus series, and provider-shaped
+hard-ceiling churn tests. Defaults are four total anchors and two automatic
+checkpoints per session; the byte cap defaults to disabled until an operator
+supplies a model-appropriate budget. Session zero remains the explicitly
+unscoped/structural path and is governed by global and byte budgets. An external
+server/admin endpoint for explicit session release remains outside Phase 1.
 
-Local evidence (2026-08-06, branch checkpoint pending):
+Local evidence (2026-08-06):
 
 - `bun run hardening:verify` passed end to end
 - 554 TypeScript tests passed
@@ -651,6 +663,32 @@ and predictability without requiring distributed infrastructure or custom
 kernels.
 
 ### Phase 2 — Cache-aware multi-worker routing
+
+Status: IMPLEMENTED LOCALLY; clean CUDA multi-replica validation pending. The
+initial deployment now has opaque stable worker IDs, generation-aware
+heartbeats, a bounded in-memory session/prefix location directory,
+compatibility isolation by physical model and keyed namespace, deterministic
+sticky fallback, and a cost model combining queue delay, missing prefill,
+pressure, and cold-load estimates. `[routing].local_replicas` enables one
+router process to manage up to eight local worker replicas per model. A failed
+pre-dispatch load invalidates that worker generation and retries another
+compatible replica; a stale location can only cause a local miss and
+recomputation. Request telemetry records the chosen worker, reason, cost
+components, candidate count, stale records, and fallback, persists it with
+cache decisions, exposes directory diagnostics at `/clap/v1/router`, and
+renders it in the dashboard request detail.
+
+Local evidence (2026-08-06, ready-to-test commit pending):
+
+- `bun run hardening:verify` passed end to end
+- 566 TypeScript tests passed, including six deterministic routing-directory
+  tests and server/dashboard integration coverage
+- all Rust, native llama.cpp, MLX, worker-protocol, bundle, generated-artifact,
+  ownership, structure, capability, memory-honesty, and documentation gates
+  passed
+- `scripts/provider-routing-probe.py` is syntax-checked and ready to verify two
+  live replicas, exact-session locality, overload recomputation, restart
+  invalidation, the router diagnostics endpoint, and the public dashboard
 
 Deliverables:
 
@@ -1027,10 +1065,11 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Begin Phase 2 with cache-aware routing metadata and cost decisions while
-preserving the validated Phase 1 bounds. Use keyed compatibility identities,
-soft-state worker locations, queue delay, measured prefill cost, and retention
-pressure to choose a worker; stale or missing metadata must fall back to fresh
-prefill. Do not begin a custom llama.cpp block extension until Phase 2 routing
-measurements show that sequence-cache density, rather than placement, is the
-next material bottleneck.
+Commit and push the ready-to-test Phase 2 checkpoint, then validate a clean
+clone with two local CUDA worker replicas on an A100-class pod. Expose the Clap
+HTTP port through the provider proxy, verify the public dashboard before
+running `scripts/provider-routing-probe.py`, record routing and GPU evidence,
+and delete the pod after the evidence commit is synchronized locally. Do not
+begin a custom llama.cpp block extension until Phase 2 routing measurements
+show that sequence-cache density, rather than placement, is the next material
+bottleneck.

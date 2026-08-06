@@ -163,6 +163,23 @@ export type DashboardRequest = {
   // Evidence-based classification from the server. Preserve raw telemetry
   // (cacheHit/reusedTokens/etc.) separately; never invent a category client-side.
   cacheOutcome?: CacheOutcome;
+  routing?: {
+    workerId: string;
+    workerGeneration: string;
+    reason: "session_locality" | "prefix_locality" | "lowest_cost" | "sticky_fallback";
+    directoryHit: boolean;
+    locationKind?: "session" | "system" | "tools" | "prefix";
+    matchedTokens: number;
+    promptTokens: number;
+    estimatedQueueWaitMs: number;
+    estimatedMissingPrefillMs: number;
+    estimatedPressurePenaltyMs: number;
+    estimatedColdLoadMs: number;
+    estimatedTotalCostMs: number;
+    candidateCount: number;
+    staleLocationsIgnored: number;
+    fallback?: "stale_directory_miss" | "worker_unavailable";
+  };
   timing?: {
     receivedToAdmittedMs?: number;
     templateTokenizeMs?: number;

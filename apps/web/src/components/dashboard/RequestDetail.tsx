@@ -27,6 +27,36 @@ function fmtDecisionLatency(us: number): string {
 
 const unavailable = <span className="text-muted">unavailable</span>;
 
+export function RoutingDecisionSection({ record }: { record: DashboardRequest }) {
+  const routing = record.routing;
+  if (!routing) return null;
+  return (
+    <div>
+      <div className="text-[0.68rem] uppercase tracking-[0.08em] text-muted">routing decision</div>
+      <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="worker"><span className="font-mono">{routing.workerId}</span></Field>
+        <Field label="reason">{routing.reason.replaceAll("_", " ")}</Field>
+        <Field label="directory">
+          {routing.directoryHit
+            ? `${routing.locationKind ?? "prefix"} · ${fmtTokens(routing.matchedTokens)} tok`
+            : "no compatible location"}
+        </Field>
+        <Field label="estimated total">{fmtDuration(routing.estimatedTotalCostMs)}</Field>
+        <Field label="queue / missing prefill">
+          {fmtDuration(routing.estimatedQueueWaitMs)} / {fmtDuration(routing.estimatedMissingPrefillMs)}
+        </Field>
+        <Field label="pressure / cold load">
+          {fmtDuration(routing.estimatedPressurePenaltyMs)} / {fmtDuration(routing.estimatedColdLoadMs)}
+        </Field>
+        <Field label="candidates">{routing.candidateCount}</Field>
+        <Field label="stale / fallback">
+          {routing.staleLocationsIgnored}{routing.fallback ? ` · ${routing.fallback.replaceAll("_", " ")}` : ""}
+        </Field>
+      </div>
+    </div>
+  );
+}
+
 // Cache outcome is reported independently of request intent (side vs primary)
 // and of final status: cancelled/error requests may still carry the decision.
 export function CacheDecisionSection({ record }: { record: DashboardRequest }) {
@@ -353,6 +383,7 @@ export function RequestDetailModal({ id, onClose }: { id: string; onClose: () =>
               </Field>
             </div>
 
+            <RoutingDecisionSection record={record} />
             <CacheDecisionSection record={record} />
 
             {record.error ? (

@@ -87,6 +87,45 @@ describe("automatic checkpoint config", () => {
   });
 });
 
+describe("cache-aware routing config", () => {
+  test("defaults to one safe local replica with bounded soft state", () => {
+    expect(ClapConfigSchema.parse({}).routing).toEqual({
+      enabled: true,
+      local_replicas: 1,
+      worker_ttl_ms: 15_000,
+      session_ttl_ms: 900_000,
+      max_workers: 1_024,
+      max_locations: 50_000,
+      default_prefill_tokens_per_second: 1_000,
+      queue_wait_ms_per_request: 250,
+      pressure_penalty_ms: 1_000,
+      cold_load_ms: 5_000,
+    });
+  });
+
+  test("validates replica and directory bounds", () => {
+    expect(ClapConfigSchema.parse({ routing: {
+      node_id: "gpu-router-a",
+      local_replicas: 4,
+      worker_ttl_ms: 30_000,
+      session_ttl_ms: 120_000,
+      max_workers: 64,
+      max_locations: 10_000,
+    } }).routing).toMatchObject({
+      node_id: "gpu-router-a",
+      local_replicas: 4,
+      worker_ttl_ms: 30_000,
+      session_ttl_ms: 120_000,
+      max_workers: 64,
+      max_locations: 10_000,
+    });
+    expect(() => ClapConfigSchema.parse({ routing: { local_replicas: 0 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ routing: { local_replicas: 9 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ routing: { worker_ttl_ms: 999 } })).toThrow();
+    expect(() => ClapConfigSchema.parse({ routing: { max_locations: 0 } })).toThrow();
+  });
+});
+
 describe("prefill latency controls", () => {
   test("maps [llama].prefill_budget and [mlx].prefill_quantum to worker env", () => {
     delete process.env.CLAP_LLAMA_PREFILL_BUDGET;

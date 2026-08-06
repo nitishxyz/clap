@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CacheOutcome, CacheOutcomeCategory, DashboardRequest } from "@/lib/api";
-import { CacheDecisionSection } from "./RequestDetail";
+import { CacheDecisionSection, RoutingDecisionSection } from "./RequestDetail";
 import {
   CACHE_OUTCOME_LEGEND,
   cacheOutcomeLabel,
@@ -286,6 +286,39 @@ describe("cacheReusePercent", () => {
     expect(cacheReusePercent({ reusedTokens: 64, promptTokens: 0 })).toBeUndefined();
     expect(cacheReusePercent({ reusedTokens: 64 })).toBeUndefined();
     expect(cacheReusePercent({ promptTokens: 74 })).toBeUndefined();
+  });
+});
+
+describe("routing decision section", () => {
+  test("renders worker selection costs and stale fallback", () => {
+    const html = renderToStaticMarkup(<RoutingDecisionSection record={{
+      ...base,
+      routing: {
+        workerId: "w_abc123",
+        workerGeneration: "launch-2",
+        reason: "session_locality",
+        directoryHit: true,
+        locationKind: "session",
+        matchedTokens: 8_192,
+        promptTokens: 8_500,
+        estimatedQueueWaitMs: 20,
+        estimatedMissingPrefillMs: 40,
+        estimatedPressurePenaltyMs: 5,
+        estimatedColdLoadMs: 0,
+        estimatedTotalCostMs: 65,
+        candidateCount: 2,
+        staleLocationsIgnored: 1,
+        fallback: "stale_directory_miss",
+      },
+    }} />);
+    expect(html).toContain("w_abc123");
+    expect(html).toContain("session locality");
+    expect(html).toContain("8192 tok");
+    expect(html).toContain("stale directory miss");
+  });
+
+  test("omits routing details for historical records without telemetry", () => {
+    expect(renderToStaticMarkup(<RoutingDecisionSection record={base} />)).toBe("");
   });
 });
 

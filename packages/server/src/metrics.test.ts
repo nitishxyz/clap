@@ -330,6 +330,36 @@ describe("metrics queue accounting", () => {
     expect(handle.record.sessionFingerprint).toBeUndefined();
   });
 
+  test("records and persists cache-aware routing decisions", () => {
+    const store = new CacheEventStore({ directory: tempDir() });
+    const metrics = new MetricsCollector(store);
+    const handle = metrics.start("model-a", "/v1/chat/completions", false);
+    handle.capture({ messages: [{ role: "user", content: "hello" }], cache: { session: "s1" } });
+    handle.routing({
+      workerId: "w_123",
+      workerGeneration: "launch-1",
+      reason: "session_locality",
+      directoryHit: true,
+      locationKind: "session",
+      matchedTokens: 1_024,
+      promptTokens: 1_100,
+      estimatedQueueWaitMs: 20,
+      estimatedMissingPrefillMs: 76,
+      estimatedPressurePenaltyMs: 5,
+      estimatedColdLoadMs: 0,
+      estimatedTotalCostMs: 101,
+      candidateCount: 2,
+      staleLocationsIgnored: 0,
+    });
+    handle.finish({ status: "ok", workerLaunchId: "launch-1" });
+    expect(handle.record.routing).toMatchObject({
+      workerId: "w_123",
+      reason: "session_locality",
+      matchedTokens: 1_024,
+    });
+    expect(store.get(handle.record.id)?.routing).toEqual(handle.record.routing);
+  });
+
   test("records critical pressure evictions with a safe reason", () => {
     const metrics = new MetricsCollector();
     metrics.residencyEvent({
