@@ -100,8 +100,13 @@ export const ClapConfigSchema = z.object({
     // Includes semantic boundaries and automatic checkpoints. This is a
     // retained-state fairness limit, not a limit on conversation length.
     max_anchors_per_session: z.number().int().min(0).max(256).default(4),
+    // Optional hard policy budget. Zero derives no additional per-session
+    // byte cap; estimated llama.cpp costs remain distinct from measured RAM.
+    max_anchor_bytes_per_session: z.number().int().nonnegative().default(0),
+    session_idle_ttl_ms: z.number().int().nonnegative().default(900_000),
     checkpoints: CheckpointConfigSchema.default({}),
-  }).default({ max_anchors_per_session: 4, checkpoints: {} }),
+  }).default({ max_anchors_per_session: 4, max_anchor_bytes_per_session: 0,
+    session_idle_ttl_ms: 900_000, checkpoints: {} }),
   telemetry: z.object({
     cache_decisions_enabled: z.boolean().optional().default(true),
     cache_decisions_max_mib: z.number().int().min(1).max(1024).optional().default(32),
@@ -243,6 +248,8 @@ export function applyConfigToEnv(config: ClapConfig): void {
   const checkpoints = config.cache.checkpoints;
   const checkpointEnv: Record<string, string> = {
     CLAP_CACHE_MAX_ANCHORS_PER_SESSION: String(config.cache.max_anchors_per_session),
+    CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION: String(config.cache.max_anchor_bytes_per_session),
+    CLAP_CACHE_SESSION_IDLE_TTL_MS: String(config.cache.session_idle_ttl_ms),
     CLAP_CACHE_CHECKPOINTS_ENABLED: checkpoints.enabled ? "1" : "0",
     CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS: String(checkpoints.minimum_tokens),
     CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS: String(checkpoints.interval_tokens),

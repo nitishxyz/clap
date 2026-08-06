@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define CLAP_CACHE_ABI_VERSION 4u
+#define CLAP_CACHE_ABI_VERSION 6u
 
 #define CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM (UINT64_C(1) << 0)
 #define CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH (UINT64_C(1) << 1)
@@ -90,6 +90,8 @@ typedef struct clap_cache_config {
   /* Zero disables the corresponding per-session retained-anchor cap. */
   uint32_t max_anchors_per_session;
   uint32_t automatic_checkpoint_max_per_session;
+  uint64_t max_anchor_bytes_per_session;
+  uint64_t session_idle_ttl_ms;
 } clap_cache_config_t;
 
 typedef struct clap_cache_retention_config {
@@ -242,6 +244,17 @@ typedef struct clap_cache_telemetry {
   uint32_t write_leases;
   uint64_t prefix_nodes;
   uint64_t physical_bytes;
+  uint64_t session_policy_evictions;
+  uint64_t session_budget_rejections;
+  uint64_t anchor_publications;
+  uint64_t anchor_publication_skips;
+  uint64_t expired_slots;
+  uint64_t expired_accounted_bytes;
+  uint64_t released_session_slots;
+  uint64_t released_session_accounted_bytes;
+  uint64_t anchor_accounted_bytes;
+  uint64_t max_anchor_bytes_per_session;
+  uint64_t session_idle_ttl_ms;
 } clap_cache_telemetry_t;
 
 typedef struct clap_cache_retention_telemetry {
@@ -279,8 +292,10 @@ typedef struct clap_cache_slot_info {
   uint32_t scope;
   uint64_t session;
   uint64_t last_used;
+  uint64_t last_used_ms;
   uint64_t reuse_count;
   uint64_t physical_bytes;
+  uint64_t accounted_bytes;
 } clap_cache_slot_info_t;
 
 clap_cache_status_t clap_cache_create(const clap_cache_config_t *config,
@@ -337,6 +352,11 @@ clap_cache_status_t clap_cache_confirm(clap_cache_t *cache,
 clap_cache_status_t clap_cache_set_busy(clap_cache_t *cache,
                                         clap_cache_slot_ref_t slot,
                                         uint8_t busy);
+clap_cache_status_t clap_cache_expire_idle(clap_cache_t *cache,
+                                           uint32_t *out_expired);
+clap_cache_status_t clap_cache_release_session(
+    clap_cache_t *cache, const uint8_t namespace_fingerprint[32],
+    uint64_t session, uint32_t *out_released);
 clap_cache_status_t clap_cache_register_slot(clap_cache_t *cache,
                                               clap_cache_slot_ref_t *out_slot);
 clap_cache_status_t clap_cache_set_anchor_protected(

@@ -197,7 +197,9 @@ class Coordinator {
               uint32_t checkpoint_budget_basis_points = 2500,
               uint64_t checkpoint_budget_bytes = 0,
               uint32_t max_anchors_per_session = 0,
-              uint32_t checkpoint_max_per_session = 0)
+              uint32_t checkpoint_max_per_session = 0,
+              uint64_t max_anchor_bytes_per_session = 0,
+              uint64_t session_idle_ttl_ms = 0)
       : slot_count_(slots) {
     clap_cache_config_t config{};
     config.version = CLAP_CACHE_ABI_VERSION;
@@ -214,6 +216,8 @@ class Coordinator {
     config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
     config.max_anchors_per_session = max_anchors_per_session;
     config.automatic_checkpoint_max_per_session = checkpoint_max_per_session;
+    config.max_anchor_bytes_per_session = max_anchor_bytes_per_session;
+    config.session_idle_ttl_ms = session_idle_ttl_ms;
     clap_cache_retention_config_t retention{};
     retention.version = CLAP_CACHE_ABI_VERSION;
     retention.struct_size = sizeof(retention);
@@ -241,7 +245,8 @@ class Coordinator {
             uint64_t capabilities, uint64_t output_reserve,
             uint32_t result_state = CLAP_CACHE_SLOT_SESSION,
             const std::vector<uint8_t>& supplied_slot_capabilities = {},
-            const std::vector<uint64_t>& stable_boundaries = {}) {
+            const std::vector<uint64_t>& stable_boundaries = {},
+            uint64_t estimated_bytes_per_token = 0) {
     clap_cache_labels_t labels{};
     labels.version = CLAP_CACHE_ABI_VERSION;
     labels.struct_size = sizeof(labels);
@@ -276,6 +281,7 @@ class Coordinator {
     request.stable_boundaries = stable_boundaries.data();
     request.stable_boundaries_len = stable_boundaries.size();
     request.output_reserve = output_reserve;
+    request.estimated_bytes_per_token = estimated_bytes_per_token;
     request.result_state = result_state;
 
     clap_cache_plan_t* plan = nullptr;
@@ -302,6 +308,20 @@ class Coordinator {
           clap_cache_advance(handle_, slot, tokens, count, state, busy ? 1 : 0,
                              physical_bytes, &generation));
     return generation;
+  }
+
+  uint32_t expire_idle() {
+    uint32_t expired = 0;
+    check("clap_cache_expire_idle", clap_cache_expire_idle(handle_, &expired));
+    return expired;
+  }
+
+  uint32_t release_session(const Identity& identity) {
+    uint32_t released = 0;
+    check("clap_cache_release_session",
+          clap_cache_release_session(handle_, identity.name_space.data(),
+                                     identity.session, &released));
+    return released;
   }
 
   void set_busy(clap_cache_slot_ref_t slot, bool busy) {

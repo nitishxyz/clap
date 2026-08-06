@@ -1188,6 +1188,50 @@
                         "evictionCount": {
                           "type": "integer",
                           "minimum": 0
+                        },
+                        "sessionPolicyEvictions": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "sessionBudgetRejections": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "anchorPublications": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "anchorPublicationSkips": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "expiredSlots": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "expiredAccountedBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "releasedSessionSlots": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "releasedSessionAccountedBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "anchorAccountedBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "maxAnchorBytesPerSession": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "sessionIdleTtlMs": {
+                          "type": "integer",
+                          "minimum": 0
                         }
                       },
                       "required": [
@@ -2032,6 +2076,50 @@
                       "evictionCount": {
                         "type": "integer",
                         "minimum": 0
+                      },
+                      "sessionPolicyEvictions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionBudgetRejections": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorPublications": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorPublicationSkips": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "expiredSlots": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "expiredAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "releasedSessionSlots": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "releasedSessionAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "maxAnchorBytesPerSession": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionIdleTtlMs": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     },
                     "required": [
@@ -2862,6 +2950,50 @@
                         "type": "string"
                       },
                       "evictionCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionPolicyEvictions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionBudgetRejections": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorPublications": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorPublicationSkips": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "expiredSlots": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "expiredAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "releasedSessionSlots": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "releasedSessionAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "anchorAccountedBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "maxAnchorBytesPerSession": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sessionIdleTtlMs": {
                         "type": "integer",
                         "minimum": 0
                       }
@@ -7934,6 +8066,50 @@
                                   "evictionCount": {
                                     "type": "integer",
                                     "minimum": 0
+                                  },
+                                  "sessionPolicyEvictions": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "sessionBudgetRejections": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "anchorPublications": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "anchorPublicationSkips": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "expiredSlots": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "expiredAccountedBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "releasedSessionSlots": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "releasedSessionAccountedBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "anchorAccountedBytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "maxAnchorBytesPerSession": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "sessionIdleTtlMs": {
+                                    "type": "integer",
+                                    "minimum": 0
                                   }
                                 },
                                 "required": [
@@ -9393,6 +9569,50 @@
                                 "evictionCount": {
                                   "type": "integer",
                                   "minimum": 0
+                                },
+                                "sessionPolicyEvictions": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionBudgetRejections": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorPublications": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorPublicationSkips": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "expiredSlots": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "expiredAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "releasedSessionSlots": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "releasedSessionAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "maxAnchorBytesPerSession": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionIdleTtlMs": {
+                                  "type": "integer",
+                                  "minimum": 0
                                 }
                               },
                               "required": [
@@ -10298,6 +10518,50 @@
                                   "type": "string"
                                 },
                                 "evictionCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionPolicyEvictions": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionBudgetRejections": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorPublications": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorPublicationSkips": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "expiredSlots": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "expiredAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "releasedSessionSlots": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "releasedSessionAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "anchorAccountedBytes": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "maxAnchorBytesPerSession": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "sessionIdleTtlMs": {
                                   "type": "integer",
                                   "minimum": 0
                                 }

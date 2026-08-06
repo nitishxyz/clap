@@ -16,8 +16,10 @@ pub(crate) struct Slot {
     pub(crate) writer: Option<PlanId>,
     pub(crate) labels: Labels,
     pub(crate) last_used: u64,
+    pub(crate) last_used_ms: u64,
     pub(crate) reuse_count: u64,
     pub(crate) physical_bytes: u64,
+    pub(crate) accounted_bytes: u64,
     pub(crate) saved_us: u64,
     pub(crate) protected: bool,
 }
@@ -35,8 +37,10 @@ impl Slot {
             writer: None,
             labels: Labels::default(),
             last_used: 0,
+            last_used_ms: 0,
             reuse_count: 0,
             physical_bytes: 0,
+            accounted_bytes: 0,
             saved_us: 0,
             protected: false,
         }

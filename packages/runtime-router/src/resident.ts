@@ -125,6 +125,17 @@ export type ResidentMlxRetention = {
   hardCeiling: number;
   evictionReason?: string;
   evictionCount: number;
+  sessionPolicyEvictions?: number;
+  sessionBudgetRejections?: number;
+  anchorPublications?: number;
+  anchorPublicationSkips?: number;
+  expiredSlots?: number;
+  expiredAccountedBytes?: number;
+  releasedSessionSlots?: number;
+  releasedSessionAccountedBytes?: number;
+  anchorAccountedBytes?: number;
+  maxAnchorBytesPerSession?: number;
+  sessionIdleTtlMs?: number;
 };
 
 export type ResidentUsage = {
@@ -350,6 +361,17 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
   const lowWatermarkBytes = integer("low_watermark_bytes");
   const hardCeiling = integer("hard_ceiling");
   const evictionCount = integer("eviction_count");
+  const sessionPolicyEvictions = integer("session_policy_evictions");
+  const sessionBudgetRejections = integer("session_budget_rejections");
+  const anchorPublications = integer("anchor_publications");
+  const anchorPublicationSkips = integer("anchor_publication_skips");
+  const expiredSlots = integer("expired_slots");
+  const expiredAccountedBytes = integer("expired_accounted_bytes");
+  const releasedSessionSlots = integer("released_session_slots");
+  const releasedSessionAccountedBytes = integer("released_session_accounted_bytes");
+  const anchorAccountedBytes = integer("anchor_accounted_bytes");
+  const maxAnchorBytesPerSession = integer("max_anchor_bytes_per_session");
+  const sessionIdleTtlMs = integer("session_idle_ttl_ms");
   const values = [maxActive, active, retainedTotal, retainedSessions, retainedAnchors, retainedBytes,
     sessionBytes, anchorBytes, budgetBytes, highWatermarkBytes, lowWatermarkBytes, hardCeiling, evictionCount,
     selectedMax, backendCeiling, hardwareCeiling, modelCeiling, memoryCeiling];
@@ -394,6 +416,17 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     ...(automaticCheckpointMax !== undefined ? { automaticCheckpointMax } : {}),
     lowWatermarkBytes: lowWatermarkBytes!, underPressure: raw.under_pressure, hardCeiling: hardCeiling!,
     ...(evictionReason ? { evictionReason } : {}), evictionCount: evictionCount!,
+    ...(sessionPolicyEvictions !== undefined ? { sessionPolicyEvictions } : {}),
+    ...(sessionBudgetRejections !== undefined ? { sessionBudgetRejections } : {}),
+    ...(anchorPublications !== undefined ? { anchorPublications } : {}),
+    ...(anchorPublicationSkips !== undefined ? { anchorPublicationSkips } : {}),
+    ...(expiredSlots !== undefined ? { expiredSlots } : {}),
+    ...(expiredAccountedBytes !== undefined ? { expiredAccountedBytes } : {}),
+    ...(releasedSessionSlots !== undefined ? { releasedSessionSlots } : {}),
+    ...(releasedSessionAccountedBytes !== undefined ? { releasedSessionAccountedBytes } : {}),
+    ...(anchorAccountedBytes !== undefined ? { anchorAccountedBytes } : {}),
+    ...(maxAnchorBytesPerSession !== undefined ? { maxAnchorBytesPerSession } : {}),
+    ...(sessionIdleTtlMs !== undefined ? { sessionIdleTtlMs } : {}),
   };
 }
 

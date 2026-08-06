@@ -29,6 +29,8 @@ fn manager(slots: u32) -> CacheManager {
             logical_token_capacity: usize::MAX,
             max_anchors: slots,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(slots),
@@ -60,6 +62,7 @@ fn request<'a>(
         slot_capabilities: None,
         output_reserve: 0,
         estimated_bytes_per_token: 16,
+        now_ms: 1,
         result_state: SlotState::Session,
     }
 }
@@ -337,6 +340,8 @@ fn exact_anchor_creation_is_a_namespace_scoped_noop_and_capacity_is_replaceable(
             logical_token_capacity: usize::MAX,
             max_anchors: 1,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -388,6 +393,8 @@ fn long_harness_output_reserve_does_not_discard_a_legal_donor() {
             logical_token_capacity: 128,
             max_anchors: 2,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -903,6 +910,8 @@ fn deterministic_value_eviction_protects_anchor_and_interactive_session() {
             logical_token_capacity: 7,
             max_anchors: 1,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -1248,6 +1257,8 @@ fn automatic_checkpoint_budget_admits_a_fresh_namespace_baseline() {
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 target_interval_tokens: 2_048,
                 max_checkpoints: 8,
@@ -1301,6 +1312,8 @@ fn nontrimmable_full_donors_leave_deep_checkpoint_executable_across_projects() {
             logical_token_capacity: usize::MAX,
             max_anchors: 12,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 target_interval_tokens: 2_048,
                 max_checkpoints: 8,
@@ -1429,6 +1442,8 @@ fn impossible_automatic_checkpoint_budget_skips_without_failing_generation() {
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: checkpoints,
         },
         RetentionConfig {
@@ -1449,6 +1464,7 @@ fn impossible_automatic_checkpoint_budget_skips_without_failing_generation() {
     incoming.estimated_bytes_per_token = 16;
     let plan = cache.plan(incoming).unwrap();
     assert!(plan.anchor_boundaries.is_empty());
+    assert!(cache.telemetry().anchor_publication_skips > 0);
     cache.abort(plan.id).unwrap();
 }
 
@@ -1461,6 +1477,8 @@ fn anchor_pressure_keeps_structural_and_reused_project_boundaries() {
             logical_token_capacity: usize::MAX,
             max_anchors: 3,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(4),
@@ -1509,6 +1527,8 @@ fn full_anchor_budget_advances_to_the_newest_same_session_boundary() {
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 enabled: false,
                 ..Default::default()
@@ -1569,6 +1589,8 @@ fn per_session_anchor_limit_recycles_that_session_before_using_empty_capacity() 
             logical_token_capacity: usize::MAX,
             max_anchors: 4,
             max_anchors_per_session: 2,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 enabled: false,
                 ..Default::default()
@@ -1624,6 +1646,8 @@ fn per_session_checkpoint_limit_stops_optional_checkpoint_publication() {
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
             max_anchors_per_session: 4,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 target_interval_tokens: 2_048,
                 max_checkpoints: 8,
@@ -1663,6 +1687,145 @@ fn per_session_checkpoint_limit_stops_optional_checkpoint_publication() {
         .unwrap();
     assert_eq!(other_session.anchor_boundaries.len(), 2);
     cache.abort(other_session.id).unwrap();
+}
+
+#[test]
+fn per_session_byte_budget_uses_accounted_cost_without_faking_physical_bytes() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 4,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 4,
+            max_anchors_per_session: 4,
+            max_anchor_bytes_per_session: 128,
+            session_idle_ttl_ms: 0,
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        },
+        fixed_retention(4),
+    )
+    .unwrap();
+    let first_tokens = [1, 2, 3, 4];
+    let mut first_request = request(&first_tokens, namespace(1), 7, 0);
+    first_request.result_state = SlotState::Anchor;
+    let first = cache.plan(first_request).unwrap();
+    cache
+        .commit(
+            first.id,
+            Commit {
+                resident_tokens: first_tokens.len(),
+                actual_state: SlotState::Anchor,
+                physical_bytes: 0,
+                prefill_us_saved: 0,
+            },
+        )
+        .unwrap();
+    let first_snapshot = cache.slot(first.target.slot).unwrap();
+    assert_eq!(first_snapshot.physical_bytes, 0);
+    assert_eq!(first_snapshot.accounted_bytes, 64);
+    assert_eq!(cache.telemetry().anchor_publications, 1);
+
+    let second_tokens = [1, 2, 3, 4, 5, 6];
+    let mut second_request = request(&second_tokens, namespace(1), 7, 0);
+    second_request.result_state = SlotState::Anchor;
+    let second = cache.plan(second_request).unwrap();
+    assert!(second
+        .evictions
+        .iter()
+        .any(|victim| victim.slot == first.target.slot));
+    cache.abort(second.id).unwrap();
+
+    let oversized_tokens = [9; 9];
+    let mut oversized_request = request(&oversized_tokens, namespace(1), 8, 0);
+    oversized_request.result_state = SlotState::Anchor;
+    assert_eq!(cache.plan(oversized_request), Err(Error::NoCapacity));
+    assert_eq!(cache.telemetry().session_budget_rejections, 1);
+}
+
+#[test]
+fn idle_expiry_and_explicit_release_preserve_busy_and_other_sessions() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 6,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 6,
+            max_anchors_per_session: 4,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 100,
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        },
+        fixed_retention(6),
+    )
+    .unwrap();
+    let old_tokens = [1, 2, 3, 4];
+    let mut old_request = request(&old_tokens, namespace(1), 7, 0);
+    old_request.now_ms = 10;
+    let old = cache.plan(old_request).unwrap();
+    commit_idle(&mut cache, &old, old_tokens.len(), SlotState::Session);
+
+    let anchor_tokens = [1, 2, 3];
+    let mut anchor_request = request(&anchor_tokens, namespace(1), 7, 0);
+    anchor_request.now_ms = 20;
+    anchor_request.result_state = SlotState::Anchor;
+    let anchor = cache.plan(anchor_request).unwrap();
+    commit_idle(&mut cache, &anchor, anchor_tokens.len(), SlotState::Anchor);
+
+    let busy_tokens = [5, 6, 7];
+    let mut busy_request = request(&busy_tokens, namespace(1), 7, 0);
+    busy_request.now_ms = 30;
+    let busy = cache.plan(busy_request).unwrap();
+    cache
+        .commit(
+            busy.id,
+            Commit {
+                resident_tokens: busy_tokens.len(),
+                actual_state: SlotState::Session,
+                physical_bytes: 48,
+                prefill_us_saved: 0,
+            },
+        )
+        .unwrap();
+
+    let other_tokens = [90, 91, 92];
+    let mut other_request = request(&other_tokens, namespace(2), 8, 0);
+    other_request.now_ms = 190;
+    let other = cache.plan(other_request).unwrap();
+    commit_idle(&mut cache, &other, other_tokens.len(), SlotState::Session);
+
+    let expired = cache.expire_idle(200);
+    assert!(expired.contains(&old.target.slot));
+    assert!(expired.contains(&anchor.target.slot));
+    assert!(!expired.contains(&busy.target.slot));
+    assert!(!expired.contains(&other.target.slot));
+    assert_eq!(cache.telemetry().expired_slots, 2);
+    assert_eq!(cache.telemetry().expired_accounted_bytes, 112);
+
+    let busy_snapshot = cache.slot(busy.target.slot).unwrap();
+    cache
+        .set_busy(busy_snapshot.id, busy_snapshot.generation, false)
+        .unwrap();
+    cache
+        .touch(busy_snapshot.id, busy_snapshot.generation, 205)
+        .unwrap();
+    let released = cache.release_session(namespace(1), 7).unwrap();
+    assert_eq!(released, [busy.target.slot]);
+    assert_eq!(cache.telemetry().released_session_slots, 1);
+    assert_eq!(cache.telemetry().released_session_accounted_bytes, 48);
+    assert_eq!(
+        cache.slot(other.target.slot).unwrap().state,
+        SlotState::Session
+    );
+    assert_eq!(
+        cache.release_session(namespace(1), 0),
+        Err(Error::InvalidArgument)
+    );
 }
 
 #[test]

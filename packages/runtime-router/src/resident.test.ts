@@ -127,6 +127,12 @@ describe("worker retention telemetry", () => {
       anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
       high_watermark_bytes: 90_000, low_watermark_bytes: 75_000, under_pressure: false,
       hard_ceiling: 256, eviction_reason: "byte_pressure", eviction_count: 7,
+      session_policy_evictions: 8, session_budget_rejections: 9,
+      anchor_publications: 10, anchor_publication_skips: 11,
+      expired_slots: 12, expired_accounted_bytes: 13,
+      released_session_slots: 14, released_session_accounted_bytes: 15,
+      anchor_accounted_bytes: 16, max_anchor_bytes_per_session: 17,
+      session_idle_ttl_ms: 18,
     })).toEqual({
       maxActive: 4, queued: 3, previousMaxActive: 2,
       lastAdjustmentReason: "global_headroom_available", lastAdjustmentAt: "2026-07-20T11:29:00.000Z",
@@ -141,6 +147,11 @@ describe("worker retention telemetry", () => {
       anchorBytesSource: "estimated", anchorBytesBasis: "cache_components",
       highWatermarkBytes: 90_000, lowWatermarkBytes: 75_000, underPressure: false,
       hardCeiling: 256, evictionReason: "byte_pressure", evictionCount: 7,
+      sessionPolicyEvictions: 8, sessionBudgetRejections: 9,
+      anchorPublications: 10, anchorPublicationSkips: 11,
+      expiredSlots: 12, expiredAccountedBytes: 13,
+      releasedSessionSlots: 14, releasedSessionAccountedBytes: 15,
+      anchorAccountedBytes: 16, maxAnchorBytesPerSession: 17, sessionIdleTtlMs: 18,
     });
   });
 

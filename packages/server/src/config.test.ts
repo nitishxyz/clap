@@ -3,6 +3,8 @@ import { applyConfigToEnv, ClapConfigSchema } from "./config";
 
 const names = [
   "CLAP_CACHE_MAX_ANCHORS_PER_SESSION",
+  "CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION",
+  "CLAP_CACHE_SESSION_IDLE_TTL_MS",
   "CLAP_CACHE_CHECKPOINTS_ENABLED",
   "CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS",
   "CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS",
@@ -31,6 +33,8 @@ describe("automatic checkpoint config", () => {
   test("has explicit safe defaults", () => {
     const config = ClapConfigSchema.parse({});
     expect(config.cache.max_anchors_per_session).toBe(4);
+    expect(config.cache.max_anchor_bytes_per_session).toBe(0);
+    expect(config.cache.session_idle_ttl_ms).toBe(900_000);
     expect(config.cache.checkpoints).toEqual({
       enabled: true,
       minimum_tokens: 2_048,
@@ -48,6 +52,8 @@ describe("automatic checkpoint config", () => {
     for (const name of names) delete process.env[name];
     const config = ClapConfigSchema.parse({ cache: {
       max_anchors_per_session: 5,
+      max_anchor_bytes_per_session: 67_108_864,
+      session_idle_ttl_ms: 120_000,
       checkpoints: {
       enabled: false,
       minimum_tokens: 4_096,
@@ -59,6 +65,8 @@ describe("automatic checkpoint config", () => {
     } } });
     applyConfigToEnv(config);
     expect(process.env.CLAP_CACHE_MAX_ANCHORS_PER_SESSION).toBe("5");
+    expect(process.env.CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION).toBe("67108864");
+    expect(process.env.CLAP_CACHE_SESSION_IDLE_TTL_MS).toBe("120000");
     expect(process.env.CLAP_CACHE_CHECKPOINTS_ENABLED).toBe("0");
     expect(process.env.CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS).toBe("4096");
     expect(process.env.CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS).toBe("1024");

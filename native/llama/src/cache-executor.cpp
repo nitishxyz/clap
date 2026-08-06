@@ -70,7 +70,8 @@ uint64_t CacheLease::reset_for_retry() {
 
 CacheExecutor::CacheExecutor(CacheExecutorConfig config,
                              std::unique_ptr<PhysicalCacheBackend> backend)
-    : backend_(std::move(backend)) {
+    : backend_(std::move(backend)),
+      estimated_bytes_per_token_(config.estimated_bytes_per_token) {
   if (!backend_) throw std::invalid_argument("physical cache backend is required");
   if (config.slot_count == 0) throw std::invalid_argument("cache slot count must be positive");
   coordinator_ = std::make_unique<clap::llama_cache::Coordinator>(
@@ -79,7 +80,8 @@ CacheExecutor::CacheExecutor(CacheExecutorConfig config,
       config.checkpoint_minimum_tokens, config.checkpoint_interval_tokens,
       config.checkpoint_max, config.checkpoint_budget_basis_points,
       config.checkpoint_budget_bytes, config.max_anchors_per_session,
-      config.checkpoint_max_per_session);
+      config.checkpoint_max_per_session, config.max_anchor_bytes_per_session,
+      config.session_idle_ttl_ms);
   slots_.resize(config.slot_count);
   slots_[0].generation = coordinator_->slot(0).generation;
   for (uint32_t slot = 1; slot < config.slot_count; ++slot) {
@@ -94,7 +96,7 @@ CacheExecutor::CacheExecutor(CacheExecutorConfig config,
 CacheAdmissionResult CacheExecutor::preview(const CacheAdmissionRequest& request) {
   auto plan = coordinator_->plan(request.tokens, request.identity, request.capabilities,
       request.output_reserve, request.result_state, request.slot_capabilities,
-      request.stable_boundaries);
+      request.stable_boundaries, estimated_bytes_per_token_);
   const auto& view = plan.view();
   std::vector<uint32_t> evictions;
   evictions.reserve(plan.evictions().size());
@@ -111,6 +113,8 @@ CacheAdmissionResult CacheExecutor::preview(const CacheAdmissionRequest& request
 CacheAnchorResult CacheExecutor::create_anchor(
     const std::vector<int32_t>& tokens, const clap::llama_cache::Identity& identity,
     uint32_t source_slot, bool protect) {
+  expire_idle();
+  std::vector<uint32_t> reclaimed = std::move(reclaimed_slots_);
   if (source_slot >= slots_.size()) throw std::out_of_range("cache source slot is out of range");
   std::vector<uint8_t> capabilities;
   capabilities.reserve(slots_.size());
@@ -122,7 +126,9 @@ CacheAnchorResult CacheExecutor::create_anchor(
   auto plan = coordinator_->plan(tokens, identity,
       CLAP_CACHE_CAP_WHOLE_STATE_COPY | CLAP_CACHE_CAP_SAFE_BUSY_DONOR |
           CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT,
-      0, CLAP_CACHE_SLOT_ANCHOR, capabilities);
+      0, CLAP_CACHE_SLOT_ANCHOR, capabilities, {}, estimated_bytes_per_token_);
+  // Anchor snapshots are full retained states. The coordinator accounts the
+  // model-derived estimate separately from measured physical telemetry.
   const auto view = plan.view();
   if (view.operation == CLAP_CACHE_OPERATION_NOOP) {
     plan.commit(tokens.size(), CLAP_CACHE_SLOT_ANCHOR);
@@ -163,6 +169,8 @@ CacheAnchorResult CacheExecutor::create_anchor(
 }
 
 CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) {
+  expire_idle();
+  std::vector<uint32_t> reclaimed = std::move(reclaimed_slots_);
   std::vector<uint8_t> capabilities;
   capabilities.reserve(slots_.size());
   for (const auto& slot : slots_) {
@@ -176,7 +184,7 @@ CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) 
   auto plan = coordinator_->plan(request.tokens, request.identity, request.capabilities,
       request.output_reserve, request.result_state,
       request.slot_capabilities.empty() ? capabilities : request.slot_capabilities,
-      request.stable_boundaries);
+      request.stable_boundaries, estimated_bytes_per_token_);
   const auto view = plan.view();
   const std::size_t target = view.target.slot;
   const std::size_t donor = view.has_donor ? view.donor.slot : SIZE_MAX;
@@ -236,7 +244,7 @@ CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) 
     slot.generation = info.generation;
     slot.busy = true;
 
-    std::vector<uint32_t> evictions;
+    std::vector<uint32_t> evictions = std::move(reclaimed);
     for (const auto& victim : plan.evictions()) {
       if (victim.slot >= slots_.size()) continue;
       if (victim.slot != target) {
@@ -301,6 +309,39 @@ void CacheExecutor::release(uint32_t slot_id, uint64_t generation) noexcept {
   if (!slot.busy || slot.generation != generation) return;
   try { coordinator_->set_busy({slot_id, 0, generation}, false); } catch (...) { return; }
   slot.busy = false;
+}
+
+std::vector<uint32_t> CacheExecutor::reconcile_invalidated_slots() {
+  std::vector<uint32_t> reconciled;
+  for (uint32_t slot_id = 0; slot_id < slots_.size(); ++slot_id) {
+    const auto info = coordinator_->slot(slot_id);
+    if (info.state != CLAP_CACHE_SLOT_EMPTY) continue;
+    if (slots_[slot_id].tokens.empty()) {
+      slots_[slot_id].generation = info.generation;
+      continue;
+    }
+    if (!slots_[slot_id].tokens.empty()) {
+      try { backend_->remove(slot_id, -1, -1); } catch (...) {}
+    }
+    slots_[slot_id] = {};
+    slots_[slot_id].generation = info.generation;
+    reconciled.push_back(slot_id);
+  }
+  return reconciled;
+}
+
+uint32_t CacheExecutor::expire_idle() {
+  const uint32_t expired = coordinator_->expire_idle();
+  reclaimed_slots_.clear();
+  if (expired > 0) reclaimed_slots_ = reconcile_invalidated_slots();
+  return expired;
+}
+
+uint32_t CacheExecutor::release_session(const clap::llama_cache::Identity& identity) {
+  const uint32_t released = coordinator_->release_session(identity);
+  reclaimed_slots_.clear();
+  if (released > 0) reclaimed_slots_ = reconcile_invalidated_slots();
+  return released;
 }
 
 uint64_t CacheExecutor::advance(uint32_t slot_id, uint64_t generation,

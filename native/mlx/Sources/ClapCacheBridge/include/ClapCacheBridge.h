@@ -132,6 +132,17 @@ typedef struct cc_retention_telemetry {
   uint64_t low_watermark_bytes;
   uint8_t under_pressure;
   uint64_t evictions;
+  uint64_t session_policy_evictions;
+  uint64_t session_budget_rejections;
+  uint64_t anchor_publications;
+  uint64_t anchor_publication_skips;
+  uint64_t expired_slots;
+  uint64_t expired_accounted_bytes;
+  uint64_t released_session_slots;
+  uint64_t released_session_accounted_bytes;
+  uint64_t anchor_accounted_bytes;
+  uint64_t max_anchor_bytes_per_session;
+  uint64_t session_idle_ttl_ms;
 } cc_retention_telemetry_t;
 
 cc_manager_t *cc_manager_create_with_retention(
@@ -142,7 +153,8 @@ cc_manager_t *cc_manager_create_with_retention(
     uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
     uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
     uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes,
-    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session);
+    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session,
+    uint64_t max_anchor_bytes_per_session, uint64_t session_idle_ttl_ms);
 void cc_manager_destroy(cc_manager_t *manager);
 int32_t cc_manager_last_status(const cc_manager_t *manager);
 
@@ -181,6 +193,10 @@ int32_t cc_manager_confirm(cc_manager_t *manager, uint32_t slot,
                            uint64_t physical_bytes, uint64_t *out_generation);
 int32_t cc_manager_set_busy(cc_manager_t *manager, uint32_t slot,
                             uint64_t generation, uint8_t busy);
+int32_t cc_manager_expire_idle(cc_manager_t *manager, uint32_t *expired);
+int32_t cc_manager_release_session(cc_manager_t *manager,
+                                   const uint8_t namespace_fingerprint[32],
+                                   uint64_t session, uint32_t *released);
 int32_t cc_manager_register_slot(cc_manager_t *manager, uint32_t *slot,
                                  uint64_t *generation);
 int32_t cc_manager_set_anchor_protected(cc_manager_t *manager, uint32_t slot,

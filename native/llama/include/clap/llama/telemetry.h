@@ -44,6 +44,17 @@ struct RetentionTelemetrySnapshot {
   const std::string eviction_reason;
   const uint64_t eviction_count;
   const int physical_cell_capacity;
+  const uint64_t session_policy_evictions;
+  const uint64_t session_budget_rejections;
+  const uint64_t anchor_publications;
+  const uint64_t anchor_publication_skips;
+  const uint64_t expired_slots;
+  const uint64_t expired_accounted_bytes;
+  const uint64_t released_session_slots;
+  const uint64_t released_session_accounted_bytes;
+  const uint64_t anchor_accounted_bytes;
+  const uint64_t max_anchor_bytes_per_session;
+  const uint64_t session_idle_ttl_ms;
 };
 
 nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& snapshot);

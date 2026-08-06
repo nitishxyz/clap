@@ -31,6 +31,7 @@ clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable) {
     nullable ? "" : "high_watermark",
     3,
     32768,
+    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
   };
 }
 
@@ -86,6 +87,14 @@ int main() {
   assert(normal["eviction_reason"] == "high_watermark");
   assert(normal["physical_cells_used"].is_null());
   assert(normal["physical_cells_free"].is_null());
+  assert(normal["session_policy_evictions"] == 4);
+  assert(normal["session_budget_rejections"] == 5);
+  assert(normal["anchor_publications"] == 6);
+  assert(normal["anchor_publication_skips"] == 7);
+  assert(normal["expired_slots"] == 8);
+  assert(normal["released_session_slots"] == 10);
+  assert(normal["anchor_accounted_bytes"] == 12);
+  assert(normal["session_idle_ttl_ms"] == 14);
 
   const auto nullable = clap::llama::serialize_retention_telemetry(snapshot(true));
   assert(nullable["previous_max_active"].is_null());

@@ -5,8 +5,8 @@ use clap_cache_ffi::*;
 
 #[test]
 fn config_layout_matches_the_public_c_header() {
-    assert_eq!(CLAP_CACHE_ABI_VERSION, 4);
-    assert_eq!(size_of::<ClapCacheConfig>(), 80);
+    assert_eq!(CLAP_CACHE_ABI_VERSION, 6);
+    assert_eq!(size_of::<ClapCacheConfig>(), 96);
     assert_eq!(offset_of!(ClapCacheConfig, version), 0);
     assert_eq!(offset_of!(ClapCacheConfig, struct_size), 4);
     assert_eq!(offset_of!(ClapCacheConfig, slot_count), 8);
@@ -37,6 +37,11 @@ fn config_layout_matches_the_public_c_header() {
         offset_of!(ClapCacheConfig, automatic_checkpoint_max_per_session),
         76
     );
+    assert_eq!(
+        offset_of!(ClapCacheConfig, max_anchor_bytes_per_session),
+        80
+    );
+    assert_eq!(offset_of!(ClapCacheConfig, session_idle_ttl_ms), 88);
     assert_eq!(size_of::<ClapCacheRetentionTelemetry>(), 112);
     assert_eq!(
         offset_of!(ClapCacheRetentionTelemetry, automatic_checkpoint_slots),
@@ -91,6 +96,8 @@ fn ffi_lifecycle_exports_owned_plan_and_metrics() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -188,6 +195,8 @@ fn ffi_rejects_nulls_and_version_mismatches_without_unwinding() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(
@@ -221,6 +230,8 @@ fn ffi_tenant_quota_rejects_nulls_and_invalid_tenants() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -259,6 +270,8 @@ fn ffi_abort_releases_plan_and_reset_changes_epoch() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -315,6 +328,8 @@ fn ffi_no_capacity_is_request_local_and_next_plan_succeeds() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -377,6 +392,8 @@ fn ffi_output_reserve_does_not_hide_a_legal_donor() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);
@@ -560,6 +577,8 @@ fn ffi_dynamic_registration_is_bounded_and_reports_retention_policy() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let retention = ClapCacheRetentionConfig {
             version: CLAP_CACHE_ABI_VERSION,
@@ -624,6 +643,8 @@ fn candidate_copy_reports_required_capacity_without_partial_writes() {
             automatic_checkpoint_memory_cap_bytes: 0,
             max_anchors_per_session: 0,
             automatic_checkpoint_max_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
         };
         let mut cache = ptr::null_mut();
         assert_eq!(clap_cache_create(&config, &mut cache), ClapCacheStatus::Ok);

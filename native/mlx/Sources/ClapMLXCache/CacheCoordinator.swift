@@ -9,12 +9,16 @@ public struct CoordinatorCheckpointConfiguration: Sendable {
   public let maximum: UInt32
   public let maximumPerSession: UInt32
   public let maximumAnchorsPerSession: UInt32
+  public let maximumAnchorBytesPerSession: UInt64
+  public let sessionIdleTTLMilliseconds: UInt64
   public let budgetBasisPoints: UInt32
   public let budgetBytes: UInt64
 
   public init(enabled: Bool, minimumTokens: UInt64, intervalTokens: UInt64,
               maximum: UInt32, maximumPerSession: UInt32 = 0,
               maximumAnchorsPerSession: UInt32 = 0,
+              maximumAnchorBytesPerSession: UInt64 = 0,
+              sessionIdleTTLMilliseconds: UInt64 = 0,
               budgetBasisPoints: UInt32, budgetBytes: UInt64) {
     self.enabled = enabled
     self.minimumTokens = minimumTokens
@@ -22,6 +26,8 @@ public struct CoordinatorCheckpointConfiguration: Sendable {
     self.maximum = maximum
     self.maximumPerSession = maximumPerSession
     self.maximumAnchorsPerSession = maximumAnchorsPerSession
+    self.maximumAnchorBytesPerSession = maximumAnchorBytesPerSession
+    self.sessionIdleTTLMilliseconds = sessionIdleTTLMilliseconds
     self.budgetBasisPoints = budgetBasisPoints
     self.budgetBytes = budgetBytes
   }
@@ -230,7 +236,8 @@ public final class CacheCoordinator {
       checkpoints.minimumTokens, checkpoints.intervalTokens,
       checkpoints.maximum, checkpoints.budgetBasisPoints,
       checkpoints.budgetBytes, checkpoints.maximumAnchorsPerSession,
-      checkpoints.maximumPerSession) else {
+      checkpoints.maximumPerSession, checkpoints.maximumAnchorBytesPerSession,
+      checkpoints.sessionIdleTTLMilliseconds) else {
       throw CacheCoordinatorError.unavailable
     }
     self.handle = handle
@@ -240,6 +247,21 @@ public final class CacheCoordinator {
 
   static func check(_ operation: String, _ status: Int32) throws {
     if status != CC_OK { throw CacheCoordinatorError.status(operation, status) }
+  }
+
+  public func expireIdle() throws -> Int {
+    var expired: UInt32 = 0
+    try Self.check("cc_manager_expire_idle", cc_manager_expire_idle(handle, &expired))
+    return Int(expired)
+  }
+
+  public func releaseSession(_ identity: CacheIdentity) throws -> Int {
+    var released: UInt32 = 0
+    let status = identity.fingerprint.withUnsafeBufferPointer { fingerprint in
+      cc_manager_release_session(handle, fingerprint.baseAddress, identity.session, &released)
+    }
+    try Self.check("cc_manager_release_session", status)
+    return Int(released)
   }
 
   public func plan(tokens: [Int], identity: CacheIdentity, capabilities: UInt64,

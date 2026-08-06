@@ -30,6 +30,8 @@ fn manager(initial: u32, hard_max: u32) -> CacheManager {
             logical_token_capacity: 1,
             max_anchors: hard_max,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -52,6 +54,7 @@ fn request(tokens: &[i32], ns: Namespace, session: u64, state: SlotState) -> Pla
         slot_capabilities: None,
         output_reserve: usize::MAX,
         estimated_bytes_per_token: 1,
+        now_ms: 1,
         result_state: state,
     }
 }
@@ -366,6 +369,8 @@ fn busy_and_protected_anchors_are_ineligible_pressure_victims() {
             logical_token_capacity: usize::MAX,
             max_anchors: 6,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -445,6 +450,8 @@ fn branch_pressure_preserves_the_only_lower_depth_band_donor() {
             logical_token_capacity: usize::MAX,
             max_anchors: 10,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -520,6 +527,8 @@ fn retained_pressure_cannot_reject_an_executable_session_target() {
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {

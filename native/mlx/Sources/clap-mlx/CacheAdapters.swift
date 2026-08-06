@@ -8,6 +8,8 @@ extension CheckpointConfiguration {
       maximum: coordinatorMaximum,
       maximumPerSession: coordinatorMaximumPerSession,
       maximumAnchorsPerSession: maximumAnchorsPerSession,
+      maximumAnchorBytesPerSession: maximumAnchorBytesPerSession,
+      sessionIdleTTLMilliseconds: sessionIdleTTLMilliseconds,
       budgetBasisPoints: budgetBasisPoints,
       budgetBytes: budgetBytes)
   }

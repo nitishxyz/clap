@@ -50,6 +50,10 @@ pub struct ClapCacheConfig {
     pub max_anchors_per_session: u32,
     /// Zero disables the per-session automatic-checkpoint cap.
     pub automatic_checkpoint_max_per_session: u32,
+    /// Zero disables the per-session policy-accounted anchor byte cap.
+    pub max_anchor_bytes_per_session: u64,
+    /// Zero disables wall-clock idle expiry for non-zero sessions.
+    pub session_idle_ttl_ms: u64,
 }
 
 /// Additive dynamic-retention configuration.
@@ -205,6 +209,17 @@ pub struct ClapCacheTelemetry {
     pub write_leases: u32,
     pub prefix_nodes: u64,
     pub physical_bytes: u64,
+    pub session_policy_evictions: u64,
+    pub session_budget_rejections: u64,
+    pub anchor_publications: u64,
+    pub anchor_publication_skips: u64,
+    pub expired_slots: u64,
+    pub expired_accounted_bytes: u64,
+    pub released_session_slots: u64,
+    pub released_session_accounted_bytes: u64,
+    pub anchor_accounted_bytes: u64,
+    pub max_anchor_bytes_per_session: u64,
+    pub session_idle_ttl_ms: u64,
 }
 
 #[repr(C)]
@@ -246,6 +261,8 @@ pub struct ClapCacheSlotInfo {
     pub scope: u32,
     pub session: u64,
     pub last_used: u64,
+    pub last_used_ms: u64,
     pub reuse_count: u64,
     pub physical_bytes: u64,
+    pub accounted_bytes: u64,
 }

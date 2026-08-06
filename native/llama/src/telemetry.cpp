@@ -110,6 +110,17 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
     {"physical_cell_capacity", snapshot.physical_cell_capacity},
     {"physical_cells_used", nullptr},
     {"physical_cells_free", nullptr},
+    {"session_policy_evictions", snapshot.session_policy_evictions},
+    {"session_budget_rejections", snapshot.session_budget_rejections},
+    {"anchor_publications", snapshot.anchor_publications},
+    {"anchor_publication_skips", snapshot.anchor_publication_skips},
+    {"expired_slots", snapshot.expired_slots},
+    {"expired_accounted_bytes", snapshot.expired_accounted_bytes},
+    {"released_session_slots", snapshot.released_session_slots},
+    {"released_session_accounted_bytes", snapshot.released_session_accounted_bytes},
+    {"anchor_accounted_bytes", snapshot.anchor_accounted_bytes},
+    {"max_anchor_bytes_per_session", snapshot.max_anchor_bytes_per_session},
+    {"session_idle_ttl_ms", snapshot.session_idle_ttl_ms},
   };
 }
 

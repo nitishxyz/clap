@@ -22,7 +22,8 @@ cc_manager_t *cc_manager_create_with_retention(
     uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
     uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
     uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes,
-    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session) {
+    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session,
+    uint64_t max_anchor_bytes_per_session, uint64_t session_idle_ttl_ms) {
   cc_manager_t *manager = calloc(1, sizeof(*manager));
   if (!manager) return NULL;
   clap_cache_config_t config = {0};
@@ -40,6 +41,8 @@ cc_manager_t *cc_manager_create_with_retention(
   config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
   config.max_anchors_per_session = max_anchors_per_session;
   config.automatic_checkpoint_max_per_session = checkpoint_max_per_session;
+  config.max_anchor_bytes_per_session = max_anchor_bytes_per_session;
+  config.session_idle_ttl_ms = session_idle_ttl_ms;
   clap_cache_retention_config_t retention = {0};
   retention.version = CLAP_CACHE_ABI_VERSION;
   retention.struct_size = sizeof(retention);
@@ -299,6 +302,19 @@ int32_t cc_manager_confirm(cc_manager_t *manager, uint32_t slot,
   return status;
 }
 
+int32_t cc_manager_expire_idle(cc_manager_t *manager, uint32_t *expired) {
+  if (!manager || !expired) return CLAP_CACHE_INVALID_ARGUMENT;
+  return manager->last_status = clap_cache_expire_idle(manager->cache, expired);
+}
+
+int32_t cc_manager_release_session(cc_manager_t *manager,
+                                   const uint8_t namespace_fingerprint[32],
+                                   uint64_t session, uint32_t *released) {
+  if (!manager || !namespace_fingerprint || !released) return CLAP_CACHE_INVALID_ARGUMENT;
+  return manager->last_status = clap_cache_release_session(
+      manager->cache, namespace_fingerprint, session, released);
+}
+
 int32_t cc_manager_set_busy(cc_manager_t *manager, uint32_t slot,
                             uint64_t generation, uint8_t busy) {
   if (!manager) return CLAP_CACHE_INVALID_ARGUMENT;
@@ -374,6 +390,17 @@ int32_t cc_manager_retention_telemetry(cc_manager_t *manager,
   out->low_watermark_bytes = retention.low_watermark_bytes;
   out->under_pressure = retention.under_pressure;
   out->evictions = telemetry.evictions;
+  out->session_policy_evictions = telemetry.session_policy_evictions;
+  out->session_budget_rejections = telemetry.session_budget_rejections;
+  out->anchor_publications = telemetry.anchor_publications;
+  out->anchor_publication_skips = telemetry.anchor_publication_skips;
+  out->expired_slots = telemetry.expired_slots;
+  out->expired_accounted_bytes = telemetry.expired_accounted_bytes;
+  out->released_session_slots = telemetry.released_session_slots;
+  out->released_session_accounted_bytes = telemetry.released_session_accounted_bytes;
+  out->anchor_accounted_bytes = telemetry.anchor_accounted_bytes;
+  out->max_anchor_bytes_per_session = telemetry.max_anchor_bytes_per_session;
+  out->session_idle_ttl_ms = telemetry.session_idle_ttl_ms;
   return status;
 }
 

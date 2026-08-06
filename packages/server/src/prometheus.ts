@@ -102,6 +102,17 @@ export type PromSnapshot = {
       hardCeiling: number;
       evictionReason?: string;
       evictionCount: number;
+      sessionPolicyEvictions?: number;
+      sessionBudgetRejections?: number;
+      anchorPublications?: number;
+      anchorPublicationSkips?: number;
+      expiredSlots?: number;
+      expiredAccountedBytes?: number;
+      releasedSessionSlots?: number;
+      releasedSessionAccountedBytes?: number;
+      anchorAccountedBytes?: number;
+      maxAnchorBytesPerSession?: number;
+      sessionIdleTtlMs?: number;
     };
     tokenCapabilities?: {
       effectiveContextWindow: number | null;
@@ -278,6 +289,29 @@ export function renderPrometheus(snapshot: PromSnapshot): string {
   gauge("clap_mlx_retention_under_pressure", "Whether any retained cache is under byte pressure", groupedMax(retained.map(
     (model) => [`{backend="${esc(model.backend)}"}`, model.retention!.underPressure ? 1 : 0],
   )));
+  for (const [name, help, field] of [
+    ["clap_cache_session_policy_evictions_total", "Retained anchors evicted by per-session policy", "sessionPolicyEvictions"],
+    ["clap_cache_session_budget_rejections_total", "Anchor publications rejected by per-session byte budget", "sessionBudgetRejections"],
+    ["clap_cache_anchor_publications_total", "Successfully published retained anchors", "anchorPublications"],
+    ["clap_cache_anchor_publication_skips_total", "Optional anchor publications skipped by policy", "anchorPublicationSkips"],
+    ["clap_cache_expired_slots_total", "Retained session slots expired by idle TTL", "expiredSlots"],
+    ["clap_cache_released_session_slots_total", "Retained slots removed by explicit session release", "releasedSessionSlots"],
+  ] as const) {
+    counter(name, help, grouped(retained.flatMap((model) => {
+      const value = model.retention![field];
+      return value === undefined ? [] : [[`{backend="${esc(model.backend)}"}`, value]];
+    })));
+  }
+  for (const [name, help, field] of [
+    ["clap_cache_anchor_accounted_bytes", "Policy-accounted retained anchor bytes", "anchorAccountedBytes"],
+    ["clap_cache_max_anchor_bytes_per_session", "Configured policy byte cap per session", "maxAnchorBytesPerSession"],
+    ["clap_cache_session_idle_ttl_ms", "Configured retained session idle TTL", "sessionIdleTtlMs"],
+  ] as const) {
+    gauge(name, help, grouped(retained.flatMap((model) => {
+      const value = model.retention![field];
+      return value === undefined ? [] : [[`{backend="${esc(model.backend)}"}`, value]];
+    })));
+  }
   counter("clap_mlx_retention_evictions_total", "MLX retained cache evictions", grouped(retained.map(
     (model) => [`{backend="${esc(model.backend)}",reason="${esc(model.retention!.evictionReason ?? "none")}"}`, model.retention!.evictionCount],
   )));

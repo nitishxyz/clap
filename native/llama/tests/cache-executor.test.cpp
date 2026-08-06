@@ -1,10 +1,13 @@
 #include "clap/llama/cache-executor.h"
 
 #include <cassert>
+#include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -106,6 +109,30 @@ int main() {
     assert(!executor.slot(slot).busy);
     assert(executor.slot(slot).resident_tokens == 0);
   }
+
+  auto expiring_backend = std::make_unique<RecordingBackend>();
+  auto expiring_config = config();
+  expiring_config.session_idle_ttl_ms = 1;
+  clap::llama::CacheExecutor expiring(expiring_config, std::move(expiring_backend));
+  clap::llama_cache::Identity expiring_identity;
+  expiring_identity.name_space = clap::llama_cache::fingerprint("expiring");
+  expiring_identity.tenant = clap::llama_cache::hash("tenant");
+  expiring_identity.session = clap::llama_cache::hash("session-one");
+  expiring_identity.scope = CLAP_CACHE_SCOPE_SESSION;
+  const auto expiring_first = expiring.admit({
+      {11, 12, 13}, expiring_identity, CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH,
+      1, CLAP_CACHE_SLOT_SESSION, {}, {}});
+  expiring.release(expiring_first.target_slot, expiring_first.target_generation);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  auto next_identity = expiring_identity;
+  next_identity.session = clap::llama_cache::hash("session-two");
+  const auto expiring_second = expiring.admit({
+      {21, 22, 23}, next_identity, CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH,
+      1, CLAP_CACHE_SLOT_SESSION, {}, {}});
+  assert(std::find(expiring_second.eviction_slots.begin(),
+                   expiring_second.eviction_slots.end(),
+                   expiring_first.target_slot) != expiring_second.eviction_slots.end());
+  expiring.release(expiring_second.target_slot, expiring_second.target_generation);
 
   auto transactional_backend = std::make_unique<RecordingBackend>();
   RecordingBackend* transactional_recording = transactional_backend.get();

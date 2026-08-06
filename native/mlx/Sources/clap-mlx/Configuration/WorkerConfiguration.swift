@@ -12,6 +12,8 @@ struct CheckpointConfiguration {
   let coordinatorMaximum: UInt32
   let coordinatorMaximumPerSession: UInt32
   let maximumAnchorsPerSession: UInt32
+  let maximumAnchorBytesPerSession: UInt64
+  let sessionIdleTTLMilliseconds: UInt64
   let budgetBasisPoints: UInt32
   let budgetBytes: UInt64
 
@@ -76,6 +78,10 @@ struct WorkerConfiguration {
         environment["CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION"] ?? "") ?? 2,
       maximumAnchorsPerSession: UInt32(
         environment["CLAP_CACHE_MAX_ANCHORS_PER_SESSION"] ?? "") ?? 4,
+      maximumAnchorBytesPerSession: UInt64(
+        environment["CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION"] ?? "") ?? 0,
+      sessionIdleTTLMilliseconds: UInt64(
+        environment["CLAP_CACHE_SESSION_IDLE_TTL_MS"] ?? "") ?? 900_000,
       budgetBasisPoints: UInt32(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS"] ?? "") ?? 2_500,
       budgetBytes: UInt64(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BYTES"] ?? "") ?? 0)
     debugPrompt = environment["CLAP_MLX_DEBUG_PROMPT"] != nil

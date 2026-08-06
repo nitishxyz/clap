@@ -184,6 +184,17 @@ struct WorkerRetention: Encodable {
   let hard_ceiling: Int
   let eviction_reason: String?
   let eviction_count: UInt64
+  let session_policy_evictions: UInt64
+  let session_budget_rejections: UInt64
+  let anchor_publications: UInt64
+  let anchor_publication_skips: UInt64
+  let expired_slots: UInt64
+  let expired_accounted_bytes: UInt64
+  let released_session_slots: UInt64
+  let released_session_accounted_bytes: UInt64
+  let anchor_accounted_bytes: UInt64
+  let max_anchor_bytes_per_session: UInt64
+  let session_idle_ttl_ms: UInt64
 }
 
 struct WorkerTokenCapabilities: Encodable {

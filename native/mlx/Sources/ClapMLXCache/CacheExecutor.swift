@@ -80,6 +80,10 @@ public enum CacheExecutor {
                                   stableBoundaries: [Int], outputReserve: Int,
                                   kvQuantized: Bool, useCounter: inout UInt64,
                                   operations: CacheOperations<Cache>) throws -> CacheAdmission<Cache> {
+    if try coordinator.expireIdle() > 0 {
+      try reconcileInvalidated(coordinator: coordinator, registry: &registry)
+    }
+
     var slots = registry.slotIDs.compactMap { registry.entry(for: $0) }
     if !slots.contains(where: { !$0.busy && $0.caches.isEmpty }), registry.count < hardCeiling {
       let registered = try coordinator.registerSlot()
@@ -225,6 +229,27 @@ public enum CacheExecutor {
       anchorBoundaries: view.anchorBoundaries, coordinatorPlanMs: planMs,
       coordinatorApplyMs: Double(DispatchTime.now().uptimeNanoseconds - applyStarted) / 1_000_000,
       cacheMaterializeMs: materializeMs, evictedVictims: !victims.isEmpty)
+  }
+
+  public static func releaseSession<Cache>(coordinator: CacheCoordinator,
+                                           registry: inout RetainedRegistry<CacheSlot<Cache>>,
+                                           identity: CacheIdentity) throws -> Int {
+    let released = try coordinator.releaseSession(identity)
+    if released > 0 {
+      try reconcileInvalidated(coordinator: coordinator, registry: &registry)
+    }
+    return released
+  }
+
+  private static func reconcileInvalidated<Cache>(coordinator: CacheCoordinator,
+                                                   registry: inout RetainedRegistry<CacheSlot<Cache>>) throws {
+    for slotID in registry.slotIDs {
+      guard let slot = registry.entry(for: slotID) else { continue }
+      let logical = try coordinator.slot(Int(slotID))
+      guard logical.state == UInt32(CC_SLOT_EMPTY) else { continue }
+      slot.clear()
+      slot.coordinatorGeneration = logical.generation
+    }
   }
 
   public static func appendAndAdvance<Cache>(coordinator: CacheCoordinator?,

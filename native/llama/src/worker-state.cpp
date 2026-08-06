@@ -68,6 +68,10 @@ void WorkerState::load(const std::string& model_path) {
     config.max_anchors = static_cast<uint32_t>(retained);
     config.max_anchors_per_session = static_cast<uint32_t>(
         std::max(0, env_int("CLAP_CACHE_MAX_ANCHORS_PER_SESSION", 4)));
+    config.max_anchor_bytes_per_session = env_u64(
+        "CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION", 0);
+    config.session_idle_ttl_ms = env_u64("CLAP_CACHE_SESSION_IDLE_TTL_MS", 900'000);
+    config.estimated_bytes_per_token = runtime_.kv_bytes_per_token();
     config.hard_max_retained_entries = static_cast<uint32_t>(retained);
     config.automatic_checkpoints = env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0;
     config.checkpoint_minimum_tokens = static_cast<uint64_t>(
@@ -251,13 +255,14 @@ nlohmann::json WorkerState::retention(std::size_t active, std::size_t queued) co
   uint32_t retained_sessions = 0;
   uint32_t retained_anchors = 0;
   uint64_t evictions = 0;
+  clap_cache_telemetry_t cache_telemetry{};
   if (cache_executor_) {
     const auto retention = cache_executor_->retention_telemetry();
-    const auto telemetry = cache_executor_->telemetry();
+    cache_telemetry = cache_executor_->telemetry();
     retained_total = retention.active_slots;
     retained_sessions = retention.session_slots;
     retained_anchors = retention.anchor_slots;
-    evictions = telemetry.evictions;
+    evictions = cache_telemetry.evictions;
   }
   return serialize_retention_telemetry({
     max_active_, queued, previous_max_active_, last_adjustment_reason_,
@@ -270,7 +275,14 @@ nlohmann::json WorkerState::retention(std::size_t active, std::size_t queued) co
       active_policy_.per_active_reserve_cells, active_policy_.per_active_reserve_bytes,
       std::max(1u, std::thread::hardware_concurrency()), runtime_.hybrid()},
     active, retained_total, retained_sessions, retained_anchors, runtime_.retained_max(),
-    last_eviction_reason_, evictions, runtime_.backend_allocation_cap()});
+    last_eviction_reason_, evictions, runtime_.backend_allocation_cap(),
+    cache_telemetry.session_policy_evictions, cache_telemetry.session_budget_rejections,
+    cache_telemetry.anchor_publications, cache_telemetry.anchor_publication_skips,
+    cache_telemetry.expired_slots, cache_telemetry.expired_accounted_bytes,
+    cache_telemetry.released_session_slots,
+    cache_telemetry.released_session_accounted_bytes,
+    cache_telemetry.anchor_accounted_bytes,
+    cache_telemetry.max_anchor_bytes_per_session, cache_telemetry.session_idle_ttl_ms});
 }
 
 }  // namespace clap::llama

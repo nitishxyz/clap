@@ -5,6 +5,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap_cache_core::{
     AutomaticCheckpointConfig, CacheManager, Capabilities, Commit, Config, Labels, Namespace,
@@ -15,7 +16,7 @@ mod types;
 
 pub use types::*;
 
-pub const CLAP_CACHE_ABI_VERSION: u32 = 4;
+pub const CLAP_CACHE_ABI_VERSION: u32 = 6;
 pub const CLAP_CACHE_SLOT_MATERIALIZED: u8 = SlotCapabilities::MATERIALIZED;
 pub const CLAP_CACHE_SLOT_WRITABLE: u8 = SlotCapabilities::WRITABLE;
 pub const CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM: u8 = SlotCapabilities::PARTIAL_SUFFIX_TRIM;
@@ -91,6 +92,14 @@ fn lock(cache: &ClapCache) -> Result<std::sync::MutexGuard<'_, CacheManager>, Cl
     cache.manager.lock().map_err(|_| ClapCacheStatus::Panic)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
     if !valid_header(
         config.version,
@@ -111,6 +120,8 @@ fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
         logical_token_capacity: usize::try_from(config.logical_token_capacity)
             .map_err(|_| ClapCacheStatus::InvalidArgument)?,
         max_anchors_per_session: config.max_anchors_per_session,
+        max_anchor_bytes_per_session: config.max_anchor_bytes_per_session,
+        session_idle_ttl_ms: config.session_idle_ttl_ms,
         automatic_checkpoints: AutomaticCheckpointConfig {
             enabled: config.automatic_checkpoint_mode != 2,
             minimum_prompt_tokens: if config.automatic_checkpoint_min_tokens == 0 {
@@ -299,6 +310,7 @@ pub unsafe extern "C" fn clap_cache_plan(
             output_reserve: usize::try_from(request.output_reserve)
                 .map_err(|_| ClapCacheStatus::InvalidArgument)?,
             estimated_bytes_per_token: request.estimated_bytes_per_token,
+            now_ms: now_ms(),
             result_state: slot_state(request.result_state)?,
         };
         // SAFETY: checked above; no reference escapes the call.
@@ -705,9 +717,65 @@ pub unsafe extern "C" fn clap_cache_set_busy(
             return Err(ClapCacheStatus::InvalidArgument);
         }
         // SAFETY: cache is checked non-null.
-        lock(unsafe { &*cache })?
+        let mut manager = lock(unsafe { &*cache })?;
+        manager
             .set_busy(slot.slot, slot.generation, busy != 0)
-            .map_err(ClapCacheStatus::from)
+            .map_err(ClapCacheStatus::from)?;
+        if busy == 0 {
+            manager
+                .touch(slot.slot, slot.generation, now_ms())
+                .map_err(ClapCacheStatus::from)?;
+        }
+        Ok(())
+    })
+}
+
+/// Expires idle non-zero session state and returns the number of logical slots
+/// invalidated. Physical adapters must reconcile and clear those slots.
+///
+/// # Safety
+/// `cache` must be live and `out_expired` writable.
+#[no_mangle]
+pub unsafe extern "C" fn clap_cache_expire_idle(
+    cache: *mut ClapCache,
+    out_expired: *mut u32,
+) -> ClapCacheStatus {
+    ffi_status(|| {
+        if cache.is_null() || out_expired.is_null() {
+            return Err(ClapCacheStatus::InvalidArgument);
+        }
+        let expired = lock(unsafe { &*cache })?.expire_idle(now_ms());
+        unsafe { *out_expired = expired.len().min(u32::MAX as usize) as u32 };
+        Ok(())
+    })
+}
+
+/// Releases all currently unleased state for one exact non-zero session.
+/// Physical adapters must reconcile and clear invalidated slots.
+///
+/// # Safety
+/// `cache` and `namespace_fingerprint` must be readable and `out_released`
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn clap_cache_release_session(
+    cache: *mut ClapCache,
+    namespace_fingerprint: *const u8,
+    session: u64,
+    out_released: *mut u32,
+) -> ClapCacheStatus {
+    ffi_status(|| {
+        if cache.is_null() || namespace_fingerprint.is_null() || out_released.is_null() {
+            return Err(ClapCacheStatus::InvalidArgument);
+        }
+        let mut namespace = [0_u8; 32];
+        unsafe {
+            namespace.copy_from_slice(slice::from_raw_parts(namespace_fingerprint, 32));
+        }
+        let released = lock(unsafe { &*cache })?
+            .release_session(Namespace(namespace), session)
+            .map_err(ClapCacheStatus::from)?;
+        unsafe { *out_released = released.len().min(u32::MAX as usize) as u32 };
+        Ok(())
     })
 }
 
@@ -854,6 +922,17 @@ pub unsafe extern "C" fn clap_cache_get_telemetry(
             write_leases: telemetry.write_leases,
             prefix_nodes: telemetry.prefix_nodes,
             physical_bytes: telemetry.physical_bytes,
+            session_policy_evictions: telemetry.session_policy_evictions,
+            session_budget_rejections: telemetry.session_budget_rejections,
+            anchor_publications: telemetry.anchor_publications,
+            anchor_publication_skips: telemetry.anchor_publication_skips,
+            expired_slots: telemetry.expired_slots,
+            expired_accounted_bytes: telemetry.expired_accounted_bytes,
+            released_session_slots: telemetry.released_session_slots,
+            released_session_accounted_bytes: telemetry.released_session_accounted_bytes,
+            anchor_accounted_bytes: telemetry.anchor_accounted_bytes,
+            max_anchor_bytes_per_session: telemetry.max_anchor_bytes_per_session,
+            session_idle_ttl_ms: telemetry.session_idle_ttl_ms,
         };
         // SAFETY: output pointer checked non-null.
         unsafe { *out = exported };
@@ -930,8 +1009,10 @@ pub unsafe extern "C" fn clap_cache_get_slot(
             scope: slot.labels.scope as u32,
             session: slot.labels.session,
             last_used: slot.last_used,
+            last_used_ms: slot.last_used_ms,
             reuse_count: slot.reuse_count,
             physical_bytes: slot.physical_bytes,
+            accounted_bytes: slot.accounted_bytes,
         };
         // SAFETY: output pointer checked non-null.
         unsafe { *out = exported };

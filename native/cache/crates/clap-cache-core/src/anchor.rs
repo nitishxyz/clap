@@ -4,8 +4,62 @@ use super::slot::{anchor_eviction_value, Slot};
 use super::{CacheManager, PlanRequest, SlotCapabilities, SlotState};
 
 impl CacheManager {
-    pub(super) fn choose_anchor_boundaries(
+    pub(super) fn session_budget_victims(
         &self,
+        target: u32,
+        donor: Option<u32>,
+        request: &PlanRequest<'_>,
+        projected_target_bytes: u64,
+    ) -> Result<Vec<u32>, super::Error> {
+        let limit = self.config.max_anchor_bytes_per_session;
+        if request.labels.session == 0 || limit == 0 || projected_target_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let target_current = self.slots[target as usize].accounted_bytes;
+        let mut projected = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.state == SlotState::Anchor && self.same_limited_session(slot, request)
+            })
+            .map(|slot| slot.accounted_bytes)
+            .sum::<u64>()
+            .saturating_sub(target_current)
+            .saturating_add(projected_target_bytes);
+        if projected <= limit {
+            return Ok(Vec::new());
+        }
+        let mut candidates = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.id != target
+                    && Some(slot.id) != donor
+                    && slot.state == SlotState::Anchor
+                    && self.same_limited_session(slot, request)
+                    && !slot.busy
+                    && slot.writer.is_none()
+                    && slot.read_leases == 0
+                    && !slot.protected
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|slot| (anchor_eviction_value(slot), slot.id));
+        let mut victims = Vec::new();
+        for slot in candidates {
+            if projected <= limit {
+                break;
+            }
+            projected = projected.saturating_sub(slot.accounted_bytes);
+            victims.push(slot.id);
+        }
+        if projected > limit {
+            return Err(super::Error::NoCapacity);
+        }
+        Ok(victims)
+    }
+
+    pub(super) fn choose_anchor_boundaries(
+        &mut self,
         request: &PlanRequest<'_>,
         reuse_tokens: usize,
     ) -> Vec<usize> {
@@ -34,6 +88,7 @@ impl CacheManager {
             .into_iter()
             .filter(|&boundary| eligible(boundary) && !semantic.contains(&boundary))
             .collect::<Vec<_>>();
+        let publication_candidates = semantic.len().saturating_add(automatic.len());
         let existing_anchors = self
             .slots
             .iter()
@@ -169,6 +224,10 @@ impl CacheManager {
             automatic_added += 1;
         }
         authorized.sort_unstable();
+        self.telemetry.anchor_publication_skips = self
+            .telemetry
+            .anchor_publication_skips
+            .saturating_add(publication_candidates.saturating_sub(authorized.len()) as u64);
         authorized
     }
 

@@ -37,6 +37,9 @@ struct CacheExecutorConfig {
   uint64_t logical_token_capacity = 0;
   uint32_t max_anchors = 0;
   uint32_t max_anchors_per_session = 0;
+  uint64_t max_anchor_bytes_per_session = 0;
+  uint64_t estimated_bytes_per_token = 0;
+  uint64_t session_idle_ttl_ms = 0;
   uint32_t hard_max_retained_entries = 0;
   bool automatic_checkpoints = true;
   uint64_t checkpoint_minimum_tokens = 2048;
@@ -151,6 +154,8 @@ class CacheExecutor {
   uint64_t advance(uint32_t slot, uint64_t generation, const int32_t* tokens,
                    std::size_t count, uint32_t state, bool busy);
   void release(uint32_t slot, uint64_t generation) noexcept;
+  uint32_t expire_idle();
+  uint32_t release_session(const clap::llama_cache::Identity& identity);
   clap_cache_telemetry_t telemetry() const;
   clap_cache_retention_telemetry_t retention_telemetry() const;
   clap::llama_cache::Coordinator& coordinator() { return *coordinator_; }
@@ -167,6 +172,9 @@ class CacheExecutor {
   std::unique_ptr<PhysicalCacheBackend> backend_;
   std::unique_ptr<clap::llama_cache::Coordinator> coordinator_;
   std::vector<Slot> slots_;
+  uint64_t estimated_bytes_per_token_ = 0;
+  std::vector<uint32_t> reclaimed_slots_;
+  std::vector<uint32_t> reconcile_invalidated_slots();
 };
 
 }  // namespace clap::llama

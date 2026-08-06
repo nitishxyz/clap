@@ -3,6 +3,7 @@
 //! physical cache objects and execute plans outside this crate.
 
 mod anchor;
+mod lifecycle;
 mod radix;
 mod slot;
 
@@ -116,6 +117,13 @@ pub struct Config {
     /// Maximum anchors retained for one non-zero session identity. Automatic
     /// checkpoints count toward this total. Zero disables the per-session cap.
     pub max_anchors_per_session: u32,
+    /// Policy-accounted retained anchor bytes for one non-zero session.
+    /// Zero disables the per-session byte cap. Estimated bytes remain
+    /// separate from measured physical-memory telemetry.
+    pub max_anchor_bytes_per_session: u64,
+    /// Wall-clock idle lifetime for retained state owned by a non-zero
+    /// session. Zero disables automatic expiry.
+    pub session_idle_ttl_ms: u64,
     pub automatic_checkpoints: AutomaticCheckpointConfig,
 }
 
@@ -174,6 +182,8 @@ impl Default for Config {
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
             max_anchors_per_session: 0,
+            max_anchor_bytes_per_session: 0,
+            session_idle_ttl_ms: 0,
             automatic_checkpoints: AutomaticCheckpointConfig::default(),
         }
     }
@@ -193,6 +203,8 @@ pub struct PlanRequest<'a> {
     pub slot_capabilities: Option<&'a [SlotCapabilities]>,
     pub output_reserve: usize,
     pub estimated_bytes_per_token: u64,
+    /// Caller-supplied wall clock used only for idle-age accounting.
+    pub now_ms: u64,
     pub result_state: SlotState,
 }
 
@@ -269,6 +281,8 @@ pub struct Plan {
     pub requested_tokens: Vec<i32>,
     pub labels: Labels,
     pub result_state: SlotState,
+    pub estimated_bytes_per_token: u64,
+    pub now_ms: u64,
     pub decision_us: u64,
     pub candidates: Vec<CandidateEvaluation>,
 }
@@ -305,6 +319,14 @@ pub struct Telemetry {
     pub stale_commits: u64,
     pub evictions: u64,
     pub resets: u64,
+    pub session_policy_evictions: u64,
+    pub session_budget_rejections: u64,
+    pub anchor_publications: u64,
+    pub anchor_publication_skips: u64,
+    pub expired_slots: u64,
+    pub expired_accounted_bytes: u64,
+    pub released_session_slots: u64,
+    pub released_session_accounted_bytes: u64,
     pub planned_reuse_tokens: u64,
     pub realized_reuse_tokens: u64,
     pub prefill_us_saved: u64,
@@ -318,6 +340,7 @@ pub struct Telemetry {
     pub session_slots: u32,
     pub session_bytes: u64,
     pub anchor_bytes: u64,
+    pub anchor_accounted_bytes: u64,
     pub automatic_checkpoint_slots: u32,
     pub automatic_checkpoint_bytes: u64,
     pub automatic_checkpoint_byte_budget: u64,
@@ -326,6 +349,8 @@ pub struct Telemetry {
     pub high_watermark_bytes: u64,
     pub low_watermark_bytes: u64,
     pub under_pressure: bool,
+    pub max_anchor_bytes_per_session: u64,
+    pub session_idle_ttl_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -340,8 +365,10 @@ pub struct SlotSnapshot {
     pub write_leased: bool,
     pub labels: Labels,
     pub last_used: u64,
+    pub last_used_ms: u64,
     pub reuse_count: u64,
     pub physical_bytes: u64,
+    pub accounted_bytes: u64,
     pub protected: bool,
 }
 
@@ -468,6 +495,8 @@ impl CacheManager {
                     requested_tokens: request.tokens.to_vec(),
                     labels: request.labels,
                     result_state: request.result_state,
+                    estimated_bytes_per_token: request.estimated_bytes_per_token,
+                    now_ms: request.now_ms,
                     decision_us,
                     candidates,
                 };
@@ -569,6 +598,24 @@ impl CacheManager {
             },
             request.result_state == SlotState::Anchor,
         )?);
+        if request.result_state == SlotState::Anchor {
+            let projected_accounted_bytes = request
+                .estimated_bytes_per_token
+                .saturating_mul(request.tokens.len() as u64);
+            match self.session_budget_victims(
+                target_id,
+                selected_donor,
+                &request,
+                projected_accounted_bytes,
+            ) {
+                Ok(victims) => eviction_ids.extend(victims),
+                Err(error) => {
+                    self.telemetry.session_budget_rejections =
+                        self.telemetry.session_budget_rejections.saturating_add(1);
+                    return Err(error);
+                }
+            }
+        }
         if request.result_state == SlotState::Anchor
             && self.is_automatic_checkpoint_len(request.tokens.len())
         {
@@ -633,6 +680,8 @@ impl CacheManager {
             requested_tokens: request.tokens.to_vec(),
             labels: request.labels,
             result_state: request.result_state,
+            estimated_bytes_per_token: request.estimated_bytes_per_token,
+            now_ms: request.now_ms,
             decision_us,
             candidates,
         };
@@ -1192,6 +1241,15 @@ impl CacheManager {
             if plan.operation != Operation::Noop {
                 for victim in &plan.evictions {
                     if victim.slot != plan.target.slot {
+                        if self.slots[victim.slot as usize].state == SlotState::Anchor
+                            && self.slots[victim.slot as usize].namespace == plan.namespace
+                            && plan.labels.session != 0
+                            && self.slots[victim.slot as usize].labels.session
+                                == plan.labels.session
+                        {
+                            self.telemetry.session_policy_evictions =
+                                self.telemetry.session_policy_evictions.saturating_add(1);
+                        }
                         self.invalidate_slot(victim.slot);
                     }
                 }
@@ -1237,6 +1295,15 @@ impl CacheManager {
             .iter()
             .any(|slot| slot.slot == plan.target.slot)
         {
+            let target = &self.slots[plan.target.slot as usize];
+            if target.state == SlotState::Anchor
+                && target.namespace == plan.namespace
+                && plan.labels.session != 0
+                && target.labels.session == plan.labels.session
+            {
+                self.telemetry.session_policy_evictions =
+                    self.telemetry.session_policy_evictions.saturating_add(1);
+            }
             self.telemetry.evictions += 1;
         }
         self.remove_index(plan.target.slot);
@@ -1249,7 +1316,16 @@ impl CacheManager {
             target.state = commit.actual_state;
             target.labels = plan.labels.clone();
             target.last_used = self.clock;
+            target.last_used_ms = plan.now_ms;
             target.physical_bytes = commit.physical_bytes;
+            target.accounted_bytes = if commit.actual_state == SlotState::Anchor {
+                commit.physical_bytes.max(
+                    plan.estimated_bytes_per_token
+                        .saturating_mul(commit.resident_tokens as u64),
+                )
+            } else {
+                commit.physical_bytes
+            };
             target.saved_us = target.saved_us.saturating_add(commit.prefill_us_saved);
             target.busy = commit.actual_state == SlotState::Session;
             // Protection is an explicit lease, not a property of every
@@ -1267,6 +1343,7 @@ impl CacheManager {
                 slot.read_leases = slot.read_leases.saturating_sub(1);
                 slot.reuse_count += 1;
                 slot.last_used = self.clock;
+                slot.last_used_ms = plan.now_ms;
             }
         }
         let target = &self.slots[plan.target.slot as usize];
@@ -1286,6 +1363,10 @@ impl CacheManager {
             decision_us: plan.decision_us,
         };
         self.telemetry.commits += 1;
+        if commit.actual_state == SlotState::Anchor {
+            self.telemetry.anchor_publications =
+                self.telemetry.anchor_publications.saturating_add(1);
+        }
         self.telemetry.realized_reuse_tokens += realized as u64;
         self.telemetry.prefill_us_saved += commit.prefill_us_saved;
         self.last_decision = Some(decision.clone());
@@ -1518,8 +1599,10 @@ impl CacheManager {
             write_leased: slot.writer.is_some(),
             labels: slot.labels.clone(),
             last_used: slot.last_used,
+            last_used_ms: slot.last_used_ms,
             reuse_count: slot.reuse_count,
             physical_bytes: slot.physical_bytes,
+            accounted_bytes: slot.accounted_bytes,
             protected: slot.protected,
         })
     }
@@ -1643,11 +1726,19 @@ impl CacheManager {
             .filter(|slot| slot.state == SlotState::Anchor)
             .map(|slot| slot.physical_bytes)
             .sum();
+        self.telemetry.anchor_accounted_bytes = self
+            .slots
+            .iter()
+            .filter(|slot| slot.state == SlotState::Anchor)
+            .map(|slot| slot.accounted_bytes)
+            .sum();
         self.telemetry.physical_byte_budget =
             self.retention.physical_byte_budget.unwrap_or_default();
         self.telemetry.high_watermark_bytes = self.retention.high_watermark_bytes;
         self.telemetry.low_watermark_bytes = self.retention.low_watermark_bytes;
         self.telemetry.under_pressure = self.retention.physical_byte_budget.is_some()
             && self.telemetry.physical_bytes > self.retention.high_watermark_bytes;
+        self.telemetry.max_anchor_bytes_per_session = self.config.max_anchor_bytes_per_session;
+        self.telemetry.session_idle_ttl_ms = self.config.session_idle_ttl_ms;
     }
 }

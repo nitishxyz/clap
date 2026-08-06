@@ -78,5 +78,16 @@ func workerRetention(_ facts: RetentionTelemetryFacts) -> WorkerRetention {
     low_watermark_bytes: telemetry.low_watermark_bytes,
     under_pressure: telemetry.under_pressure != 0,
     hard_ceiling: retention.hardCeiling, eviction_reason: facts.lastEvictionReason,
-    eviction_count: telemetry.evictions)
+    eviction_count: telemetry.evictions,
+    session_policy_evictions: telemetry.session_policy_evictions,
+    session_budget_rejections: telemetry.session_budget_rejections,
+    anchor_publications: telemetry.anchor_publications,
+    anchor_publication_skips: telemetry.anchor_publication_skips,
+    expired_slots: telemetry.expired_slots,
+    expired_accounted_bytes: telemetry.expired_accounted_bytes,
+    released_session_slots: telemetry.released_session_slots,
+    released_session_accounted_bytes: telemetry.released_session_accounted_bytes,
+    anchor_accounted_bytes: telemetry.anchor_accounted_bytes,
+    max_anchor_bytes_per_session: telemetry.max_anchor_bytes_per_session,
+    session_idle_ttl_ms: telemetry.session_idle_ttl_ms)
 }

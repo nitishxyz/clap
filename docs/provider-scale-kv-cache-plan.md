@@ -596,14 +596,33 @@ Gates:
 
 ### Phase 1 — Fleet-safe bounded sequence cache
 
-Status: IN PROGRESS. Phase 1A is locally ready for GPU validation. It adds a
-total retained-anchor cap per non-zero session (automatic checkpoints count
-toward the total), a stricter automatic-checkpoint cap per session, TOML/env
-configuration, llama.cpp and MLX wiring, C ABI v4, and deterministic policy
-tests. Defaults are four total anchors and two automatic checkpoints per
-session. Session zero remains the explicitly unscoped/structural path and is
-governed by global and byte budgets. Per-session byte limits, TTL/release,
-publication telemetry, and churn metrics remain for later Phase 1 slices.
+Status: IN PROGRESS; substantial local implementation complete and GPU
+validation intentionally deferred until the phase is consolidated. The branch
+now includes total retained-anchor and automatic-checkpoint caps per non-zero
+session, an optional policy-accounted byte cap that stays separate from
+measured physical memory, a 15-minute default idle TTL, explicit coordinator
+and adapter session release, physical-slot reconciliation in llama.cpp and
+MLX, ABI v6, lifecycle/publication telemetry, Prometheus series, and
+provider-shaped hard-ceiling churn tests. Defaults are four total anchors and
+two automatic checkpoints per session; the byte cap defaults to disabled until
+an operator supplies a model-appropriate budget. Session zero remains the
+explicitly unscoped/structural path and is governed by global and byte budgets.
+An external server/admin endpoint for explicit session release and a clean CUDA
+pod run remain before the phase is complete.
+
+Local evidence (2026-08-06, branch checkpoint pending):
+
+- `bun run hardening:verify` passed end to end
+- 554 TypeScript tests passed
+- 71 Rust coordinator/retention/ABI/provider-scale tests passed
+- 26 native llama.cpp tests passed, including expired-slot mirror reconciliation
+- 133 MLX XCTest/Swift Testing cases passed (one physical model probe skipped by
+  design when no model fixture is configured)
+- native production builds, worker-protocol conformance, generated OpenAPI/web
+  drift, bundle checks, structure/ownership gates, and docs checks passed
+- provider-scale trace: 100 anchors from one noisy session plus 79 other users
+  saturated a 32-entry pool while preserving the four-anchor session bound and
+  allowing a fresh post-saturation generation
 
 Deliverables:
 
