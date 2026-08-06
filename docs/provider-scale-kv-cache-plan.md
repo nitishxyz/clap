@@ -793,9 +793,11 @@ Gates:
 
 ### Phase 4 — Reference-counted logical blocks
 
-Status: IMPLEMENTED AND LOCALLY HARDENED; clean A100 sequence-fallback
-regression pending. The Rust core now has immutable exact-token logical blocks,
-opaque monotonic block IDs, versioned prefix/session block tables, counted table
+Status: COMPLETE. Local hardening and clean A100 CUDA sequence-fallback
+validation completed on 2026-08-06 at implementation SHA
+`bf937e3ab1bb6263419b90e82ad52129d63fa533`; the checked-in evidence commit is
+pending. The Rust core has immutable exact-token logical blocks, opaque
+monotonic block IDs, versioned prefix/session block tables, counted table
 references, exclusive write leases, shared read leases, and copy-on-write table
 forks. A logical block remains physically resident while any table reference or
 lease exists, and invariant validation reconciles every table reference, block
@@ -1326,6 +1328,75 @@ transfer, multi-GPU movement, or comparative throughput. Those remain later
 phases, and this result does not justify a custom llama.cpp block extension by
 itself.
 
+## Phase 4 validation evidence — 2026-08-06
+
+```text
+phase: 4 — reference-counted logical blocks
+git_sha: bf937e3ab1bb6263419b90e82ad52129d63fa533
+branch: feat/provider-scale-kv-cache
+date: 2026-08-06
+hardware: RunPod secure-cloud NVIDIA A100-SXM4-80GB, 81920 MiB
+accelerator: CUDA, all 23 model layers and the 44 MiB KV buffer on CUDA0
+driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8; compute capability 8.0
+model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
+backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
+pod_deleted: pending evidence commit synchronization
+```
+
+The clean pod cloned the public feature branch at the SHA above, installed Bun
+1.3.14 and Rust 1.97.1, and ran the Phase 4 logical-block suite, the Phase 3
+adapter-contract suite, and workspace clippy with warnings denied. All 10
+logical-block tests and all 11 adapter tests passed. The generated logical-block
+state-machine test again exercised 8,000 deterministic operations across 32
+seeds while reconciling logical references, leases, byte accounting, and fake
+physical objects after every operation.
+
+The pinned llama.cpp worker built for `CMAKE_CUDA_ARCHITECTURES=80`. The worker
+log reported all 23 layers offloaded, a 495.44 MiB CUDA0 model buffer, and a
+44.00 MiB CUDA0 KV buffer. The public loaded-model response independently
+reported `compiled=cuda`, `CUDA0`, and the A100 device identity.
+
+Before any focused test or model workload, the server bound to
+`0.0.0.0:11435`, RunPod exposed that HTTP port, and external requests reached
+both `/clap/v1/health` and the production dashboard HTML. The same public checks
+passed after generation; final health remained `status=ok`, version 0.2.2.
+
+The live capability assertion proved Phase 4 did not over-advertise the
+Rust-only fake backend. The worker still exposed contract version 1, sequence
+kind, llama.cpp `llama-sequence` format version 1, whole-state restore,
+copy-on-write sequence fork, token trim, prompt-boundary snapshots, device tier,
+and explicit unknown physical-byte accounting. Paged kind, block size,
+export/import, promote/demote, and transfer format all remained absent.
+
+Two identical cache-eligible chat requests completed successfully. The first
+was a physical miss and the repeat was a physical hit that reused 61 of 62
+prompt tokens. The dashboard reported two successful requests, zero errors, 124
+physical prompt tokens, 61 physically reused tokens, one hit, and one miss.
+Runtime telemetry retained one session and two anchors across three sequence
+slots. Measured retained bytes correctly remained `null` with source
+`unavailable`; Phase 4 did not relabel the sequence estimate as exact physical
+memory.
+
+The live CUDA process used 1,082 MiB. The intentionally short one-second sampler
+captured two points, 1,033 MiB maximum and 12% peak utilization; the process
+sample is the stronger residency observation. No worker crash, restart, OOM,
+API error, or queue rejection occurred.
+
+Sanitized artifacts were copied off the pod under
+`/tmp/clap-phase4-evidence/`, including logical-block and adapter test logs,
+clippy output, CUDA build and worker logs, descriptor and runtime snapshots,
+generation responses, public health/dashboard responses, VRAM samples, model
+digest, and checksums. The frozen archive
+`/tmp/clap-phase4-evidence.tar.gz` has SHA-256
+`a86b2b9a85ac8c199df686905540c8d306620b49dc7236753a787786d8cb64f6`.
+
+Known limits are deliberate: the logical-block physical backend is in-memory
+and Rust-only, while the live worker remains the validated public sequence
+fallback. This phase proves ownership and transaction invariants, not a native
+paged engine, exact llama.cpp block bytes, multi-GPU movement, remote transfer,
+or comparative density/throughput. Those remain later phases and require their
+own measurements and fail-closed capability negotiation.
+
 ## Success criteria
 
 Clap reaches provider-scale cache maturity when:
@@ -1357,8 +1428,7 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Commit and push the locally hardened Phase 4 logical-block checkpoint, then
-validate the focused Rust property/transaction suite and live CUDA sequence
-fallback from a clean A100 pod with the HTTP port exposed and the public
-dashboard verified first. Preserve the Phase 3 descriptor and do not advertise
-paged support, begin remote transfer, or add a custom llama.cpp block extension.
+Synchronize the Phase 4 evidence commit, delete validation pod `8h9duyqyn9epzz`,
+and record the final evidence SHA and teardown state. Then scope Phase 5 as a
+measurement-first llama.cpp physical-path investigation; preserve the public
+sequence fallback and do not add an extension without material clean A/B gains.
