@@ -1,6 +1,7 @@
 # Provider-Scale KV Cache Plan
 
-Status: proposed. This plan extends `docs/scale-plan.md` and
+Status: Phase 1 implemented and validated on a clean A100 pod on 2026-08-06.
+This plan extends `docs/scale-plan.md` and
 `docs/rust-cache-coordinator-plan.md` from a strong single-host cache into a
 cache-aware inference fleet. It is intentionally phased so every checkpoint
 can be committed, pushed, installed on a clean GPU pod, and measured before the
@@ -913,6 +914,88 @@ pod_deleted:
 Raw logs should be sanitized and retained only when useful. Summary tables must
 link to reproducible commands or scripts.
 
+## Phase 1 validation evidence — 2026-08-06
+
+```text
+phase: 1 — fleet-safe session retention
+git_sha: 4c9168b3797dbdc1910af8a3cf3205416d5d2485
+branch: feat/provider-scale-kv-cache
+date: 2026-08-06
+hardware: RunPod secure-cloud NVIDIA A100-SXM4-80GB, 81920 MiB
+accelerator: CUDA, all 23 model layers and the 44 MiB unified KV pool on CUDA0
+driver_runtime: NVIDIA driver 550.127.05; CUDA toolkit 12.8
+model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
+backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
+pod_deleted: yes, after evidence push and final local synchronization
+```
+
+The clean pod cloned the feature branch at the SHA above, installed Bun
+1.3.14 and Rust 1.97.1, built the Rust cache in release mode, and built the
+llama.cpp worker for `CMAKE_CUDA_ARCHITECTURES=80`. Dynamic linkage resolved
+CUDA 12, cuBLAS, and `libcuda`; the worker reported one A100, assigned every
+model layer to CUDA0, and allocated its KV pool on CUDA0. The provider-shaped
+probe used a 2,048-cell context and these retention overrides to make pressure
+observable with a small public fixture:
+
+```text
+CLAP_LLAMA_RETAINED_MAX=32
+CLAP_CACHE_MAX_ANCHORS_PER_SESSION=4
+CLAP_CACHE_MAX_ANCHOR_BYTES_PER_SESSION=0
+CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION=2
+CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS=16
+CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS=16
+CLAP_CACHE_SESSION_IDLE_TTL_MS=20000
+```
+
+The production default checkpoint threshold remains larger; the 16-token
+threshold was test-only so a 1.1B model could exercise checkpoint and anchor
+churn quickly. `CLAP_HOME` was placed on the pod's local root filesystem, not
+`/workspace`, because RunPod's FUSE volume reports mode `0777` even after
+`chmod`; the cache-identity secret correctly rejected that insecure mount.
+
+Commands executed on the clean clone included:
+
+```sh
+bun install --frozen-lockfile
+cargo build --manifest-path native/cache/Cargo.toml --release --locked
+bun run runtime:llama:vendor
+CLAP_CUDA_ARCHS=80 bun run runtime:llama:build
+python3 /workspace/clap-validation/provider_gpu_probe.py
+cargo test --manifest-path native/cache/Cargo.toml --locked --test provider_scale
+cargo test --manifest-path native/cache/Cargo.toml --locked --test coordinator \
+  idle_expiry_and_explicit_release_preserve_busy_and_other_sessions -- --exact
+```
+
+| Checkpoint | Retained total | Anchors | Evictions | Session-policy evictions | Expired | Budget rejections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| after one noisy session | 10 | 8 across noisy + warmup sessions | 11 | 11 | 0 | 0 |
+| after 44 additional users | 32 | 31 | 89 | 11 | 0 | 0 |
+| fresh user + noisy-session return at saturation | 32 | 31 | 93 | 11 | 0 | 0 |
+| after the 20-second idle TTL | 5 | 4 | 93 | 11 | 32 | 0 |
+
+All 58 live chat requests completed without an API or worker error. The
+dashboard recorded 56 physical cache hits, two misses, 6,112 physical prompt
+tokens, and 4,109 reused tokens. A fresh user and the original noisy session
+both generated successfully after the pool reached its hard 32-entry ceiling.
+Prometheus independently reported 81 anchor publications, 11 per-session
+policy evictions, 32 expired slots, and zero session-budget rejections. The
+VRAM sampler observed a 1,097 MiB maximum with 56% peak GPU utilization; no
+OOM or worker restart occurred.
+
+The two deterministic provider-scale tests passed on the pod. The focused
+lifecycle test also proved that idle expiry and explicit internal release do
+not reclaim busy state or another session. An external admin/server release
+endpoint is intentionally still outside Phase 1. Physical retained bytes
+remain unavailable through the pinned llama.cpp public API, so the live
+telemetry correctly kept observed retained bytes unavailable while reporting
+policy-accounted anchor bytes separately.
+
+Known limits of this checkpoint are the single-GPU, small-model fixture and
+sequence-cache semantics. It does not validate multi-GPU transfer, fleet
+routing, byte-accurate block sharing, or a public session-release API. Those
+remain later phases; no custom llama.cpp block extension is justified by this
+checkpoint alone.
+
 ## Success criteria
 
 Clap reaches provider-scale cache maturity when:
@@ -944,17 +1027,10 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Start Phase 0 and Phase 1 on a feature branch:
-
-1. establish the provider-scale workload and baseline artifact
-2. add per-session anchor/checkpoint budgets and idle expiry to the Rust policy
-3. wire configuration and telemetry through llama.cpp and MLX adapters
-4. test locally
-5. push the ready-to-test commit
-6. validate a clean branch clone on an A100-class pod
-7. commit the sanitized evidence and pull the final branch state from GitHub
-
-Do not start a custom llama.cpp block extension until bounded sequence-cache
-behavior and cache-aware routing have reliable measurements. Those two phases
-provide immediate multi-user value and the evidence needed to decide which
-low-level extension is actually worth maintaining.
+Begin Phase 2 with cache-aware routing metadata and cost decisions while
+preserving the validated Phase 1 bounds. Use keyed compatibility identities,
+soft-state worker locations, queue delay, measured prefill cost, and retention
+pressure to choose a worker; stale or missing metadata must fall back to fresh
+prefill. Do not begin a custom llama.cpp block extension until Phase 2 routing
+measurements show that sequence-cache density, rather than placement, is the
+next material bottleneck.
