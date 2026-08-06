@@ -206,11 +206,19 @@ export function createServer(
   });
   const replicaKeysByModel = new Map<string, Set<string>>();
   const routingWorkerIds = new Map<string, string>();
+  const routingWorkers = new Map<string, {
+    key: string;
+    worker: ResidentWorkerHandle;
+    modelDomain: string;
+  }>();
   lifecycle ??= new ModelLifecycleManager(() => Date.now(), async (entry) => {
     const keys = replicaKeysByModel.get(entry.key) ?? new Set([entry.key]);
     await Promise.all([...keys].map(async (key) => {
       const workerId = routingWorkerIds.get(key);
-      if (workerId) routingDirectory.invalidateWorker(workerId);
+      if (workerId) {
+        routingDirectory.invalidateWorker(workerId);
+        routingWorkers.delete(workerId);
+      }
       routingWorkerIds.delete(key);
       await residents.shutdownAsync(key);
     }));
@@ -383,6 +391,11 @@ export function createServer(
         workerDescriptor(model));
       const workerId = stableRoutingWorkerId(routingNodeId, cacheIdentity.physical.fingerprint, replica);
       routingWorkerIds.set(key, workerId);
+      routingWorkers.set(workerId, {
+        key,
+        worker,
+        modelDomain: cacheIdentity.physical.fingerprint,
+      });
       byWorkerId.set(workerId, worker);
       heartbeatWorker(worker, workerId, cacheIdentity.physical.fingerprint);
     }
@@ -464,6 +477,19 @@ export function createServer(
       },
     };
   };
+  const routingHeartbeatTimer = setInterval(() => {
+    for (const [workerId, binding] of routingWorkers) {
+      if (residents.get(binding.key) !== binding.worker) {
+        routingDirectory.invalidateWorker(workerId);
+        routingWorkers.delete(workerId);
+        routingStats.delete(workerId);
+        continue;
+      }
+      heartbeatWorker(binding.worker, workerId, binding.modelDomain);
+    }
+    routingDirectory.cleanup();
+  }, Math.max(1_000, Math.floor(config.routing.worker_ttl_ms / 3)));
+  routingHeartbeatTimer.unref?.();
   // Warm-on-boot: models marked pinned (or given keep_alive) in config load
   // shortly after startup so the first user request never pays a cold load.
   // Deferred so server construction stays synchronous and tests unaffected.

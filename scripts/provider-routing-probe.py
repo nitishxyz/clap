@@ -60,19 +60,25 @@ def chat(session: str, label: str, max_tokens: int = 8, padding: str = "",
     })
 
 
-def dashboard_record(label: str, active: bool | None = None):
+def dashboard_ids() -> set[str]:
+    dashboard = request("/clap/v1/dashboard")
+    records = dashboard.get("active", []) + dashboard.get("requests", [])
+    return {record["id"] for record in records}
+
+
+def dashboard_record_after(previous_ids: set[str], active: bool | None = None):
     deadline = time.time() + 10
     while time.time() < deadline:
         dashboard = request("/clap/v1/dashboard")
         records = dashboard.get("active", []) + dashboard.get("requests", [])
         for record in records:
+            if record.get("id") in previous_ids:
+                continue
             if active is not None and (record.get("status") == "active") != active:
                 continue
-            messages = (record.get("detail") or {}).get("messages") or []
-            if any(label in str(message.get("content", "")) for message in messages):
-                return record
+            return record
         time.sleep(0.025)
-    raise RuntimeError(f"dashboard record not found for {label!r}")
+    raise RuntimeError("new dashboard record was not observed")
 
 
 health = request("/clap/v1/health")
@@ -87,8 +93,9 @@ session_histories: dict[str, list[dict]] = {}
 for index in range(SEED_SESSIONS):
     label = f"phase2-seed-{index}"
     session = f"session-{index}"
+    previous_ids = dashboard_ids()
     response = chat(session, label)
-    record = dashboard_record(label, active=False)
+    record = dashboard_record_after(previous_ids, active=False)
     routing = record.get("routing")
     if not routing:
         raise RuntimeError(f"request {label} did not record routing telemetry")
@@ -114,8 +121,9 @@ if not router.get("locations"):
 session, initial_route = next(iter(seed_routes.items()))
 owner = initial_route["workerId"]
 follow_label = "phase2-follow-up"
+previous_ids = dashboard_ids()
 follow_response = chat(session, follow_label, history=session_histories[session])
-follow_route = dashboard_record(follow_label, active=False).get("routing") or {}
+follow_route = dashboard_record_after(previous_ids, active=False).get("routing") or {}
 if follow_route.get("workerId") != owner or follow_route.get("reason") != "session_locality":
     raise RuntimeError(f"follow-up did not preserve useful session locality: {follow_route}")
 session_histories[session].extend([
@@ -137,14 +145,16 @@ def run_blocker():
 
 
 blocker = threading.Thread(target=run_blocker, daemon=True)
+previous_ids = dashboard_ids()
 blocker.start()
-blocker_record = dashboard_record(blocker_label, active=True)
+blocker_record = dashboard_record_after(previous_ids, active=True)
 if (blocker_record.get("routing") or {}).get("workerId") != owner:
     raise RuntimeError(f"blocker did not occupy the cached owner: {blocker_record.get('routing')}")
 
 overload_label = "phase2-overload-follow-up"
+previous_ids = dashboard_ids()
 chat(session, overload_label, history=session_histories[session])
-overload_route = dashboard_record(overload_label, active=False).get("routing") or {}
+overload_route = dashboard_record_after(previous_ids, active=False).get("routing") or {}
 blocker.join(timeout=300)
 if blocker.is_alive():
     raise RuntimeError("overload blocker did not finish")
@@ -161,8 +171,9 @@ if after_unload.get("workers") or after_unload.get("locations"):
     raise RuntimeError(f"model unload left stale routing state: {after_unload}")
 
 restart_label = "phase2-after-restart"
+previous_ids = dashboard_ids()
 chat(session, restart_label, history=session_histories[session])
-restart_route = dashboard_record(restart_label, active=False).get("routing") or {}
+restart_route = dashboard_record_after(previous_ids, active=False).get("routing") or {}
 if restart_route.get("directoryHit"):
     raise RuntimeError(f"restart incorrectly trusted an invalidated location: {restart_route}")
 
