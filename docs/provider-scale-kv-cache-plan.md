@@ -1,6 +1,6 @@
 # Provider-Scale KV Cache Plan
 
-Status: Phases 1 and 2 implemented and validated on clean A100 pods on
+Status: Phases 1 through 3 implemented and validated on clean A100 pods on
 2026-08-06.
 This plan extends `docs/scale-plan.md` and
 `docs/rust-cache-coordinator-plan.md` from a strong single-host cache into a
@@ -723,16 +723,17 @@ Gates:
 
 ### Phase 3 — Versioned physical-cache adapter contract
 
-Status: IMPLEMENTED LOCALLY; clean CUDA sequence-fallback validation pending.
-Rust now defines physical adapter contract v1 independently of coordinator
-policy. The checked adapter negotiates the exact contract version, validates
-operation support and request shape before physical mutation, requires exact
-format and transfer identity for import, rejects invalid outcomes, and
-invalidates uncertain targets after execution failure or abort. Physical bytes
-are represented as known or explicitly unknown with a reason; a backend that
-claims exact accounting cannot return unknown bytes, while the llama.cpp
-sequence path honestly advertises unknown accounting and MLX advertises
-estimated accounting.
+Status: COMPLETE. Local verification and clean A100 CUDA sequence-fallback
+validation completed on 2026-08-06 at implementation SHA
+`9d1c2320d5b0a6b80d2095f267bc34b5698f0da9`. Rust defines physical adapter
+contract v1 independently of coordinator policy. The checked adapter negotiates
+the exact contract version, validates operation support and request shape before
+physical mutation, requires exact format and transfer identity for import,
+rejects invalid outcomes, and invalidates uncertain targets after execution
+failure or abort. Physical bytes are represented as known or explicitly unknown
+with a reason; a backend that claims exact accounting cannot return unknown
+bytes, while the llama.cpp sequence path honestly advertises unknown accounting
+and MLX advertises estimated accounting.
 
 The contract operations are `inspect`, `continue`, `restore`, `fork`, `trim`,
 `snapshot`, `release`, `export`, `import`, `promote`, and `demote`. Descriptors
@@ -758,7 +759,7 @@ or a live paged kind without block size fail validation. The field remains
 optional so an older worker can still use the existing sequence fallback, but
 an advertised unknown version is rejected during model load.
 
-Local evidence (2026-08-06, ready-to-test commit pending):
+Local evidence (2026-08-06):
 
 - 11 Rust adapter conformance tests cover unsupported and malformed operations
   before mutation, crash and abort invalidation, invalid backend outcomes,
@@ -1197,6 +1198,86 @@ KV transfer, multi-GPU routing, or comparative throughput against a single
 replica. Physical sequence-cache density remains a later measurement; this
 result does not by itself justify a custom llama.cpp block extension.
 
+## Phase 3 validation evidence — 2026-08-06
+
+```text
+phase: 3 — versioned physical-cache adapter contract
+git_sha: 9d1c2320d5b0a6b80d2095f267bc34b5698f0da9
+branch: feat/provider-scale-kv-cache
+date: 2026-08-06
+hardware: RunPod secure-cloud NVIDIA A100-SXM4-80GB, 81920 MiB
+accelerator: CUDA, all 23 model layers and the 44 MiB KV buffer on CUDA0
+driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8; compute capability 8.0
+model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
+backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
+pod_deleted: pending evidence commit synchronization
+```
+
+The clean pod cloned the public feature branch at the SHA above, installed
+dependencies with Bun 1.3.14 and Rust 1.97.1, ran the focused Rust contract
+suite, and built the pinned llama.cpp worker for
+`CMAKE_CUDA_ARCHITECTURES=80`. The worker log assigned all 23 model layers to
+CUDA0, reported a 495.44 MiB CUDA model buffer and 44.00 MiB CUDA KV buffer,
+and reused CUDA graphs during generation. The loaded-model API independently
+reported `compiled=cuda`, `CUDA0`, and the A100 device identity.
+
+The focused clean-pod commands included:
+
+```sh
+bun install --frozen-lockfile
+cargo test --manifest-path native/cache/Cargo.toml --locked \
+  --test adapter_contract
+bun run runtime:llama:vendor
+CLAP_CUDA_ARCHS=80 bun run runtime:llama:build
+bun run build:web
+curl -X POST http://127.0.0.1:11435/clap/v1/models/load ...
+curl -X POST http://127.0.0.1:11435/v1/chat/completions ...
+```
+
+All 11 adapter conformance tests passed on the clean pod. The live descriptor
+assertion required contract version 1, sequence kind, llama.cpp
+`llama-sequence` format version 1, whole-state restore, copy-on-write fork,
+token trim, prompt-boundary snapshots, device tier, explicit unknown physical
+byte accounting, and no transfer format or export/import operations. The
+assertion passed before workload generation.
+
+Two identical cache-eligible chat requests then completed successfully. The
+first was a physical miss and the repeat was a physical hit that reused 60 of
+61 prompt tokens. The dashboard reported two successful requests, zero errors
+or cancellations, 122 physical prompt tokens, 60 physically reused tokens, one
+physical hit, and one physical miss. Runtime telemetry retained one session and
+two anchors across three physical sequence slots. Because the public llama.cpp
+API does not expose measured per-sequence bytes, `retainedBytes` correctly
+remained `null` with source `unavailable`; the separate context-based policy
+estimate was 25,165,824 bytes.
+
+The CUDA worker used 1,082 MiB according to the compute-process sample. The
+one-second sampler observed 1,091 MiB peak device memory and 13% peak GPU
+utilization during this intentionally small correctness workload. No worker
+crash, restart, OOM, API error, or queue rejection occurred.
+
+The server bound to `0.0.0.0:11435`, and RunPod exposed that HTTP port. External
+checks reached `/clap/v1/health` and the production dashboard HTML before the
+workload and again after generation; the final public health response was
+`status=ok`, version 0.2.2. This verifies the required public dashboard path in
+addition to the pod-local workload listener.
+
+Sanitized artifacts were copied off the pod before teardown under
+`/tmp/clap-phase3-evidence/`, including the adapter assertion and descriptor,
+focused contract log, CUDA build log, worker launch metadata and stderr,
+generation responses, dashboard/runtime summaries, public health/dashboard
+responses, VRAM samples, model digest, and per-file checksums. The frozen tar
+archive `/tmp/clap-phase3-evidence.tar.gz` has SHA-256
+`05621194cb3dad18e08c008c7de20b3ded24ef0b230572e6342ceafad60bb3dd`.
+
+Known limits are the single-node, single-GPU, small-model fixture and public
+sequence-cache semantics. This validates contract negotiation, capability
+publication, honest unknown byte accounting, and fallback generation; it does
+not validate a native paged engine, exact physical block bytes, remote KV
+transfer, multi-GPU movement, or comparative throughput. Those remain later
+phases, and this result does not justify a custom llama.cpp block extension by
+itself.
+
 ## Success criteria
 
 Clap reaches provider-scale cache maturity when:
@@ -1228,10 +1309,7 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Commit and push the Phase 3 checkpoint, then validate a clean A100 CUDA build
-and live llama.cpp generation while capturing the advertised adapter descriptor
-through the public loaded-model API. Confirm contract version 1, public
-sequence format, copy-on-write fork semantics, no transfer capability, and
-explicit unknown physical-byte accounting. Delete the pod after evidence is
-synchronized. Do not begin Phase 4, remote KV transfer, or a custom llama.cpp
-block extension until that fallback validation passes.
+Synchronize the Phase 3 evidence commit, delete the validation pod, and record
+the final evidence SHA and teardown state. Then scope Phase 4 around measured,
+authenticated, integrity-checked remote KV transfer without changing the
+validated sequence fallback or starting a custom llama.cpp block extension.
