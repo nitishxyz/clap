@@ -596,6 +596,15 @@ Gates:
 
 ### Phase 1 — Fleet-safe bounded sequence cache
 
+Status: IN PROGRESS. Phase 1A is locally ready for GPU validation. It adds a
+total retained-anchor cap per non-zero session (automatic checkpoints count
+toward the total), a stricter automatic-checkpoint cap per session, TOML/env
+configuration, llama.cpp and MLX wiring, C ABI v4, and deterministic policy
+tests. Defaults are four total anchors and two automatic checkpoints per
+session. Session zero remains the explicitly unscoped/structural path and is
+governed by global and byte budgets. Per-session byte limits, TTL/release,
+publication telemetry, and churn metrics remain for later Phase 1 slices.
+
 Deliverables:
 
 - per-session semantic-anchor limit

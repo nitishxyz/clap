@@ -36,11 +36,13 @@ struct CacheExecutorConfig {
   uint64_t min_reuse_tokens = 16;
   uint64_t logical_token_capacity = 0;
   uint32_t max_anchors = 0;
+  uint32_t max_anchors_per_session = 0;
   uint32_t hard_max_retained_entries = 0;
   bool automatic_checkpoints = true;
   uint64_t checkpoint_minimum_tokens = 2048;
   uint64_t checkpoint_interval_tokens = 2048;
   uint32_t checkpoint_max = 8;
+  uint32_t checkpoint_max_per_session = 0;
   uint32_t checkpoint_budget_basis_points = 2500;
   uint64_t checkpoint_budget_bytes = 0;
 };

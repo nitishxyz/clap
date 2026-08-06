@@ -66,6 +66,8 @@ void WorkerState::load(const std::string& model_path) {
     config.slot_count = static_cast<uint32_t>(retained);
     config.logical_token_capacity = static_cast<uint64_t>(context);
     config.max_anchors = static_cast<uint32_t>(retained);
+    config.max_anchors_per_session = static_cast<uint32_t>(
+        std::max(0, env_int("CLAP_CACHE_MAX_ANCHORS_PER_SESSION", 4)));
     config.hard_max_retained_entries = static_cast<uint32_t>(retained);
     config.automatic_checkpoints = env_int("CLAP_CACHE_CHECKPOINTS_ENABLED", 1) != 0;
     config.checkpoint_minimum_tokens = static_cast<uint64_t>(
@@ -73,6 +75,8 @@ void WorkerState::load(const std::string& model_path) {
     config.checkpoint_interval_tokens = static_cast<uint64_t>(
         env_int("CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS", 2048));
     config.checkpoint_max = static_cast<uint32_t>(env_int("CLAP_CACHE_CHECKPOINT_MAX", 8));
+    config.checkpoint_max_per_session = static_cast<uint32_t>(
+        std::max(0, env_int("CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION", 2)));
     config.checkpoint_budget_basis_points = static_cast<uint32_t>(
         env_int("CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS", 2500));
     config.checkpoint_budget_bytes = env_u64("CLAP_CACHE_CHECKPOINT_BUDGET_BYTES", 0);

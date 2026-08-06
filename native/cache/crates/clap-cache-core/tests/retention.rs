@@ -29,6 +29,7 @@ fn manager(initial: u32, hard_max: u32) -> CacheManager {
             min_reuse_tokens: 2,
             logical_token_capacity: 1,
             max_anchors: hard_max,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -364,6 +365,7 @@ fn busy_and_protected_anchors_are_ineligible_pressure_victims() {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 6,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -442,6 +444,7 @@ fn branch_pressure_preserves_the_only_lower_depth_band_donor() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 10,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {
@@ -516,6 +519,7 @@ fn retained_pressure_cannot_reject_an_executable_session_target() {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         RetentionConfig {

@@ -7,15 +7,21 @@ public struct CoordinatorCheckpointConfiguration: Sendable {
   public let minimumTokens: UInt64
   public let intervalTokens: UInt64
   public let maximum: UInt32
+  public let maximumPerSession: UInt32
+  public let maximumAnchorsPerSession: UInt32
   public let budgetBasisPoints: UInt32
   public let budgetBytes: UInt64
 
   public init(enabled: Bool, minimumTokens: UInt64, intervalTokens: UInt64,
-              maximum: UInt32, budgetBasisPoints: UInt32, budgetBytes: UInt64) {
+              maximum: UInt32, maximumPerSession: UInt32 = 0,
+              maximumAnchorsPerSession: UInt32 = 0,
+              budgetBasisPoints: UInt32, budgetBytes: UInt64) {
     self.enabled = enabled
     self.minimumTokens = minimumTokens
     self.intervalTokens = intervalTokens
     self.maximum = maximum
+    self.maximumPerSession = maximumPerSession
+    self.maximumAnchorsPerSession = maximumAnchorsPerSession
     self.budgetBasisPoints = budgetBasisPoints
     self.budgetBytes = budgetBytes
   }
@@ -223,7 +229,8 @@ public final class CacheCoordinator {
       retention.lowWatermarkBytes, checkpoints.enabled ? 1 : 0,
       checkpoints.minimumTokens, checkpoints.intervalTokens,
       checkpoints.maximum, checkpoints.budgetBasisPoints,
-      checkpoints.budgetBytes) else {
+      checkpoints.budgetBytes, checkpoints.maximumAnchorsPerSession,
+      checkpoints.maximumPerSession) else {
       throw CacheCoordinatorError.unavailable
     }
     self.handle = handle

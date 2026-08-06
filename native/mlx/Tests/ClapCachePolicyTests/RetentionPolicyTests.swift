@@ -113,7 +113,7 @@ final class RetentionPolicyTests: XCTestCase {
         physicalByteBudget: largeDefaultBudget,
         highWatermarkBytes: UInt64(Double(largeDefaultBudget) * 90 / 100),
         lowWatermarkBytes: UInt64(Double(largeDefaultBudget) * 75 / 100)))
-    let clampedBudget: UInt64 = 1 << 30
+    let clampedBudget: UInt64 = 2 << 30
     XCTAssertEqual(RetentionConfiguration.fromEnvironment([:], physicalMemoryBytes: 64 << 30,
       startupAvailableMemoryBytes: 8 << 30),
       RetentionConfiguration(initialEntries: 4, hardCeiling: 256,

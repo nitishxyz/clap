@@ -24,6 +24,11 @@ export const CheckpointConfigSchema = z.object({
   // Upper bound on checkpoints per prompt. Raising this multiplies snapshot
   // bytes and evicts higher-value semantic anchors on memory-tight hosts.
   max_checkpoints: z.number().int().min(1).max(64).default(8),
+  // Automatic checkpoints are also bounded across the complete retained
+  // state of one session so repeated long turns cannot monopolize the pool.
+  // Zero disables this cap for operators who explicitly prefer the legacy
+  // global-only policy.
+  max_checkpoints_per_session: z.number().int().min(0).max(64).default(2),
   // Share of the retained-KV budget automatic checkpoints may hold. An anchor
   // costs `fixed_state + tokens * bytes_per_token`, so this fraction decides
   // the longest prompt prefix that can be reused. At 25% a large hybrid model
@@ -92,8 +97,11 @@ export const ClapConfigSchema = z.object({
     max_active: z.number().int().positive().optional(),
   }).partial().default({}),
   cache: z.object({
+    // Includes semantic boundaries and automatic checkpoints. This is a
+    // retained-state fairness limit, not a limit on conversation length.
+    max_anchors_per_session: z.number().int().min(0).max(256).default(4),
     checkpoints: CheckpointConfigSchema.default({}),
-  }).default({ checkpoints: {} }),
+  }).default({ max_anchors_per_session: 4, checkpoints: {} }),
   telemetry: z.object({
     cache_decisions_enabled: z.boolean().optional().default(true),
     cache_decisions_max_mib: z.number().int().min(1).max(1024).optional().default(32),
@@ -234,10 +242,12 @@ export function applyConfigToEnv(config: ClapConfig): void {
   }
   const checkpoints = config.cache.checkpoints;
   const checkpointEnv: Record<string, string> = {
+    CLAP_CACHE_MAX_ANCHORS_PER_SESSION: String(config.cache.max_anchors_per_session),
     CLAP_CACHE_CHECKPOINTS_ENABLED: checkpoints.enabled ? "1" : "0",
     CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS: String(checkpoints.minimum_tokens),
     CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS: String(checkpoints.interval_tokens),
     CLAP_CACHE_CHECKPOINT_MAX: String(checkpoints.max_checkpoints),
+    CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION: String(checkpoints.max_checkpoints_per_session),
     CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS: String(Math.round(checkpoints.budget_fraction * 10_000)),
     CLAP_CACHE_CHECKPOINT_BUDGET_BYTES: String(checkpoints.budget_bytes),
   };

@@ -10,6 +10,8 @@ struct CheckpointConfiguration {
   let coordinatorMinimumTokens: UInt64
   let coordinatorIntervalTokens: UInt64
   let coordinatorMaximum: UInt32
+  let coordinatorMaximumPerSession: UInt32
+  let maximumAnchorsPerSession: UInt32
   let budgetBasisPoints: UInt32
   let budgetBytes: UInt64
 
@@ -70,6 +72,10 @@ struct WorkerConfiguration {
       coordinatorMinimumTokens: UInt64(environment["CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS"] ?? "") ?? 2_048,
       coordinatorIntervalTokens: UInt64(environment["CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS"] ?? "") ?? 2_048,
       coordinatorMaximum: UInt32(environment["CLAP_CACHE_CHECKPOINT_MAX"] ?? "") ?? 8,
+      coordinatorMaximumPerSession: UInt32(
+        environment["CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION"] ?? "") ?? 2,
+      maximumAnchorsPerSession: UInt32(
+        environment["CLAP_CACHE_MAX_ANCHORS_PER_SESSION"] ?? "") ?? 4,
       budgetBasisPoints: UInt32(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS"] ?? "") ?? 2_500,
       budgetBytes: UInt64(environment["CLAP_CACHE_CHECKPOINT_BUDGET_BYTES"] ?? "") ?? 0)
     debugPrompt = environment["CLAP_MLX_DEBUG_PROMPT"] != nil

@@ -15,7 +15,7 @@ mod types;
 
 pub use types::*;
 
-pub const CLAP_CACHE_ABI_VERSION: u32 = 3;
+pub const CLAP_CACHE_ABI_VERSION: u32 = 4;
 pub const CLAP_CACHE_SLOT_MATERIALIZED: u8 = SlotCapabilities::MATERIALIZED;
 pub const CLAP_CACHE_SLOT_WRITABLE: u8 = SlotCapabilities::WRITABLE;
 pub const CLAP_CACHE_SLOT_PARTIAL_SUFFIX_TRIM: u8 = SlotCapabilities::PARTIAL_SUFFIX_TRIM;
@@ -110,6 +110,7 @@ fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
             .map_err(|_| ClapCacheStatus::InvalidArgument)?,
         logical_token_capacity: usize::try_from(config.logical_token_capacity)
             .map_err(|_| ClapCacheStatus::InvalidArgument)?,
+        max_anchors_per_session: config.max_anchors_per_session,
         automatic_checkpoints: AutomaticCheckpointConfig {
             enabled: config.automatic_checkpoint_mode != 2,
             minimum_prompt_tokens: if config.automatic_checkpoint_min_tokens == 0 {
@@ -129,6 +130,7 @@ fn core_config(config: ClapCacheConfig) -> Result<Config, ClapCacheStatus> {
             } else {
                 config.automatic_checkpoint_max
             },
+            max_checkpoints_per_session: config.automatic_checkpoint_max_per_session,
             memory_budget_basis_points: if config.automatic_checkpoint_memory_basis_points == 0 {
                 defaults.memory_budget_basis_points
             } else {

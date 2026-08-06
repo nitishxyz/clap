@@ -141,7 +141,8 @@ cc_manager_t *cc_manager_create_with_retention(
     uint64_t high_watermark_bytes, uint64_t low_watermark_bytes,
     uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
     uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
-    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes);
+    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes,
+    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session);
 void cc_manager_destroy(cc_manager_t *manager);
 int32_t cc_manager_last_status(const cc_manager_t *manager);
 

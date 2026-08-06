@@ -28,6 +28,7 @@ fn manager(slots: u32) -> CacheManager {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: slots,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(slots),
@@ -335,6 +336,7 @@ fn exact_anchor_creation_is_a_namespace_scoped_noop_and_capacity_is_replaceable(
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 1,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -385,6 +387,7 @@ fn long_harness_output_reserve_does_not_discard_a_legal_donor() {
             min_reuse_tokens: 2,
             logical_token_capacity: 128,
             max_anchors: 2,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -899,6 +902,7 @@ fn deterministic_value_eviction_protects_anchor_and_interactive_session() {
             min_reuse_tokens: 2,
             logical_token_capacity: 7,
             max_anchors: 1,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(2),
@@ -1243,6 +1247,7 @@ fn automatic_checkpoint_budget_admits_a_fresh_namespace_baseline() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 8,
+            max_anchors_per_session: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 target_interval_tokens: 2_048,
                 max_checkpoints: 8,
@@ -1295,6 +1300,7 @@ fn nontrimmable_full_donors_leave_deep_checkpoint_executable_across_projects() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 12,
+            max_anchors_per_session: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 target_interval_tokens: 2_048,
                 max_checkpoints: 8,
@@ -1422,6 +1428,7 @@ fn impossible_automatic_checkpoint_budget_skips_without_failing_generation() {
             min_reuse_tokens: 16,
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
+            max_anchors_per_session: 0,
             automatic_checkpoints: checkpoints,
         },
         RetentionConfig {
@@ -1453,6 +1460,7 @@ fn anchor_pressure_keeps_structural_and_reused_project_boundaries() {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 3,
+            max_anchors_per_session: 0,
             automatic_checkpoints: Default::default(),
         },
         fixed_retention(4),
@@ -1500,6 +1508,7 @@ fn full_anchor_budget_advances_to_the_newest_same_session_boundary() {
             min_reuse_tokens: 2,
             logical_token_capacity: usize::MAX,
             max_anchors: 2,
+            max_anchors_per_session: 0,
             automatic_checkpoints: AutomaticCheckpointConfig {
                 enabled: false,
                 ..Default::default()
@@ -1549,6 +1558,111 @@ fn full_anchor_budget_advances_to_the_newest_same_session_boundary() {
         SlotState::Anchor
     );
     cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn per_session_anchor_limit_recycles_that_session_before_using_empty_capacity() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 4,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 4,
+            max_anchors_per_session: 2,
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        },
+        fixed_retention(4),
+    )
+    .unwrap();
+
+    let first = [1, 2, 3, 4];
+    let second = [1, 2, 3, 4, 5, 6];
+    let unrelated = [90, 91, 92, 93];
+    let mut first_request = request(&first, namespace(1), 1, 0);
+    first_request.result_state = SlotState::Anchor;
+    let first_anchor = cache.plan(first_request).unwrap();
+    let first_slot = first_anchor.target.slot;
+    commit_idle(&mut cache, &first_anchor, first.len(), SlotState::Anchor);
+    let mut second_request = request(&second, namespace(1), 1, 0);
+    second_request.result_state = SlotState::Anchor;
+    let second_anchor = cache.plan(second_request).unwrap();
+    let second_slot = second_anchor.target.slot;
+    commit_idle(&mut cache, &second_anchor, second.len(), SlotState::Anchor);
+    let mut unrelated_request = request(&unrelated, namespace(2), 2, 0);
+    unrelated_request.result_state = SlotState::Anchor;
+    let unrelated_anchor = cache.plan(unrelated_request).unwrap();
+    let unrelated_slot = unrelated_anchor.target.slot;
+    commit_idle(
+        &mut cache,
+        &unrelated_anchor,
+        unrelated.len(),
+        SlotState::Anchor,
+    );
+    assert_eq!(cache.telemetry().active_slots, 3);
+
+    let newest = [1, 2, 3, 4, 5, 6, 7, 8];
+    let mut newest_request = request(&newest, namespace(1), 1, 0);
+    newest_request.result_state = SlotState::Anchor;
+    let replacement = cache.plan(newest_request).unwrap();
+
+    assert!(replacement.target.slot == first_slot || replacement.target.slot == second_slot);
+    assert_ne!(replacement.target.slot, unrelated_slot);
+    assert!(!replacement.evictions.is_empty());
+    assert_eq!(cache.telemetry().active_slots, 3);
+    cache.abort(replacement.id).unwrap();
+}
+
+#[test]
+fn per_session_checkpoint_limit_stops_optional_checkpoint_publication() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 8,
+            min_reuse_tokens: 16,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 8,
+            max_anchors_per_session: 4,
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                target_interval_tokens: 2_048,
+                max_checkpoints: 8,
+                max_checkpoints_per_session: 2,
+                ..Default::default()
+            },
+        },
+        fixed_retention(8),
+    )
+    .unwrap();
+    let tokens: Vec<i32> = (0..12_000).collect();
+    for boundary in [2_048, 8_192] {
+        let mut anchor_request = request(&tokens[..boundary], namespace(1), 7, 0);
+        anchor_request.result_state = SlotState::Anchor;
+        let anchor = cache.plan(anchor_request).unwrap();
+        commit_idle(&mut cache, &anchor, boundary, SlotState::Anchor);
+    }
+
+    let plan = cache
+        .plan(request(
+            &tokens,
+            namespace(1),
+            7,
+            Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+        ))
+        .unwrap();
+    assert!(plan.anchor_boundaries.is_empty());
+    cache.abort(plan.id).unwrap();
+
+    let other_session = cache
+        .plan(request(
+            &tokens,
+            namespace(1),
+            8,
+            Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+        ))
+        .unwrap();
+    assert_eq!(other_session.anchor_boundaries.len(), 2);
+    cache.abort(other_session.id).unwrap();
 }
 
 #[test]

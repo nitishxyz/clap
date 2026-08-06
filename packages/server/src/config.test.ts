@@ -2,10 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { applyConfigToEnv, ClapConfigSchema } from "./config";
 
 const names = [
+  "CLAP_CACHE_MAX_ANCHORS_PER_SESSION",
   "CLAP_CACHE_CHECKPOINTS_ENABLED",
   "CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS",
   "CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS",
   "CLAP_CACHE_CHECKPOINT_MAX",
+  "CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION",
   "CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS",
   "CLAP_CACHE_CHECKPOINT_BUDGET_BYTES",
   "CLAP_LLAMA_PREFILL_BUDGET",
@@ -28,11 +30,13 @@ afterEach(() => {
 describe("automatic checkpoint config", () => {
   test("has explicit safe defaults", () => {
     const config = ClapConfigSchema.parse({});
+    expect(config.cache.max_anchors_per_session).toBe(4);
     expect(config.cache.checkpoints).toEqual({
       enabled: true,
       minimum_tokens: 2_048,
       interval_tokens: 2_048,
       max_checkpoints: 8,
+      max_checkpoints_per_session: 2,
       // Half the retained-KV budget: enough for one full-length anchor on
       // large hybrid models, which is what makes long prompts reusable.
       budget_fraction: 0.5,
@@ -42,23 +46,36 @@ describe("automatic checkpoint config", () => {
 
   test("validates bounds and exports concrete worker values", () => {
     for (const name of names) delete process.env[name];
-    const config = ClapConfigSchema.parse({ cache: { checkpoints: {
+    const config = ClapConfigSchema.parse({ cache: {
+      max_anchors_per_session: 5,
+      checkpoints: {
       enabled: false,
       minimum_tokens: 4_096,
       interval_tokens: 1_024,
       max_checkpoints: 6,
+      max_checkpoints_per_session: 3,
       budget_fraction: 0.125,
       budget_bytes: 33_554_432,
     } } });
     applyConfigToEnv(config);
+    expect(process.env.CLAP_CACHE_MAX_ANCHORS_PER_SESSION).toBe("5");
     expect(process.env.CLAP_CACHE_CHECKPOINTS_ENABLED).toBe("0");
     expect(process.env.CLAP_CACHE_CHECKPOINT_MINIMUM_TOKENS).toBe("4096");
     expect(process.env.CLAP_CACHE_CHECKPOINT_INTERVAL_TOKENS).toBe("1024");
     expect(process.env.CLAP_CACHE_CHECKPOINT_MAX).toBe("6");
+    expect(process.env.CLAP_CACHE_CHECKPOINT_MAX_PER_SESSION).toBe("3");
     expect(process.env.CLAP_CACHE_CHECKPOINT_BUDGET_BASIS_POINTS).toBe("1250");
     expect(process.env.CLAP_CACHE_CHECKPOINT_BUDGET_BYTES).toBe("33554432");
     expect(() => ClapConfigSchema.parse({ cache: { checkpoints: { budget_fraction: 1.1 } } })).toThrow();
     expect(() => ClapConfigSchema.parse({ cache: { checkpoints: { max_checkpoints: 0 } } })).toThrow();
+    expect(ClapConfigSchema.parse({ cache: {
+      max_anchors_per_session: 0,
+      checkpoints: { max_checkpoints_per_session: 0 },
+    } }).cache).toMatchObject({
+      max_anchors_per_session: 0,
+      checkpoints: { max_checkpoints_per_session: 0 },
+    });
+    expect(() => ClapConfigSchema.parse({ cache: { max_anchors_per_session: 257 } })).toThrow();
   });
 });
 

@@ -21,7 +21,8 @@ cc_manager_t *cc_manager_create_with_retention(
     uint64_t high_watermark_bytes, uint64_t low_watermark_bytes,
     uint8_t automatic_checkpoints, uint64_t checkpoint_minimum_tokens,
     uint64_t checkpoint_interval_tokens, uint32_t checkpoint_max,
-    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes) {
+    uint32_t checkpoint_budget_basis_points, uint64_t checkpoint_budget_bytes,
+    uint32_t max_anchors_per_session, uint32_t checkpoint_max_per_session) {
   cc_manager_t *manager = calloc(1, sizeof(*manager));
   if (!manager) return NULL;
   clap_cache_config_t config = {0};
@@ -37,6 +38,8 @@ cc_manager_t *cc_manager_create_with_retention(
   config.automatic_checkpoint_max = checkpoint_max;
   config.automatic_checkpoint_memory_basis_points = checkpoint_budget_basis_points;
   config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
+  config.max_anchors_per_session = max_anchors_per_session;
+  config.automatic_checkpoint_max_per_session = checkpoint_max_per_session;
   clap_cache_retention_config_t retention = {0};
   retention.version = CLAP_CACHE_ABI_VERSION;
   retention.struct_size = sizeof(retention);

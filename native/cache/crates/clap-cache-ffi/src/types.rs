@@ -46,6 +46,10 @@ pub struct ClapCacheConfig {
     pub automatic_checkpoint_memory_basis_points: u32,
     pub reserved: u32,
     pub automatic_checkpoint_memory_cap_bytes: u64,
+    /// Zero disables the per-session retained-anchor cap.
+    pub max_anchors_per_session: u32,
+    /// Zero disables the per-session automatic-checkpoint cap.
+    pub automatic_checkpoint_max_per_session: u32,
 }
 
 /// Additive dynamic-retention configuration.

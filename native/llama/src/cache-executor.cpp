@@ -78,7 +78,8 @@ CacheExecutor::CacheExecutor(CacheExecutorConfig config,
       config.hard_max_retained_entries, 0, 0, 0, config.automatic_checkpoints,
       config.checkpoint_minimum_tokens, config.checkpoint_interval_tokens,
       config.checkpoint_max, config.checkpoint_budget_basis_points,
-      config.checkpoint_budget_bytes);
+      config.checkpoint_budget_bytes, config.max_anchors_per_session,
+      config.checkpoint_max_per_session);
   slots_.resize(config.slot_count);
   slots_[0].generation = coordinator_->slot(0).generation;
   for (uint32_t slot = 1; slot < config.slot_count; ++slot) {

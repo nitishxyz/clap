@@ -139,7 +139,8 @@ Important controls:
 | Request queue | `[limits] max_inflight`, `queue_depth`, `max_active` (environment equivalents are consumed by the server) |
 | GGUF | `[llama]` or `CLAP_LLAMA_CONTEXT`, `CLAP_LLAMA_KV_AUTOFIT`, `CLAP_LLAMA_MAX_SESSION_CTX`, `CLAP_LLAMA_MAX_OUTPUT`, `CLAP_LLAMA_BATCH`, `CLAP_LLAMA_UBATCH`, `CLAP_LLAMA_PREFILL_BUDGET`, `CLAP_LLAMA_GPU_LAYERS`, `CLAP_LLAMA_KV_TYPE`, `CLAP_LLAMA_RETAINED_MAX` |
 | MLX | `[mlx]` or `CLAP_MLX_CONTEXT`, `CLAP_MLX_MAX_SESSION_CTX`, `CLAP_MLX_MAX_OUTPUT`, `CLAP_MLX_KV_TYPE`, `CLAP_MLX_PREFILL_QUANTUM`, retained initial/max/budget/watermark/growth controls |
-| Checkpoints | `[cache.checkpoints]` or `CLAP_CACHE_CHECKPOINTS_ENABLED`, minimum/interval/max and budget controls |
+| Cache fairness | `[cache] max_anchors_per_session` or `CLAP_CACHE_MAX_ANCHORS_PER_SESSION` (default 4; includes automatic checkpoints) |
+| Checkpoints | `[cache.checkpoints]` or `CLAP_CACHE_CHECKPOINTS_ENABLED`, minimum/interval/max, `max_checkpoints_per_session` (default 2), and budget controls |
 | Launch logs | `CLAP_WORKER_LOG_MAX_LAUNCHES_PER_MODEL`, `CLAP_WORKER_LOG_MAX_BYTES_PER_BACKEND`, `CLAP_WORKER_SHUTDOWN_TIMEOUT_MS` |
 | Auth/telemetry | `[auth] require_api_key`, `CLAP_REQUIRE_API_KEY`, `[telemetry] cache_decisions_enabled`, maximum MiB and age |
 

@@ -24,7 +24,7 @@ struct PromptRendererTests {
     #expect((captured[0]["role"] as? String) == "assistant")
     #expect((captured[1]["role"] as? String) == "user")
     #expect((captured[1]["content"] as? String) == "Tool result:\nresult")
-    #expect(result.stableBoundaries == [19])
+    #expect(result.stableBoundaries == [8, 19])
     #expect(!result.usedFallback)
   }
 

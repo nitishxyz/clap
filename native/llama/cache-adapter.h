@@ -195,7 +195,9 @@ class Coordinator {
               uint64_t checkpoint_interval_tokens = 2048,
               uint32_t checkpoint_max = 8,
               uint32_t checkpoint_budget_basis_points = 2500,
-              uint64_t checkpoint_budget_bytes = 0)
+              uint64_t checkpoint_budget_bytes = 0,
+              uint32_t max_anchors_per_session = 0,
+              uint32_t checkpoint_max_per_session = 0)
       : slot_count_(slots) {
     clap_cache_config_t config{};
     config.version = CLAP_CACHE_ABI_VERSION;
@@ -210,6 +212,8 @@ class Coordinator {
     config.automatic_checkpoint_interval_tokens = checkpoint_interval_tokens;
     config.automatic_checkpoint_memory_basis_points = checkpoint_budget_basis_points;
     config.automatic_checkpoint_memory_cap_bytes = checkpoint_budget_bytes;
+    config.max_anchors_per_session = max_anchors_per_session;
+    config.automatic_checkpoint_max_per_session = checkpoint_max_per_session;
     clap_cache_retention_config_t retention{};
     retention.version = CLAP_CACHE_ABI_VERSION;
     retention.struct_size = sizeof(retention);

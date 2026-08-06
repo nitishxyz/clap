@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define CLAP_CACHE_ABI_VERSION 3u
+#define CLAP_CACHE_ABI_VERSION 4u
 
 #define CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM (UINT64_C(1) << 0)
 #define CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH (UINT64_C(1) << 1)
@@ -87,6 +87,9 @@ typedef struct clap_cache_config {
   uint32_t automatic_checkpoint_memory_basis_points;
   uint32_t reserved;
   uint64_t automatic_checkpoint_memory_cap_bytes;
+  /* Zero disables the corresponding per-session retained-anchor cap. */
+  uint32_t max_anchors_per_session;
+  uint32_t automatic_checkpoint_max_per_session;
 } clap_cache_config_t;
 
 typedef struct clap_cache_retention_config {

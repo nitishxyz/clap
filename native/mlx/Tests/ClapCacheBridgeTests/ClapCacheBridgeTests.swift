@@ -4,7 +4,7 @@ import XCTest
 final class ClapCacheBridgeTests: XCTestCase {
   func testPlanCommitBranchInvalidateAndReset() throws {
     let manager = try XCTUnwrap(cc_manager_create_with_retention(
-      3, 2, 64, 2, 3, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0))
+      3, 2, 64, 2, 3, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0, 0, 0))
     defer { cc_manager_destroy(manager) }
     let namespace = [UInt8](repeating: 7, count: 32)
     let firstTokens: [Int32] = [1, 2, 3, 4]
@@ -104,7 +104,7 @@ final class ClapCacheBridgeTests: XCTestCase {
 
   func testContextSizedPromptIsIndependentOfRetainedCapacityHint() throws {
     let manager = try XCTUnwrap(cc_manager_create_with_retention(
-      1, 1, 1, 1, 1, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0))
+      1, 1, 1, 1, 1, 0, 0, 0, 1, 2_048, 2_048, 8, 2_500, 0, 0, 0))
     defer { cc_manager_destroy(manager) }
     let namespace = [UInt8](repeating: 3, count: 32)
     let tooLarge: [Int32] = [1, 2]
@@ -135,7 +135,7 @@ final class ClapCacheBridgeTests: XCTestCase {
 
   func testDynamicRetentionABIRegistrationTelemetryAndCeiling() throws {
     let manager = try XCTUnwrap(cc_manager_create_with_retention(
-      1, 1, 64, 3, 3, 1_000, 800, 500, 1, 2_048, 2_048, 8, 2_500, 0))
+      1, 1, 64, 3, 3, 1_000, 800, 500, 1, 2_048, 2_048, 8, 2_500, 0, 0, 0))
     defer { cc_manager_destroy(manager) }
 
     var slot: UInt32 = 0
