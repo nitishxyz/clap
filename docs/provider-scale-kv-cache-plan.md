@@ -1,6 +1,7 @@
 # Provider-Scale KV Cache Plan
 
-Status: Phase 1 implemented and validated on a clean A100 pod on 2026-08-06.
+Status: Phases 1 and 2 implemented and validated on clean A100 pods on
+2026-08-06.
 This plan extends `docs/scale-plan.md` and
 `docs/rust-cache-coordinator-plan.md` from a strong single-host cache into a
 cache-aware inference fleet. It is intentionally phased so every checkpoint
@@ -664,21 +665,24 @@ kernels.
 
 ### Phase 2 — Cache-aware multi-worker routing
 
-Status: IMPLEMENTED LOCALLY; clean CUDA multi-replica validation pending. The
-initial deployment now has opaque stable worker IDs, generation-aware
-heartbeats, a bounded in-memory session/prefix location directory,
-compatibility isolation by physical model and keyed namespace, deterministic
-sticky fallback, and a cost model combining queue delay, missing prefill,
-pressure, and cold-load estimates. `[routing].local_replicas` enables one
-router process to manage up to eight local worker replicas per model. A failed
-pre-dispatch load invalidates that worker generation and retries another
-compatible replica; a stale location can only cause a local miss and
-recomputation. Request telemetry records the chosen worker, reason, cost
+Status: COMPLETE. Local verification and clean A100 CUDA multi-replica
+validation completed on 2026-08-06 at implementation SHA
+`ea508176a8b4d403e811be1eb7d0c33897d4d507`. The initial deployment has opaque
+stable worker IDs, generation-aware heartbeats, a bounded in-memory
+session/prefix location directory, compatibility isolation by physical model
+and keyed namespace, deterministic sticky fallback, and a cost model combining
+queue delay, missing prefill, pressure, and cold-load estimates.
+`[routing].local_replicas` enables one router process to manage up to eight
+local worker replicas per model. A failed pre-dispatch load invalidates that
+worker generation and retries another compatible replica; a stale location can
+only cause a local miss and recomputation. Model unload, idle expiry, and
+process shutdown synchronously invalidate replica heartbeats and their soft
+locations. Request telemetry records the chosen worker, reason, cost
 components, candidate count, stale records, and fallback, persists it with
 cache decisions, exposes directory diagnostics at `/clap/v1/router`, and
 renders it in the dashboard request detail.
 
-Local evidence (2026-08-06, ready-to-test commit pending):
+Local evidence (2026-08-06):
 
 - `bun run hardening:verify` passed end to end
 - 566 TypeScript tests passed, including six deterministic routing-directory
@@ -686,9 +690,12 @@ Local evidence (2026-08-06, ready-to-test commit pending):
 - all Rust, native llama.cpp, MLX, worker-protocol, bundle, generated-artifact,
   ownership, structure, capability, memory-honesty, and documentation gates
   passed
-- `scripts/provider-routing-probe.py` is syntax-checked and ready to verify two
-  live replicas, exact-session locality, overload recomputation, restart
+- `scripts/provider-routing-probe.py` is syntax-checked and verifies two live
+  replicas, exact-session locality, overload recomputation, restart
   invalidation, the router diagnostics endpoint, and the public dashboard
+- after live validation exposed lifecycle cleanup gaps, the focused
+  runtime-router/server suites passed 108 tests and the repository typecheck
+  passed with the production-lifecycle unload regression included
 
 Deliverables:
 
@@ -1034,6 +1041,112 @@ routing, byte-accurate block sharing, or a public session-release API. Those
 remain later phases; no custom llama.cpp block extension is justified by this
 checkpoint alone.
 
+## Phase 2 validation evidence — 2026-08-06
+
+```text
+phase: 2 — cache-aware multi-worker routing
+git_sha: ea508176a8b4d403e811be1eb7d0c33897d4d507
+branch: feat/provider-scale-kv-cache
+date: 2026-08-06
+hardware: RunPod secure-cloud NVIDIA A100-SXM4-80GB, 81920 MiB
+accelerator: CUDA, two local llama.cpp worker replicas loaded concurrently
+             during the routing workload
+driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8
+model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
+backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
+pod_deleted: pending evidence commit and final synchronization
+```
+
+The clean pod cloned the public feature branch, installed dependencies with Bun
+1.3.14, built the Rust cache in release mode, and built the pinned llama.cpp
+worker for `CMAKE_CUDA_ARCHITECTURES=80`. The server bound to
+`0.0.0.0:11435`, RunPod exposed that HTTP port, and external checks reached
+both `/clap/v1/health` and the production dashboard HTML before and after the
+workload. RunPod's Cloudflare edge rejected Python `urllib` by browser signature
+(error 1010), so the deterministic probe ran against the pod-local listener;
+the public endpoint itself was independently verified from outside the pod.
+
+The validation configuration used two local replicas and deliberately simple
+cost constants so locality and queueing decisions were reproducible:
+
+```toml
+[limits]
+max_inflight = 16
+queue_depth = 64
+max_active = 1
+
+[routing]
+enabled = true
+node_id = "phase2-a100"
+local_replicas = 2
+worker_ttl_ms = 30000
+session_ttl_ms = 900000
+max_workers = 16
+max_locations = 1000
+default_prefill_tokens_per_second = 1000
+queue_wait_ms_per_request = 1000
+pressure_penalty_ms = 0
+cold_load_ms = 0
+
+[llama]
+retained_max = 32
+context = 2048
+max_output = 1024
+gpu_layers = 999
+```
+
+The final command was:
+
+```sh
+CLAP_BASE_URL=http://127.0.0.1:11435 \
+CLAP_VALIDATION_MODEL=/root/clap-phase2/models/tinyllama-Q3_K_M.gguf \
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/provider-routing-probe.py
+```
+
+All 16 requests completed without an API or worker error. Twelve seed sessions
+were distributed across two opaque workers. A follow-up with 68 of 71 prompt
+tokens available on its owner selected that worker with
+`reason=session_locality`, a directory hit, and an estimated 3 ms missing
+prefill cost. While a 512-token request occupied that owner, the next follow-up
+selected the other replica with `reason=lowest_cost`, no directory hit, and a
+105 ms recomputation estimate instead of waiting behind the cached worker.
+
+The probe then unloaded the model and required `/clap/v1/router` to contain no
+worker heartbeats or locations. A request after unload recreated the two
+candidates but did not trust the old directory: it reported
+`reason=sticky_fallback`, `directoryHit=false`, zero matched tokens, and a new
+worker generation. This proves the routing directory remains soft state across
+unload/restart and that stable worker identity is not confused with a live
+worker generation. The final diagnostic snapshot contained two healthy
+candidate records and one new post-restart location within the configured
+16-worker/1,000-location bounds.
+
+The final server dashboard reported 16 successful requests, zero errors or
+cancellations, 13 physical cache hits, three physical misses, 1,561 physical
+prompt tokens, and 680 reused tokens. Across the validation session, the GPU
+sampler observed 2,187 MiB maximum VRAM while both replicas were loaded, 92%
+peak GPU utilization, and 1,095 MiB after the post-unload request left one
+replica resident. No OOM or worker crash occurred.
+
+Live validation found and fixed two issues before the final pass: workers now
+refresh heartbeats while idle instead of expiring solely because no request is
+arriving, and production lifecycle removal now invalidates and shuts down all
+replicas rather than only the primary resident key. The final fix has a server
+regression test that supplies the lifecycle exactly as the production server
+does and asserts that unload empties routing state.
+
+Sanitized pod artifacts were recorded under
+`/workspace/clap-phase2/evidence/`, including `provider-routing-probe.log`,
+`phase2-summary.json`, `router-final.json`, `server.log`, `vram.log`,
+`validated-commit.txt`, the model digest, CUDA build logs, and web build logs.
+
+Known limits are the single-node, single-GPU, small-model fixture and an
+in-memory directory. This phase validates placement, overload recomputation,
+and lifecycle invalidation, not replicated directory consensus, remote workers,
+KV transfer, multi-GPU routing, or comparative throughput against a single
+replica. Physical sequence-cache density remains a later measurement; this
+result does not by itself justify a custom llama.cpp block extension.
+
 ## Success criteria
 
 Clap reaches provider-scale cache maturity when:
@@ -1065,11 +1178,10 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Commit and push the ready-to-test Phase 2 checkpoint, then validate a clean
-clone with two local CUDA worker replicas on an A100-class pod. Expose the Clap
-HTTP port through the provider proxy, verify the public dashboard before
-running `scripts/provider-routing-probe.py`, record routing and GPU evidence,
-and delete the pod after the evidence commit is synchronized locally. Do not
-begin a custom llama.cpp block extension until Phase 2 routing measurements
-show that sequence-cache density, rather than placement, is the next material
-bottleneck.
+Publish the Phase 2 evidence, delete the validation pod, then begin Phase 3 by
+extracting the current Rust/runtime operations into a versioned physical-cache
+adapter contract with explicit capability constraints and fail-closed
+conformance tests. Keep the current sequence API as the llama.cpp baseline and
+MLX at feature parity. Do not begin remote KV transfer or a custom llama.cpp
+block extension until adapter-level byte, sharing, and restore measurements
+show that physical cache density is the next material bottleneck.
