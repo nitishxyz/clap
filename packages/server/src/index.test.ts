@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { parseAssistantOutput, selectParser } from "./chat-compat";
 import { createServer, idleTimeoutFromEnv, inferParserFamilies, normalizeCacheIntent } from "./index";
 import { mapInsufficientModelMemoryError } from "./index";
-import { InsufficientModelMemoryError, ResidentWorkerRegistry } from "@clap/runtime-router";
+import { InsufficientModelMemoryError, ModelLifecycleManager, ResidentWorkerRegistry } from "@clap/runtime-router";
 
 // Tests mutate fake model cache directories directly; disable the model list
 // memo so every request observes the current directory state.
@@ -3281,6 +3281,59 @@ describe("clap server", () => {
       const afterBody = await after.json();
       expect(afterBody.models[0].worker.pid).toBe(firstPid);
       expect(Date.parse(afterBody.models[0].expiresAt)).toBeGreaterThanOrEqual(Date.parse(firstExpiry));
+    } finally {
+      restoreEnv("CLAP_HOME", previousHome);
+      restoreEnv("CLAP_LLAMA_WORKER", previousWorker);
+      restoreEnv("CLAP_FAKE_WORKER_OUTPUT", previousOutput);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("model unload clears routing state when the lifecycle is supplied by the server", async () => {
+    const previousHome = process.env.CLAP_HOME;
+    const previousWorker = process.env.CLAP_LLAMA_WORKER;
+    const previousOutput = process.env.CLAP_FAKE_WORKER_OUTPUT;
+    const dir = await mkdtemp(join(tmpdir(), "clap-routing-unload-test-"));
+    const modelPath = join(dir, "routing.Q4_K_M.gguf");
+    try {
+      process.env.CLAP_HOME = dir;
+      process.env.CLAP_LLAMA_WORKER = await fakeWorker(dir);
+      process.env.CLAP_FAKE_WORKER_OUTPUT = "routed";
+      await writeFile(modelPath, "gguf bytes");
+      const residents = new ResidentWorkerRegistry();
+      const lifecycle = new ModelLifecycleManager();
+      const app = createServer(residents, lifecycle, {
+        memorySnapshot: async () => ({
+          physicalMemoryBytes: 1_000_000_000_000,
+          availableMemoryBytes: 1_000_000_000_000,
+          residentBytesByPid: new Map(),
+        }),
+      });
+
+      const chat = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: modelPath,
+          messages: [{ role: "user", content: "hello" }],
+          cache: { namespace: "routing-unload", session: "session" },
+        }),
+      });
+      expect(chat.status).toBe(200);
+      expect(await (await app.request("/clap/v1/router")).json()).toMatchObject({
+        workers: [expect.objectContaining({ state: "ready" })],
+      });
+
+      const unload = await app.request("/clap/v1/models/unload", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelPath }),
+      });
+      expect(await unload.json()).toMatchObject({ unloaded: true });
+      expect(await (await app.request("/clap/v1/router")).json()).toMatchObject({
+        workers: [],
+        locations: [],
+      });
     } finally {
       restoreEnv("CLAP_HOME", previousHome);
       restoreEnv("CLAP_LLAMA_WORKER", previousWorker);

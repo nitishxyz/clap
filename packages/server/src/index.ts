@@ -211,20 +211,22 @@ export function createServer(
     worker: ResidentWorkerHandle;
     modelDomain: string;
   }>();
-  lifecycle ??= new ModelLifecycleManager(() => Date.now(), async (entry) => {
+  lifecycle ??= new ModelLifecycleManager();
+  const modelLifecycle = lifecycle;
+  const removeResidentWorkers = async (entry: LoadedModel) => {
     const keys = replicaKeysByModel.get(entry.key) ?? new Set([entry.key]);
     await Promise.all([...keys].map(async (key) => {
       const workerId = routingWorkerIds.get(key);
       if (workerId) {
         routingDirectory.invalidateWorker(workerId);
         routingWorkers.delete(workerId);
+        routingStats.delete(workerId);
       }
       routingWorkerIds.delete(key);
       await residents.shutdownAsync(key);
     }));
     replicaKeysByModel.delete(entry.key);
-  });
-  const modelLifecycle = lifecycle;
+  };
   const cacheEvents = new CacheEventStore({
     directory: join(clapHome(), "telemetry"),
     enabled: config.telemetry.cache_decisions_enabled,
@@ -523,9 +525,11 @@ export function createServer(
     }, 50);
   }
   metrics.event("server", `clap server started (v${clapVersion})`);
-  lifecycle.removeListener = (entry, reason) => {
-    if (reason === "cleanup") return;
-    metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
+  modelLifecycle.removeListener = async (entry, reason) => {
+    await removeResidentWorkers(entry);
+    if (reason !== "cleanup") {
+      metrics.event(reason === "expire" ? "expire" : "unload", `${entry.id} ${reason === "expire" ? "expired after idle keep-alive" : "unloaded"} (${entry.backend})`, { model: entry.id });
+    }
   };
   residents.onCrash = ({ key, backend, exitCode, consecutiveCrashes, launchId, logPath,
     metadataPath, classification }) => {
@@ -2338,7 +2342,7 @@ export function startServer(options: ServerOptions = {}) {
   const hostname = options.hostname ?? hostnameFromEnv(config.server.host);
   const idleTimeout = options.idleTimeout ?? idleTimeoutFromEnv(config.server.idle_timeout_seconds);
   const residents = new ResidentWorkerRegistry();
-  const lifecycle = new ModelLifecycleManager(() => Date.now(), (entry) => residents.shutdownAsync(entry.key));
+  const lifecycle = new ModelLifecycleManager();
   const server = Bun.serve({
     port,
     hostname,
