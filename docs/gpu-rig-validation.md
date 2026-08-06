@@ -177,4 +177,39 @@ under the concurrency suite while the rig is up — the remaining T1.1b item.
 
 ## Results
 
-Not yet run. Fill in after the rig session.
+### Session 1 — single A100-SXM4-80GB (RunPod, driver CUDA 12.8)
+
+Single-GPU pod, so experiment 3 (multi-GPU split) is still unvalidated. What
+this session did establish:
+
+**CUDA worker provisioning.** Release binaries embed a CPU-only `clap-llama`
+and re-extract it into `~/.clap/libexec/<build-id>/` on every start, so
+hand-copying a GPU worker there is silently undone. `ensureCudaWorker`
+(`apps/cli/src/cuda-worker.ts`) is the supported path: it downloads
+`clap-llama-cuda-<tag>-linux-x64.tar.gz` into `~/.clap/libexec/cuda-<version>/`.
+That asset is not published for v0.2.0 yet, so the pod fell back to CPU until
+`CLAP_LLAMA_WORKER` was pointed at a locally built worker
+(`scripts/pod-build-cuda-worker.sh`). Verify offload from the worker stderr
+log — `ggml_cuda_init: found 1 CUDA devices` plus
+`load_tensors: layer N assigned to device CUDA0` — not from wall-clock alone.
+
+| Qwen3.6-27B-Q4_K_M | CPU worker | CUDA worker |
+| --- | --- | --- |
+| `clap load` | 34.2s | 6.4s |
+| VRAM used | 0 MiB | 52435 MiB (n_ctx 262144) |
+| 147-token reply | 71.0s | 25.8s |
+
+**Cache reuse (`scripts/cache-probe.py`, 6.1k-token shared system prompt).**
+
+| Model | Sessions x turns | Hit rate | Per-turn reuse |
+| --- | --- | --- | --- |
+| gemma-4-E4B-it-GGUF | 1 x 4 | 75.0% (3/4) | 99% (`kind=slot`) |
+| Qwen3.6-27B-GGUF | 1 x 5 | 0.0% (0/5) | 0% |
+| Qwen3.6-27B-GGUF | 4 x 4 | 0.0% (0/16) | 0% |
+
+The gemma row is the expected shape: turn 1 is a cold miss, every later turn
+trims and continues. Qwen3.6 never reuses anything because it is hybrid; see
+the hybrid gap in `docs/scale-plan.md` T2.5 for the root cause.
+
+**Container memory.** `totalmem()` reported the 2016 GiB host inside a pod
+limited to 234 GiB. Fixed by `packages/server/src/container-memory.ts`.

@@ -152,11 +152,30 @@ empty slot and later sessions whole-copy it. Verified on pod: 6-session
 stress wall 80.4s → 61.7s, 40.5% reuse ratio, one first-turn request
 branched 2k tokens off another session's in-flight prefill).
 
-Hybrid caveat (Qwen3.6/Gated DeltaNet class): same-session continuation
-requires rewinding recurrent state to a checkpoint; llama.cpp only lands
-checkpoints as a session decodes, so turns 1-3 often re-prefill while turns
-4+ hit reliably. Attention models have no such constraint. If it matters
-later, explore llama.cpp checkpoint-frequency tuning.
+Hybrid gap (Qwen3.6/Gated DeltaNet class), measured on an A100-80GB CUDA pod
+with Qwen3.6-27B-Q4_K_M and a 6.1k-token shared prompt: reuse is 0%, not
+partial. 16 requests over 4 sessions x 4 turns and 5 requests in a single
+session both reported `hit=false`, `reuseKind=null`, `retainedAnchors=0`.
+Gemma-4-E4B on the same worker and the same probe reused 99% per turn, so
+this is a hybrid-path gap, not a CUDA or coordinator problem.
+
+Root cause is two interlocking rules:
+
+- `model-runtime.cpp` sets `prompt_boundary_snapshots_ = !hybrid_ && ...`, so
+  hybrid models never take a prompt-boundary anchor.
+- Generated tokens are appended to the slot's token list
+  (`generation-stepper.cpp` -> `CacheExecutor::advance`), so at turn N+1 the
+  slot holds `prompt_N + generated_N` while the new prompt only shares
+  `prompt_N`. The coordinator's `trim_eligible = whole_state || PARTIAL_SUFFIX_TRIM`
+  (`clap-cache-core/src/lib.rs`) therefore fails: `whole_state` is false
+  because the slot is longer, and hybrid slots never advertise
+  `PARTIAL_SUFFIX_TRIM` because recurrent state cannot be trimmed.
+
+The fix is to stop the *logical* token list from running past the prompt
+boundary for hybrid models: retain a checkpoint whose tokens end at the last
+message boundary so the next turn's prefix equals the whole retained state
+and the existing `whole_state` continuation path applies. Attention models
+have no such constraint.
 
 Org harnesses share one system prompt + tool schema (10-40k tokens) across
 all sessions of a project. Store that prefix KV once (radix/prefix tree over
