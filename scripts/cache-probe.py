@@ -44,6 +44,9 @@ def main() -> None:
 
     def call(path, data=None, method=None):
         req = urllib.request.Request(args.base + path, data=data, method=method)
+        # Some hosted proxies (RunPod, Cloudflare) reject the default
+        # Python-urllib agent with 403, so present a conventional one.
+        req.add_header("User-Agent", "clap-cache-probe/1.0")
         if args.key:
             req.add_header("Authorization", "Bearer " + args.key)
         if data:

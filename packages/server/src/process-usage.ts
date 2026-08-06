@@ -1,4 +1,5 @@
 import { cpus, freemem, totalmem } from "node:os";
+import { effectiveFreeMemoryBytes, effectiveTotalMemoryBytes } from "./container-memory";
 
 export type ProcessUsage = { rssBytes: number; cpuPercent: number };
 export type SystemMemorySnapshot = { physicalBytes: number; usedBytes: number; availableBytes: number };
@@ -37,7 +38,8 @@ export async function sampleProcessUsage(pids: number[]): Promise<Map<number, Pr
 }
 
 export function systemMemoryBytes(): number {
-  return totalmem();
+  // Container-aware: a cgroup limit is the real ceiling for this process.
+  return effectiveTotalMemoryBytes();
 }
 
 export async function systemMemorySnapshot(): Promise<SystemMemorySnapshot> {
@@ -59,7 +61,9 @@ let memCache: { at: number; used: number } | undefined;
 // Activity Monitor's "Memory Used") on darwin; total-free elsewhere.
 export async function systemMemoryUsedBytes(): Promise<number> {
   if (memCache && Date.now() - memCache.at < 1000) return memCache.used;
-  let used = Math.max(0, totalmem() - freemem());
+  // Inside a cgroup this is usage within the container's own limit, so the
+  // dashboard shows the container filling up rather than the whole host.
+  let used = Math.max(0, effectiveTotalMemoryBytes() - effectiveFreeMemoryBytes());
   if (process.platform === "darwin") {
     try {
       const proc = Bun.spawn(["vm_stat"], { stdout: "pipe", stderr: "ignore" });
