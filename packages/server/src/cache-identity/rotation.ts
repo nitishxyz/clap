@@ -176,8 +176,18 @@ async function removeStaleLock(path: string, now: number): Promise<void> {
     if (!metadata.isFile() || metadata.isSymbolicLink() || (uid !== undefined && metadata.uid !== uid)) {
       throw new Error("Unsafe cache identity rotation lock");
     }
-    const parsed = JSON.parse(await readFile(path, "utf8")) as { version?: unknown; pid?: unknown; createdAt?: unknown };
+    let parsed: { version?: unknown; pid?: unknown; createdAt?: unknown };
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8"));
+    } catch {
+      // O_EXCL publishes the inode before its owner can fill and sync the lock
+      // record. A concurrent contender must treat that short window as an
+      // active lock rather than misclassifying the partial record as corrupt.
+      if (now - metadata.mtimeMs < STALE_LOCK_MS) return;
+      throw new Error("Malformed cache identity rotation lock");
+    }
     if (parsed.version !== 1 || typeof parsed.pid !== "number" || typeof parsed.createdAt !== "string") {
+      if (now - metadata.mtimeMs < STALE_LOCK_MS) return;
       throw new Error("Malformed cache identity rotation lock");
     }
     const age = now - Date.parse(parsed.createdAt);

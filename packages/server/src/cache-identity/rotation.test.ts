@@ -38,13 +38,13 @@ describe("installation secret rotation provider", () => {
   });
 
   test("exclusive lock serializes independent provider instances", async () => {
-    const providers = [new InstallationSecretProvider(), new InstallationSecretProvider()];
+    const providers = Array.from({ length: 8 }, () => new InstallationSecretProvider());
     let active = 0;
     let maximumActive = 0;
     const rotations = await Promise.all(providers.map((provider) => provider.rotate(async (rotation) => {
       active += 1;
       maximumActive = Math.max(maximumActive, active);
-      await Bun.sleep(15);
+      await Bun.sleep(2);
       active -= 1;
       return rotation;
     })));
