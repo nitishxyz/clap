@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const clapVersion = "0.2.0";
+export const clapVersion = "0.2.1";
 export const defaultBaseURL = "http://localhost:11435";
 
 export const ErrorResponseSchema = z.object({
@@ -209,6 +209,18 @@ export const StructuredOutputCapabilitiesSchema = z.object({
   max_schema_bytes: z.number().int().nonnegative(),
 }).strict();
 
+// The accelerator the worker binary was compiled for, plus the GPU devices it
+// found. Lets a client tell a CPU-only worker on a GPU host apart from a
+// genuinely CPU-only host. Optional: workers predating the field omit it.
+export const AcceleratorSchema = z.object({
+  compiled: z.string(),
+  devices: z.array(z.object({
+    name: z.string(),
+    description: z.string(),
+    total_memory_bytes: z.number().nonnegative(),
+  }).strict()),
+}).strict();
+
 export const WorkerCapabilitiesSchema = z.object({
   backend: z.enum(["llama", "mlx"]),
   streaming: z.boolean(),
@@ -217,6 +229,7 @@ export const WorkerCapabilitiesSchema = z.object({
     interleaved: z.boolean(),
     priority_aware: z.boolean(),
   }).strict(),
+  accelerator: AcceleratorSchema.optional(),
 }).strict();
 
 export const EffectiveCapabilitiesSchema = z.object({

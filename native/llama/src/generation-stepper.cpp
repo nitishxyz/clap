@@ -157,7 +157,7 @@ void GenerationStepper::maybe_create_anchor(ActiveRequest& request,
         request.structural_boundaries.end(), count) != request.structural_boundaries.end();
     identity.scope = structural ? CLAP_CACHE_SCOPE_HARNESS : CLAP_CACHE_SCOPE_PROJECT;
     const auto result = cache_executor_->create_anchor(
-        boundary, identity, static_cast<uint32_t>(request.seq), structural);
+        boundary, identity, static_cast<uint32_t>(request.seq), false);
     if (!result.materialized) return;
     auto value = event(GenerationEvent::Type::CacheAnchor, request);
     value.slot = result.target_slot;

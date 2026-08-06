@@ -1488,6 +1488,72 @@ fn anchor_pressure_keeps_structural_and_reused_project_boundaries() {
 }
 
 #[test]
+fn full_anchor_budget_advances_to_the_newest_same_session_boundary() {
+    let mut cache = CacheManager::new(
+        Config {
+            slot_count: 3,
+            min_reuse_tokens: 2,
+            logical_token_capacity: usize::MAX,
+            max_anchors: 2,
+            automatic_checkpoints: AutomaticCheckpointConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        },
+        fixed_retention(3),
+    )
+    .unwrap();
+
+    let old_tokens = [1, 2, 3, 4];
+    let mut old_request = request(&old_tokens, namespace(1), 7, 0);
+    old_request.result_state = SlotState::Anchor;
+    old_request.labels.scope = Scope::Project;
+    let old = cache.plan(old_request).unwrap();
+    commit_idle(&mut cache, &old, old_tokens.len(), SlotState::Anchor);
+
+    let unrelated_tokens = [90, 91, 92, 93];
+    let mut unrelated_request = request(&unrelated_tokens, namespace(2), 8, 0);
+    unrelated_request.result_state = SlotState::Anchor;
+    unrelated_request.labels.scope = Scope::Project;
+    let unrelated = cache.plan(unrelated_request).unwrap();
+    commit_idle(
+        &mut cache,
+        &unrelated,
+        unrelated_tokens.len(),
+        SlotState::Anchor,
+    );
+
+    let prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    let boundaries = [8, 11];
+    let mut incoming = request(
+        &prompt,
+        namespace(1),
+        7,
+        Capabilities::WHOLE_STATE_COPY | Capabilities::PROMPT_BOUNDARY_SNAPSHOT,
+    );
+    incoming.stable_boundaries = &boundaries;
+    let plan = cache.plan(incoming).unwrap();
+
+    assert_eq!(plan.anchor_boundaries, [11]);
+    assert_eq!(cache.slot(old.target.slot).unwrap().state, SlotState::Anchor);
+    assert_eq!(cache.slot(unrelated.target.slot).unwrap().state, SlotState::Anchor);
+    cache.abort(plan.id).unwrap();
+}
+
+#[test]
+fn structural_anchor_is_ranked_but_not_implicitly_protected() {
+    let mut cache = manager(2);
+    let slot = materialize_anchor(&mut cache, &[1, 2, 3], namespace(1), Scope::Harness);
+    assert!(!cache.slot(slot).unwrap().protected);
+
+    let generation = cache.slot(slot).unwrap().generation;
+    cache
+        .set_anchor_protected(slot, generation, true)
+        .unwrap();
+    assert!(cache.slot(slot).unwrap().protected);
+}
+
+#[test]
 fn generic_recent_conversation_retention_uses_empty_space_then_evicts_low_value_work() {
     let mut cache = manager(4);
     let harness: Vec<i32> = (0..16_384).collect();

@@ -866,10 +866,40 @@ impl CacheManager {
                     && !slot.protected
             })
             .count();
-        semantic.truncate(available);
+        let overflow = semantic.split_off(semantic.len().min(available));
+        let mut replacement_slots = Vec::new();
+        for boundary in overflow.into_iter().rev() {
+            let replacement = self
+                .slots
+                .iter()
+                .filter(|slot| {
+                    slot.state == SlotState::Anchor
+                        && slot.namespace == request.namespace
+                        && slot.labels.session == request.labels.session
+                        && slot.tokens.len() < boundary
+                        && slot.tokens == request.tokens[..slot.tokens.len()]
+                        && !slot.busy
+                        && slot.writer.is_none()
+                        && slot.read_leases == 0
+                        && !slot.protected
+                        && !replacement_slots.contains(&slot.id)
+                        && self
+                            .slot_capabilities(request, slot.id)
+                            .contains(SlotCapabilities::WRITABLE)
+                })
+                .min_by_key(|slot| (anchor_eviction_value(slot), slot.id));
+            if let Some(slot) = replacement {
+                replacement_slots.push(slot.id);
+                semantic.push(boundary);
+            }
+        }
+        let replaced_automatic = replacement_slots
+            .iter()
+            .filter(|&&slot| self.is_automatic_checkpoint_len(self.slots[slot as usize].tokens.len()))
+            .count();
         let automatic_available = available
             .saturating_sub(semantic.len())
-            .saturating_add(replaceable_automatic);
+            .saturating_add(replaceable_automatic.saturating_sub(replaced_automatic));
         automatic.truncate(self.config.automatic_checkpoints.max_checkpoints as usize);
         automatic = self.checkpoint_coverage_order(automatic);
         let mut authorized = semantic;
@@ -1026,7 +1056,14 @@ impl CacheManager {
                             .slot_capabilities(request, slot.id)
                             .contains(SlotCapabilities::WRITABLE)
                 })
-                .min_by_key(|slot| (anchor_eviction_value(slot), slot.id))
+                .min_by_key(|slot| {
+                    let same_session_prefix = slot.namespace == request.namespace
+                        && slot.labels.session == request.labels.session
+                        && slot.labels.scope == request.labels.scope
+                        && slot.tokens.len() < request.tokens.len()
+                        && slot.tokens == request.tokens[..slot.tokens.len()];
+                    (!same_session_prefix, anchor_eviction_value(slot), slot.id)
+                })
                 .map(|slot| slot.id)
                 .ok_or(Error::NoCapacity);
         }
@@ -1399,8 +1436,10 @@ impl CacheManager {
             target.physical_bytes = commit.physical_bytes;
             target.saved_us = target.saved_us.saturating_add(commit.prefill_us_saved);
             target.busy = commit.actual_state == SlotState::Session;
-            target.protected = commit.actual_state == SlotState::Anchor
-                && matches!(target.labels.scope, Scope::Harness | Scope::Tenant);
+            // Protection is an explicit lease, not a property of every
+            // structural boundary. Automatically pinning all harness and
+            // tenant anchors eventually made a full anchor pool immutable.
+            target.protected = false;
             if plan.reuse_tokens > 0 {
                 target.reuse_count += 1;
             }

@@ -2,7 +2,7 @@
 import { ClapApiError, clapVersion, createClapClient, defaultBaseURL, type ChatCompletionRequest, type Download, type ModelResolveOption, type ModelResolveResponse } from "@clap/api";
 import { deleteStoredHfToken, hfAuthGuidance, hfAuthStatus, isHfAuthError, removeModel, storeHfToken } from "@clap/models";
 import { configPaths, createApiKey, keysFilePath, listApiKeys, loadClapConfig, revokeApiKey, startServer, updateUserConfig } from "@clap/server";
-import { ensureCudaWorker } from "./cuda-worker";
+import { cpuFallbackWarning, ensureCudaWorker } from "./cuda-worker";
 import { ensureEmbeddedWorkers } from "./embedded-workers";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -105,10 +105,11 @@ async function serverStatus() {
   }
 
   const client = createClapClient({ baseURL });
-  const [runtime, backends, models] = await Promise.all([
+  const [runtime, backends, models, runtimeModels] = await Promise.all([
     client.runtime(),
     client.backends(),
     client.clapModels(),
+    client.loadedModels().catch(() => undefined),
   ]);
 
   console.log("status: running");
@@ -125,6 +126,17 @@ async function serverStatus() {
   for (const backend of backends.backends) {
     console.log(`  - ${backend.id}: ${backend.status}${backend.reason ? ` (${backend.reason})` : ""}`);
   }
+  // Which accelerator the resident worker actually reported, so a CPU-only
+  // build on a GPU box is visible here instead of only in llama.cpp's stderr.
+  for (const model of runtimeModels?.models ?? []) {
+    const accelerator = model.worker?.workerCapabilities?.accelerator;
+    if (!accelerator) continue;
+    const devices = accelerator.devices.map((device) => device.description || device.name);
+    console.log(`accelerator: ${accelerator.compiled}${devices.length ? ` (${devices.join(", ")})` : " (no devices detected)"}`);
+    break;
+  }
+  const warning = cpuFallbackWarning();
+  if (warning) console.log(`warning: ${warning.replace(/\n\s+/g, "\n  ")}`);
   console.log("models:");
   for (const model of models.models) {
     console.log(`  - ${model.id}: ${model.status} (${model.backend}/${model.format})`);

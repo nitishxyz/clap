@@ -32,10 +32,18 @@ case "$command" in
     existing=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
     # shellcheck disable=SC2086
     security list-keychains -d user -s "$keychain" $existing
-    security find-identity -v -p codesigning "$keychain" | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null || {
+    identity_line=$(security find-identity -v -p codesigning "$keychain" | grep -F -- "$APPLE_SIGNING_IDENTITY" | head -n 1 || true)
+    if [[ -z $identity_line ]]; then
       echo "error: APPLE_SIGNING_IDENTITY was not found in the imported certificate" >&2
       exit 1
-    }
+    fi
+    # Use the certificate fingerprint rather than its display name. The
+    # identity was visible to `security find-identity` in CI, but codesign on
+    # macos-15 failed to resolve that same display name in the custom keychain.
+    identity_hash=$(awk '{print $2}' <<< "$identity_line")
+    if [[ -n ${GITHUB_ENV:-} ]]; then
+      printf 'APPLE_SIGNING_IDENTITY=%s\n' "$identity_hash" >> "$GITHUB_ENV"
+    fi
     printf 'CLAP_KEYCHAIN_PATH=%s\n' "$keychain"
     ;;
   cleanup)

@@ -69,6 +69,7 @@ set(CLAP_LLAMA_SOURCES
 )
 
 set(CLAP_LLAMA_HEADERS
+  include/clap/llama/accelerator.h
   include/clap/llama/cache-identity.h
   include/clap/llama/cache-executor.h
   include/clap/llama/environment.h

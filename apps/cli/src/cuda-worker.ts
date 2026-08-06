@@ -2,7 +2,7 @@ import { clapVersion } from "@clap/api";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const releaseRepo = "nitishxyz/clap";
 
@@ -16,6 +16,28 @@ export function hasNvidiaGpu(): boolean {
   return Bun.which("nvidia-smi") !== null;
 }
 
+function cudaWorkerPath(): string {
+  return join(clapHome(), "libexec", `cuda-${clapVersion}`, "clap-llama");
+}
+
+/**
+ * Whether this host is about to run inference on the CPU despite having a GPU.
+ * A CPU-only worker on an NVIDIA box is a 5-10x slowdown that otherwise shows
+ * up only as "everything is slow", so callers surface this in `server status`.
+ */
+export function cpuFallbackWarning(): string | undefined {
+  if (!hasNvidiaGpu()) return undefined;
+  if (process.env.CLAP_CUDA === "0") return undefined;
+  const configured = process.env.CLAP_LLAMA_WORKER;
+  if (configured) return undefined; // operator chose this worker explicitly
+  if (isUsable(cudaWorkerPath())) return undefined;
+  return `NVIDIA GPU detected but no CUDA worker is installed, so inference runs on the CPU.
+    Clap provisions it automatically on the next server start; if that keeps failing the
+    release asset clap-llama-cuda-v${clapVersion}-linux-x64.tar.gz is missing or unreachable.
+    Build one locally with scripts/pod-build-cuda-worker.sh and point CLAP_LLAMA_WORKER at it,
+    or set CLAP_CUDA=0 to silence this and run on the CPU deliberately.`;
+}
+
 // On Linux boxes with an NVIDIA GPU the bundled clap-llama worker is CPU-only
 // (release binaries are compiled on runners without CUDA). Swap in the
 // GPU-enabled worker automatically: use the cached copy when present,
@@ -27,8 +49,8 @@ export async function ensureCudaWorker(): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64") return;
   if (!hasNvidiaGpu()) return;
 
-  const targetDir = join(clapHome(), "libexec", `cuda-${clapVersion}`);
-  const worker = join(targetDir, "clap-llama");
+  const worker = cudaWorkerPath();
+  const targetDir = dirname(worker);
   if (isUsable(worker)) {
     process.env.CLAP_LLAMA_WORKER = worker;
     return;
@@ -59,7 +81,11 @@ export async function ensureCudaWorker(): Promise<void> {
     process.env.CLAP_LLAMA_WORKER = worker;
     console.error(`[clap] CUDA worker installed at ${worker}`);
   } catch (error) {
-    console.error(`[clap] CUDA worker unavailable (${error instanceof Error ? error.message : error}); using bundled CPU worker`);
+    // Loud and specific: the failure mode this replaces was a CPU-only worker
+    // running silently on a GPU box, which reads as "clap is just slow".
+    console.error(`[clap] CUDA worker unavailable: ${error instanceof Error ? error.message : error}`);
+    console.error(`[clap] falling back to the CPU worker — inference will be several times slower on this GPU host.`);
+    console.error(`[clap] build one with scripts/pod-build-cuda-worker.sh and set CLAP_LLAMA_WORKER, or set CLAP_CUDA=0 to silence this.`);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

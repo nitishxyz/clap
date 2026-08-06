@@ -131,6 +131,17 @@ export const StructuredOutputCapabilitiesSchema = z.object({
   post_validation: z.boolean(),
   max_schema_bytes: z.number().int().nonnegative(),
 }).strict();
+// What the worker binary can offload to, and what it found at runtime. A
+// CPU-only build on a GPU box is a silent 5-10x slowdown, so this is reported
+// before any model loads. Optional: older workers predate the field.
+export const AcceleratorSchema = z.object({
+  compiled: z.string(),
+  devices: z.array(z.object({
+    name: z.string(),
+    description: z.string(),
+    total_memory_bytes: z.number().nonnegative(),
+  }).strict()),
+}).strict();
 export const WorkerCapabilitiesSchema = z.object({
   backend: z.enum(["llama", "mlx"]),
   streaming: z.boolean(),
@@ -139,6 +150,7 @@ export const WorkerCapabilitiesSchema = z.object({
     interleaved: z.boolean(),
     priority_aware: z.boolean(),
   }).strict(),
+  accelerator: AcceleratorSchema.optional(),
 }).strict();
 export const CacheCapabilitiesSchema = z.object({
   partial_suffix_trim: z.boolean(),

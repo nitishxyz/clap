@@ -1,5 +1,6 @@
 #include "clap/llama/worker.h"
 
+#include "clap/llama/accelerator.h"
 #include "clap/llama/request-state.h"
 
 #include <algorithm>
@@ -35,9 +36,19 @@ Worker::Worker() : Worker(std::cin, std::cout) {}
 Worker::Worker(std::istream& input, std::ostream& output)
     : output_(output), v1_(std::make_unique<ProtocolWriter>(output)),
       state_(), scheduler_(scheduler_state(state_)), reader_(input) {
+  const auto accelerator = detect_accelerator();
+  nlohmann::json devices = nlohmann::json::array();
+  for (const auto& device : accelerator.devices) {
+    devices.push_back({{"name", device.name}, {"description", device.description},
+        {"total_memory_bytes", device.total_memory_bytes}});
+  }
   v1_->ready({{"backend", "llama"}, {"streaming", true}, {"scheduling", {
       {"fused_multi_sequence_batching", true}, {"interleaved", true},
-      {"priority_aware", true}}}}, nullptr);
+      {"priority_aware", true}}},
+      // Reported before any model loads so `clap server status` can warn about
+      // a CPU-only worker on a GPU box without waiting for a slow first token.
+      {"accelerator", {{"compiled", accelerator.compiled}, {"devices", devices}}}},
+      nullptr);
 }
 
 void Worker::send_scheduler_events(const std::vector<SchedulerEvent>& events) {

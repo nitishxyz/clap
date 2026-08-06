@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Clap Local Model Server API",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "servers": [
     {
@@ -1296,6 +1296,43 @@
                             "priority_aware"
                           ],
                           "additionalProperties": false
+                        },
+                        "accelerator": {
+                          "type": "object",
+                          "properties": {
+                            "compiled": {
+                              "type": "string"
+                            },
+                            "devices": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  },
+                                  "total_memory_bytes": {
+                                    "type": "number",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "description",
+                                  "total_memory_bytes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "compiled",
+                            "devices"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
@@ -2103,6 +2140,43 @@
                           "priority_aware"
                         ],
                         "additionalProperties": false
+                      },
+                      "accelerator": {
+                        "type": "object",
+                        "properties": {
+                          "compiled": {
+                            "type": "string"
+                          },
+                          "devices": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "description": {
+                                  "type": "string"
+                                },
+                                "total_memory_bytes": {
+                                  "type": "number",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "description",
+                                "total_memory_bytes"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "compiled",
+                          "devices"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -2896,6 +2970,43 @@
                           "fused_multi_sequence_batching",
                           "interleaved",
                           "priority_aware"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "accelerator": {
+                        "type": "object",
+                        "properties": {
+                          "compiled": {
+                            "type": "string"
+                          },
+                          "devices": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "description": {
+                                  "type": "string"
+                                },
+                                "total_memory_bytes": {
+                                  "type": "number",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "description",
+                                "total_memory_bytes"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "compiled",
+                          "devices"
                         ],
                         "additionalProperties": false
                       }
@@ -7931,6 +8042,43 @@
                                       "priority_aware"
                                     ],
                                     "additionalProperties": false
+                                  },
+                                  "accelerator": {
+                                    "type": "object",
+                                    "properties": {
+                                      "compiled": {
+                                        "type": "string"
+                                      },
+                                      "devices": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            },
+                                            "description": {
+                                              "type": "string"
+                                            },
+                                            "total_memory_bytes": {
+                                              "type": "number",
+                                              "minimum": 0
+                                            }
+                                          },
+                                          "required": [
+                                            "name",
+                                            "description",
+                                            "total_memory_bytes"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      }
+                                    },
+                                    "required": [
+                                      "compiled",
+                                      "devices"
+                                    ],
+                                    "additionalProperties": false
                                   }
                                 },
                                 "required": [
@@ -9353,6 +9501,43 @@
                                     "priority_aware"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "accelerator": {
+                                  "type": "object",
+                                  "properties": {
+                                    "compiled": {
+                                      "type": "string"
+                                    },
+                                    "devices": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          },
+                                          "description": {
+                                            "type": "string"
+                                          },
+                                          "total_memory_bytes": {
+                                            "type": "number",
+                                            "minimum": 0
+                                          }
+                                        },
+                                        "required": [
+                                          "name",
+                                          "description",
+                                          "total_memory_bytes"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "compiled",
+                                    "devices"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "required": [
@@ -10221,6 +10406,43 @@
                                     "fused_multi_sequence_batching",
                                     "interleaved",
                                     "priority_aware"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "accelerator": {
+                                  "type": "object",
+                                  "properties": {
+                                    "compiled": {
+                                      "type": "string"
+                                    },
+                                    "devices": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          },
+                                          "description": {
+                                            "type": "string"
+                                          },
+                                          "total_memory_bytes": {
+                                            "type": "number",
+                                            "minimum": 0
+                                          }
+                                        },
+                                        "required": [
+                                          "name",
+                                          "description",
+                                          "total_memory_bytes"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "compiled",
+                                    "devices"
                                   ],
                                   "additionalProperties": false
                                 }
