@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const clapVersion = "0.2.1";
+export const clapVersion = "0.2.2";
 export const defaultBaseURL = "http://localhost:11435";
 
 export const ErrorResponseSchema = z.object({

@@ -14,6 +14,7 @@ const embeddedAssets = [
   { name: "clap-mlx", path: mlxWorkerAsset as string, executable: true, env: "CLAP_MLX_WORKER" },
   { name: "mlx.metallib", path: metallibAsset as string, executable: false, env: undefined },
 ];
+const bundledLlamaWorkerEnv = "CLAP_BUNDLED_LLAMA_WORKER";
 
 function isEmbeddedPath(path: string): boolean {
   return path.startsWith("/$bunfs/") || path.includes("/~BUN/") || path.startsWith("B:\\");
@@ -53,6 +54,7 @@ export async function ensureEmbeddedWorkers(): Promise<void> {
     const target = extracted[asset.name];
     if (asset.env && target && !process.env[asset.env]) {
       process.env[asset.env] = target;
+      if (asset.name === "clap-llama") process.env[bundledLlamaWorkerEnv] = target;
     }
   }
 

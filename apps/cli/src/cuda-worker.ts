@@ -5,6 +5,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const releaseRepo = "nitishxyz/clap";
+const bundledLlamaWorkerEnv = "CLAP_BUNDLED_LLAMA_WORKER";
+
+export function hasExplicitWorker(): boolean {
+  const configured = process.env.CLAP_LLAMA_WORKER;
+  return Boolean(configured && configured !== process.env[bundledLlamaWorkerEnv]);
+}
 
 function clapHome(): string {
   return process.env.CLAP_HOME ?? join(process.env.HOME ?? homedir(), ".clap");
@@ -28,8 +34,7 @@ function cudaWorkerPath(): string {
 export function cpuFallbackWarning(): string | undefined {
   if (!hasNvidiaGpu()) return undefined;
   if (process.env.CLAP_CUDA === "0") return undefined;
-  const configured = process.env.CLAP_LLAMA_WORKER;
-  if (configured) return undefined; // operator chose this worker explicitly
+  if (hasExplicitWorker()) return undefined;
   if (isUsable(cudaWorkerPath())) return undefined;
   return `NVIDIA GPU detected but no CUDA worker is installed, so inference runs on the CPU.
     Clap provisions it automatically on the next server start; if that keeps failing the
@@ -44,7 +49,7 @@ export function cpuFallbackWarning(): string | undefined {
 // otherwise download it from the matching GitHub release. Any failure falls
 // back to the bundled CPU worker so inference still works.
 export async function ensureCudaWorker(): Promise<void> {
-  if (process.env.CLAP_LLAMA_WORKER) return; // explicit user configuration wins
+  if (hasExplicitWorker()) return;
   if (process.env.CLAP_CUDA === "0") return;
   if (process.platform !== "linux" || process.arch !== "x64") return;
   if (!hasNvidiaGpu()) return;
@@ -53,6 +58,7 @@ export async function ensureCudaWorker(): Promise<void> {
   const targetDir = dirname(worker);
   if (isUsable(worker)) {
     process.env.CLAP_LLAMA_WORKER = worker;
+    delete process.env[bundledLlamaWorkerEnv];
     return;
   }
 
@@ -79,6 +85,7 @@ export async function ensureCudaWorker(): Promise<void> {
     await mkdir(targetDir, { recursive: true });
     await rename(extracted, worker);
     process.env.CLAP_LLAMA_WORKER = worker;
+    delete process.env[bundledLlamaWorkerEnv];
     console.error(`[clap] CUDA worker installed at ${worker}`);
   } catch (error) {
     // Loud and specific: the failure mode this replaces was a CPU-only worker
