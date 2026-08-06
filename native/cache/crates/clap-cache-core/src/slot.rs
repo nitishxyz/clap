@@ -1,6 +1,8 @@
 //! Logical slot state and pure ranking helpers shared by the coordinator.
 
-use crate::{Capabilities, Generation, Labels, Namespace, PlanId, PlanRequest, Scope, SlotId, SlotState};
+use crate::{
+    Capabilities, Generation, Labels, Namespace, PlanId, PlanRequest, Scope, SlotId, SlotState,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Slot {

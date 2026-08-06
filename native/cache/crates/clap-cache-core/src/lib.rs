@@ -86,7 +86,8 @@ impl SlotCapabilities {
     pub const WRITABLE: u8 = 1 << 1;
     pub const PARTIAL_SUFFIX_TRIM: u8 = 1 << 2;
     pub const COPY: u8 = 1 << 3;
-    pub const ALL: Self = Self(Self::MATERIALIZED | Self::WRITABLE | Self::PARTIAL_SUFFIX_TRIM | Self::COPY);
+    pub const ALL: Self =
+        Self(Self::MATERIALIZED | Self::WRITABLE | Self::PARTIAL_SUFFIX_TRIM | Self::COPY);
 
     pub const fn contains(self, flag: u8) -> bool {
         self.0 & flag == flag
@@ -806,13 +807,21 @@ impl CacheManager {
                     .then_some((id, prefix))
             })
             .max_by(|(left_id, left_prefix), (right_id, right_prefix)| {
-                let (left, right) = (&self.slots[*left_id as usize], &self.slots[*right_id as usize]);
-                let left_anchor = (request.labels.side_request && left.state == SlotState::Anchor) as u8;
-                let right_anchor = (request.labels.side_request && right.state == SlotState::Anchor) as u8;
+                let (left, right) = (
+                    &self.slots[*left_id as usize],
+                    &self.slots[*right_id as usize],
+                );
+                let left_anchor =
+                    (request.labels.side_request && left.state == SlotState::Anchor) as u8;
+                let right_anchor =
+                    (request.labels.side_request && right.state == SlotState::Anchor) as u8;
                 left_anchor
                     .cmp(&right_anchor)
-                    .then_with(|| left_prefix.cmp(right_prefix)
-                        .then_with(|| donor_rank(left, request).cmp(&donor_rank(right, request))))
+                    .then_with(|| {
+                        left_prefix.cmp(right_prefix).then_with(|| {
+                            donor_rank(left, request).cmp(&donor_rank(right, request))
+                        })
+                    })
                     .then_with(|| right_id.cmp(left_id))
             })
     }
@@ -895,7 +904,9 @@ impl CacheManager {
         }
         let replaced_automatic = replacement_slots
             .iter()
-            .filter(|&&slot| self.is_automatic_checkpoint_len(self.slots[slot as usize].tokens.len()))
+            .filter(|&&slot| {
+                self.is_automatic_checkpoint_len(self.slots[slot as usize].tokens.len())
+            })
             .count();
         let automatic_available = available
             .saturating_sub(semantic.len())
@@ -1294,16 +1305,16 @@ impl CacheManager {
                     && self.is_automatic_checkpoint_len(other.tokens.len())
                     && other.tokens.len() < slot.tokens.len()
             });
-            let within_quota = self.tenant_quotas.get(&slot.labels.tenant).map_or(
-                true,
-                |&quota| {
+            let within_quota = self
+                .tenant_quotas
+                .get(&slot.labels.tenant)
+                .map_or(true, |&quota| {
                     tenant_bytes
                         .get(&slot.labels.tenant)
                         .copied()
                         .unwrap_or_default()
                         <= quota
-                },
-            );
+                });
             (
                 within_quota,
                 slot.namespace != request_namespace,

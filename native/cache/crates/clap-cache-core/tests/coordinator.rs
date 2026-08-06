@@ -286,7 +286,12 @@ fn side_request_prefers_protected_anchor_over_longer_live_session() {
     let mut primary_request = request(&primary_tokens, namespace(1), 12, 0);
     primary_request.labels.session = 12;
     let primary = cache.plan(primary_request).unwrap();
-    commit_idle(&mut cache, &primary, primary_tokens.len(), SlotState::Session);
+    commit_idle(
+        &mut cache,
+        &primary,
+        primary_tokens.len(),
+        SlotState::Session,
+    );
 
     let mut side_request = request(
         &[1, 2, 3, 4, 9],
@@ -1535,8 +1540,14 @@ fn full_anchor_budget_advances_to_the_newest_same_session_boundary() {
     let plan = cache.plan(incoming).unwrap();
 
     assert_eq!(plan.anchor_boundaries, [11]);
-    assert_eq!(cache.slot(old.target.slot).unwrap().state, SlotState::Anchor);
-    assert_eq!(cache.slot(unrelated.target.slot).unwrap().state, SlotState::Anchor);
+    assert_eq!(
+        cache.slot(old.target.slot).unwrap().state,
+        SlotState::Anchor
+    );
+    assert_eq!(
+        cache.slot(unrelated.target.slot).unwrap().state,
+        SlotState::Anchor
+    );
     cache.abort(plan.id).unwrap();
 }
 
@@ -1547,9 +1558,7 @@ fn structural_anchor_is_ranked_but_not_implicitly_protected() {
     assert!(!cache.slot(slot).unwrap().protected);
 
     let generation = cache.slot(slot).unwrap().generation;
-    cache
-        .set_anchor_protected(slot, generation, true)
-        .unwrap();
+    cache.set_anchor_protected(slot, generation, true).unwrap();
     assert!(cache.slot(slot).unwrap().protected);
 }
 
@@ -1639,7 +1648,9 @@ fn hybrid_turns_reuse_the_prompt_boundary_anchor() {
     let mut turn2 = turn1_resident.clone();
     turn2.truncate(turn1.len());
     turn2.extend([902, 903]);
-    let plan = cache.plan(request(&turn2, namespace(1), 7, HYBRID)).unwrap();
+    let plan = cache
+        .plan(request(&turn2, namespace(1), 7, HYBRID))
+        .unwrap();
     assert_eq!(
         plan.operation,
         Operation::Restore,

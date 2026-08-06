@@ -7,8 +7,8 @@ use std::slice;
 use std::sync::Mutex;
 
 use clap_cache_core::{
-    AutomaticCheckpointConfig, CacheManager, Capabilities, Commit, Config, Labels,
-    Namespace, PlanRequest, Priority, RetentionConfig, Scope, SlotCapabilities, SlotState,
+    AutomaticCheckpointConfig, CacheManager, Capabilities, Commit, Config, Labels, Namespace,
+    PlanRequest, Priority, RetentionConfig, Scope, SlotCapabilities, SlotState,
 };
 
 mod types;
@@ -70,7 +70,9 @@ fn labels(value: ClapCacheLabels) -> Result<Labels, ClapCacheStatus> {
         _ => return Err(ClapCacheStatus::InvalidArgument),
     };
     let priority = match value.priority {
-        0 => Priority::Background, 1 => Priority::Normal, 2 => Priority::Interactive,
+        0 => Priority::Background,
+        1 => Priority::Normal,
+        2 => Priority::Interactive,
         _ => return Err(ClapCacheStatus::InvalidArgument),
     };
     Ok(Labels {

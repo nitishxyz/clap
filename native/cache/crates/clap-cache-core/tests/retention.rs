@@ -99,10 +99,23 @@ fn seed_priority(
     input.labels.priority = priority;
     let plan = cache.plan(input).unwrap();
     let slot = plan.target.slot;
-    cache.commit(plan.id, Commit { resident_tokens: tokens.len(), actual_state: state,
-        physical_bytes: bytes, prefill_us_saved: 0 }).unwrap();
+    cache
+        .commit(
+            plan.id,
+            Commit {
+                resident_tokens: tokens.len(),
+                actual_state: state,
+                physical_bytes: bytes,
+                prefill_us_saved: 0,
+            },
+        )
+        .unwrap();
     let snapshot = cache.slot(slot).unwrap();
-    if snapshot.busy { cache.set_busy(snapshot.id, snapshot.generation, false).unwrap(); }
+    if snapshot.busy {
+        cache
+            .set_busy(snapshot.id, snapshot.generation, false)
+            .unwrap();
+    }
     (slot, cache.slot(slot).unwrap().generation)
 }
 
@@ -113,33 +126,107 @@ fn priority_ordinals_order_session_anchor_and_byte_pressure_eviction() {
     assert_eq!(Priority::Interactive as u32, 2);
 
     let mut sessions = manager(3, 3);
-    let background = seed_priority(&mut sessions, &[1, 1], namespace(1), 1,
-        SlotState::Session, 1, Priority::Background).0;
-    seed_priority(&mut sessions, &[2, 2], namespace(2), 2,
-        SlotState::Session, 1, Priority::Normal);
-    seed_priority(&mut sessions, &[3, 3], namespace(3), 3,
-        SlotState::Session, 1, Priority::Interactive);
-    assert_eq!(sessions.plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
-        .unwrap().target.slot, background);
+    let background = seed_priority(
+        &mut sessions,
+        &[1, 1],
+        namespace(1),
+        1,
+        SlotState::Session,
+        1,
+        Priority::Background,
+    )
+    .0;
+    seed_priority(
+        &mut sessions,
+        &[2, 2],
+        namespace(2),
+        2,
+        SlotState::Session,
+        1,
+        Priority::Normal,
+    );
+    seed_priority(
+        &mut sessions,
+        &[3, 3],
+        namespace(3),
+        3,
+        SlotState::Session,
+        1,
+        Priority::Interactive,
+    );
+    assert_eq!(
+        sessions
+            .plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
+            .unwrap()
+            .target
+            .slot,
+        background
+    );
 
     let mut anchors = manager(2, 2);
-    let background_anchor = seed_priority(&mut anchors, &[1, 1], namespace(1), 1,
-        SlotState::Anchor, 1, Priority::Background).0;
-    seed_priority(&mut anchors, &[2, 2], namespace(2), 2,
-        SlotState::Anchor, 1, Priority::Interactive);
+    let background_anchor = seed_priority(
+        &mut anchors,
+        &[1, 1],
+        namespace(1),
+        1,
+        SlotState::Anchor,
+        1,
+        Priority::Background,
+    )
+    .0;
+    seed_priority(
+        &mut anchors,
+        &[2, 2],
+        namespace(2),
+        2,
+        SlotState::Anchor,
+        1,
+        Priority::Interactive,
+    );
     let mut normal_anchor = request(&[3, 3], namespace(3), 3, SlotState::Anchor);
     normal_anchor.labels.priority = Priority::Normal;
-    assert_eq!(anchors.plan(normal_anchor).unwrap().target.slot, background_anchor);
+    assert_eq!(
+        anchors.plan(normal_anchor).unwrap().target.slot,
+        background_anchor
+    );
 
     let mut pressure = manager(4, 4);
-    let pressure_background = seed_priority(&mut pressure, &[1, 1], namespace(1), 1,
-        SlotState::Session, 30, Priority::Background).0;
-    let pressure_normal = seed_priority(&mut pressure, &[2, 2], namespace(2), 2,
-        SlotState::Session, 30, Priority::Normal).0;
-    seed_priority(&mut pressure, &[3, 3], namespace(3), 3,
-        SlotState::Session, 30, Priority::Interactive);
-    let victims: Vec<_> = pressure.plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
-        .unwrap().evictions.into_iter().map(|victim| victim.slot).collect();
+    let pressure_background = seed_priority(
+        &mut pressure,
+        &[1, 1],
+        namespace(1),
+        1,
+        SlotState::Session,
+        30,
+        Priority::Background,
+    )
+    .0;
+    let pressure_normal = seed_priority(
+        &mut pressure,
+        &[2, 2],
+        namespace(2),
+        2,
+        SlotState::Session,
+        30,
+        Priority::Normal,
+    )
+    .0;
+    seed_priority(
+        &mut pressure,
+        &[3, 3],
+        namespace(3),
+        3,
+        SlotState::Session,
+        30,
+        Priority::Interactive,
+    );
+    let victims: Vec<_> = pressure
+        .plan(request(&[4, 4], namespace(4), 4, SlotState::Session))
+        .unwrap()
+        .evictions
+        .into_iter()
+        .map(|victim| victim.slot)
+        .collect();
     assert_eq!(victims, vec![pressure_background, pressure_normal]);
 }
 
@@ -481,10 +568,24 @@ fn tenant_over_quota_is_evicted_first_despite_priority() {
     // quota while tenant 2 is background and within quota.
     for quota in [Some(40), None] {
         let mut cache = manager(4, 4);
-        let (over_quota, _) = seed_priority(&mut cache, &[1, 1], namespace(1), 1,
-            SlotState::Session, 45, Priority::Interactive);
-        let (background, _) = seed_priority(&mut cache, &[2, 2], namespace(2), 2,
-            SlotState::Session, 40, Priority::Background);
+        let (over_quota, _) = seed_priority(
+            &mut cache,
+            &[1, 1],
+            namespace(1),
+            1,
+            SlotState::Session,
+            45,
+            Priority::Interactive,
+        );
+        let (background, _) = seed_priority(
+            &mut cache,
+            &[2, 2],
+            namespace(2),
+            2,
+            SlotState::Session,
+            40,
+            Priority::Background,
+        );
         if let Some(bytes) = quota {
             cache.set_tenant_quota(1, bytes).unwrap();
         }
@@ -493,7 +594,11 @@ fn tenant_over_quota_is_evicted_first_despite_priority() {
             .unwrap();
         let victims: Vec<_> = plan.evictions.iter().map(|slot| slot.slot).collect();
         // Without a quota, the background slot is the priority-first victim.
-        let expected = if quota.is_some() { over_quota } else { background };
+        let expected = if quota.is_some() {
+            over_quota
+        } else {
+            background
+        };
         assert_eq!(victims, vec![expected]);
         cache.abort(plan.id).unwrap();
     }

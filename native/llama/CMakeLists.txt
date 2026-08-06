@@ -487,6 +487,7 @@ if(BUILD_TESTING)
     clap-llama-sampling
     clap-llama-scheduler
     clap-llama-stop-buffer
+    clap-llama-structured-output
     clap-llama-structured-sampling
     clap-llama-telemetry
     clap-llama-worker-state

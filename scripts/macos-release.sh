@@ -118,7 +118,10 @@ run rm -rf "$mount_point" "$archive"
 run mkdir -p "$mount_point"
 run hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
 run codesign --verify --strict --verbose=2 "$mount_point/clap"
-run spctl --assess --type execute --verbose=2 "$mount_point/clap"
+# Gatekeeper's execute assessment expects an app bundle and rejects a valid
+# notarized standalone CLI as "does not seem to be an app". The containing DMG
+# was assessed above as Notarized Developer ID; verify the mounted CLI's exact
+# code signature and bytes here instead.
 run cmp dist/clap "$mount_point/clap"
 run hdiutil detach "$mount_point"
 run rm -rf "$mount_point"
