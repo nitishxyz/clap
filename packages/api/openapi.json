@@ -1406,6 +1406,181 @@
                             },
                             "quantizedKv": {
                               "type": "boolean"
+                            },
+                            "adapter": {
+                              "type": "object",
+                              "properties": {
+                                "contract_version": {
+                                  "type": "number",
+                                  "enum": [
+                                    1
+                                  ]
+                                },
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "sequence",
+                                    "paged",
+                                    "paged_skeleton"
+                                  ]
+                                },
+                                "operations": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": [
+                                      "inspect",
+                                      "continue",
+                                      "restore",
+                                      "fork",
+                                      "trim",
+                                      "snapshot",
+                                      "release",
+                                      "export",
+                                      "import",
+                                      "promote",
+                                      "demote"
+                                    ]
+                                  }
+                                },
+                                "format": {
+                                  "type": "object",
+                                  "properties": {
+                                    "backend": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "engine": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "cache_format": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "cache_format_version": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "kv_data_type": {
+                                      "type": "string",
+                                      "nullable": true,
+                                      "minLength": 1
+                                    },
+                                    "block_tokens": {
+                                      "type": "integer",
+                                      "nullable": true,
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    }
+                                  },
+                                  "required": [
+                                    "backend",
+                                    "engine",
+                                    "cache_format",
+                                    "cache_format_version",
+                                    "kv_data_type",
+                                    "block_tokens"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "constraints": {
+                                  "type": "object",
+                                  "properties": {
+                                    "restore_granularity": {
+                                      "type": "string",
+                                      "enum": [
+                                        "whole_state",
+                                        "block"
+                                      ]
+                                    },
+                                    "fork_semantics": {
+                                      "type": "string",
+                                      "enum": [
+                                        "whole_state_copy",
+                                        "copy_on_write"
+                                      ]
+                                    },
+                                    "minimum_trim_tokens": {
+                                      "type": "integer",
+                                      "nullable": true,
+                                      "minimum": 0,
+                                      "exclusiveMinimum": true
+                                    },
+                                    "safe_busy_donor": {
+                                      "type": "boolean"
+                                    },
+                                    "prompt_boundary_snapshots": {
+                                      "type": "boolean"
+                                    },
+                                    "recurrent_or_hybrid": {
+                                      "type": "boolean"
+                                    },
+                                    "byte_accounting": {
+                                      "type": "string",
+                                      "enum": [
+                                        "unknown",
+                                        "estimated",
+                                        "exact"
+                                      ]
+                                    },
+                                    "tiers": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string",
+                                        "enum": [
+                                          "device",
+                                          "host",
+                                          "local_storage",
+                                          "remote"
+                                        ]
+                                      },
+                                      "minItems": 1
+                                    },
+                                    "transfer_format": {
+                                      "type": "object",
+                                      "nullable": true,
+                                      "properties": {
+                                        "identity": {
+                                          "type": "string",
+                                          "minLength": 1
+                                        },
+                                        "version": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "exclusiveMinimum": true
+                                        }
+                                      },
+                                      "required": [
+                                        "identity",
+                                        "version"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "restore_granularity",
+                                    "fork_semantics",
+                                    "minimum_trim_tokens",
+                                    "safe_busy_donor",
+                                    "prompt_boundary_snapshots",
+                                    "recurrent_or_hybrid",
+                                    "byte_accounting",
+                                    "tiers",
+                                    "transfer_format"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "required": [
+                                "contract_version",
+                                "kind",
+                                "operations",
+                                "format",
+                                "constraints"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [
@@ -2294,6 +2469,181 @@
                           },
                           "quantizedKv": {
                             "type": "boolean"
+                          },
+                          "adapter": {
+                            "type": "object",
+                            "properties": {
+                              "contract_version": {
+                                "type": "number",
+                                "enum": [
+                                  1
+                                ]
+                              },
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "sequence",
+                                  "paged",
+                                  "paged_skeleton"
+                                ]
+                              },
+                              "operations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "inspect",
+                                    "continue",
+                                    "restore",
+                                    "fork",
+                                    "trim",
+                                    "snapshot",
+                                    "release",
+                                    "export",
+                                    "import",
+                                    "promote",
+                                    "demote"
+                                  ]
+                                }
+                              },
+                              "format": {
+                                "type": "object",
+                                "properties": {
+                                  "backend": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "engine": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "cache_format": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "cache_format_version": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "kv_data_type": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "minLength": 1
+                                  },
+                                  "block_tokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  }
+                                },
+                                "required": [
+                                  "backend",
+                                  "engine",
+                                  "cache_format",
+                                  "cache_format_version",
+                                  "kv_data_type",
+                                  "block_tokens"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "constraints": {
+                                "type": "object",
+                                "properties": {
+                                  "restore_granularity": {
+                                    "type": "string",
+                                    "enum": [
+                                      "whole_state",
+                                      "block"
+                                    ]
+                                  },
+                                  "fork_semantics": {
+                                    "type": "string",
+                                    "enum": [
+                                      "whole_state_copy",
+                                      "copy_on_write"
+                                    ]
+                                  },
+                                  "minimum_trim_tokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "safe_busy_donor": {
+                                    "type": "boolean"
+                                  },
+                                  "prompt_boundary_snapshots": {
+                                    "type": "boolean"
+                                  },
+                                  "recurrent_or_hybrid": {
+                                    "type": "boolean"
+                                  },
+                                  "byte_accounting": {
+                                    "type": "string",
+                                    "enum": [
+                                      "unknown",
+                                      "estimated",
+                                      "exact"
+                                    ]
+                                  },
+                                  "tiers": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "device",
+                                        "host",
+                                        "local_storage",
+                                        "remote"
+                                      ]
+                                    },
+                                    "minItems": 1
+                                  },
+                                  "transfer_format": {
+                                    "type": "object",
+                                    "nullable": true,
+                                    "properties": {
+                                      "identity": {
+                                        "type": "string",
+                                        "minLength": 1
+                                      },
+                                      "version": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      }
+                                    },
+                                    "required": [
+                                      "identity",
+                                      "version"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "required": [
+                                  "restore_granularity",
+                                  "fork_semantics",
+                                  "minimum_trim_tokens",
+                                  "safe_busy_donor",
+                                  "prompt_boundary_snapshots",
+                                  "recurrent_or_hybrid",
+                                  "byte_accounting",
+                                  "tiers",
+                                  "transfer_format"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "contract_version",
+                              "kind",
+                              "operations",
+                              "format",
+                              "constraints"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -3170,6 +3520,181 @@
                           },
                           "quantizedKv": {
                             "type": "boolean"
+                          },
+                          "adapter": {
+                            "type": "object",
+                            "properties": {
+                              "contract_version": {
+                                "type": "number",
+                                "enum": [
+                                  1
+                                ]
+                              },
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "sequence",
+                                  "paged",
+                                  "paged_skeleton"
+                                ]
+                              },
+                              "operations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "inspect",
+                                    "continue",
+                                    "restore",
+                                    "fork",
+                                    "trim",
+                                    "snapshot",
+                                    "release",
+                                    "export",
+                                    "import",
+                                    "promote",
+                                    "demote"
+                                  ]
+                                }
+                              },
+                              "format": {
+                                "type": "object",
+                                "properties": {
+                                  "backend": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "engine": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "cache_format": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "cache_format_version": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "kv_data_type": {
+                                    "type": "string",
+                                    "nullable": true,
+                                    "minLength": 1
+                                  },
+                                  "block_tokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  }
+                                },
+                                "required": [
+                                  "backend",
+                                  "engine",
+                                  "cache_format",
+                                  "cache_format_version",
+                                  "kv_data_type",
+                                  "block_tokens"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "constraints": {
+                                "type": "object",
+                                "properties": {
+                                  "restore_granularity": {
+                                    "type": "string",
+                                    "enum": [
+                                      "whole_state",
+                                      "block"
+                                    ]
+                                  },
+                                  "fork_semantics": {
+                                    "type": "string",
+                                    "enum": [
+                                      "whole_state_copy",
+                                      "copy_on_write"
+                                    ]
+                                  },
+                                  "minimum_trim_tokens": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "minimum": 0,
+                                    "exclusiveMinimum": true
+                                  },
+                                  "safe_busy_donor": {
+                                    "type": "boolean"
+                                  },
+                                  "prompt_boundary_snapshots": {
+                                    "type": "boolean"
+                                  },
+                                  "recurrent_or_hybrid": {
+                                    "type": "boolean"
+                                  },
+                                  "byte_accounting": {
+                                    "type": "string",
+                                    "enum": [
+                                      "unknown",
+                                      "estimated",
+                                      "exact"
+                                    ]
+                                  },
+                                  "tiers": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "device",
+                                        "host",
+                                        "local_storage",
+                                        "remote"
+                                      ]
+                                    },
+                                    "minItems": 1
+                                  },
+                                  "transfer_format": {
+                                    "type": "object",
+                                    "nullable": true,
+                                    "properties": {
+                                      "identity": {
+                                        "type": "string",
+                                        "minLength": 1
+                                      },
+                                      "version": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "exclusiveMinimum": true
+                                      }
+                                    },
+                                    "required": [
+                                      "identity",
+                                      "version"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "required": [
+                                  "restore_granularity",
+                                  "fork_semantics",
+                                  "minimum_trim_tokens",
+                                  "safe_busy_donor",
+                                  "prompt_boundary_snapshots",
+                                  "recurrent_or_hybrid",
+                                  "byte_accounting",
+                                  "tiers",
+                                  "transfer_format"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "contract_version",
+                              "kind",
+                              "operations",
+                              "format",
+                              "constraints"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -8284,6 +8809,181 @@
                                       },
                                       "quantizedKv": {
                                         "type": "boolean"
+                                      },
+                                      "adapter": {
+                                        "type": "object",
+                                        "properties": {
+                                          "contract_version": {
+                                            "type": "number",
+                                            "enum": [
+                                              1
+                                            ]
+                                          },
+                                          "kind": {
+                                            "type": "string",
+                                            "enum": [
+                                              "sequence",
+                                              "paged",
+                                              "paged_skeleton"
+                                            ]
+                                          },
+                                          "operations": {
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string",
+                                              "enum": [
+                                                "inspect",
+                                                "continue",
+                                                "restore",
+                                                "fork",
+                                                "trim",
+                                                "snapshot",
+                                                "release",
+                                                "export",
+                                                "import",
+                                                "promote",
+                                                "demote"
+                                              ]
+                                            }
+                                          },
+                                          "format": {
+                                            "type": "object",
+                                            "properties": {
+                                              "backend": {
+                                                "type": "string",
+                                                "minLength": 1
+                                              },
+                                              "engine": {
+                                                "type": "string",
+                                                "minLength": 1
+                                              },
+                                              "cache_format": {
+                                                "type": "string",
+                                                "minLength": 1
+                                              },
+                                              "cache_format_version": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "exclusiveMinimum": true
+                                              },
+                                              "kv_data_type": {
+                                                "type": "string",
+                                                "nullable": true,
+                                                "minLength": 1
+                                              },
+                                              "block_tokens": {
+                                                "type": "integer",
+                                                "nullable": true,
+                                                "minimum": 0,
+                                                "exclusiveMinimum": true
+                                              }
+                                            },
+                                            "required": [
+                                              "backend",
+                                              "engine",
+                                              "cache_format",
+                                              "cache_format_version",
+                                              "kv_data_type",
+                                              "block_tokens"
+                                            ],
+                                            "additionalProperties": false
+                                          },
+                                          "constraints": {
+                                            "type": "object",
+                                            "properties": {
+                                              "restore_granularity": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "whole_state",
+                                                  "block"
+                                                ]
+                                              },
+                                              "fork_semantics": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "whole_state_copy",
+                                                  "copy_on_write"
+                                                ]
+                                              },
+                                              "minimum_trim_tokens": {
+                                                "type": "integer",
+                                                "nullable": true,
+                                                "minimum": 0,
+                                                "exclusiveMinimum": true
+                                              },
+                                              "safe_busy_donor": {
+                                                "type": "boolean"
+                                              },
+                                              "prompt_boundary_snapshots": {
+                                                "type": "boolean"
+                                              },
+                                              "recurrent_or_hybrid": {
+                                                "type": "boolean"
+                                              },
+                                              "byte_accounting": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "unknown",
+                                                  "estimated",
+                                                  "exact"
+                                                ]
+                                              },
+                                              "tiers": {
+                                                "type": "array",
+                                                "items": {
+                                                  "type": "string",
+                                                  "enum": [
+                                                    "device",
+                                                    "host",
+                                                    "local_storage",
+                                                    "remote"
+                                                  ]
+                                                },
+                                                "minItems": 1
+                                              },
+                                              "transfer_format": {
+                                                "type": "object",
+                                                "nullable": true,
+                                                "properties": {
+                                                  "identity": {
+                                                    "type": "string",
+                                                    "minLength": 1
+                                                  },
+                                                  "version": {
+                                                    "type": "integer",
+                                                    "minimum": 0,
+                                                    "exclusiveMinimum": true
+                                                  }
+                                                },
+                                                "required": [
+                                                  "identity",
+                                                  "version"
+                                                ],
+                                                "additionalProperties": false
+                                              }
+                                            },
+                                            "required": [
+                                              "restore_granularity",
+                                              "fork_semantics",
+                                              "minimum_trim_tokens",
+                                              "safe_busy_donor",
+                                              "prompt_boundary_snapshots",
+                                              "recurrent_or_hybrid",
+                                              "byte_accounting",
+                                              "tiers",
+                                              "transfer_format"
+                                            ],
+                                            "additionalProperties": false
+                                          }
+                                        },
+                                        "required": [
+                                          "contract_version",
+                                          "kind",
+                                          "operations",
+                                          "format",
+                                          "constraints"
+                                        ],
+                                        "additionalProperties": false
                                       }
                                     },
                                     "required": [
@@ -9787,6 +10487,181 @@
                                     },
                                     "quantizedKv": {
                                       "type": "boolean"
+                                    },
+                                    "adapter": {
+                                      "type": "object",
+                                      "properties": {
+                                        "contract_version": {
+                                          "type": "number",
+                                          "enum": [
+                                            1
+                                          ]
+                                        },
+                                        "kind": {
+                                          "type": "string",
+                                          "enum": [
+                                            "sequence",
+                                            "paged",
+                                            "paged_skeleton"
+                                          ]
+                                        },
+                                        "operations": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string",
+                                            "enum": [
+                                              "inspect",
+                                              "continue",
+                                              "restore",
+                                              "fork",
+                                              "trim",
+                                              "snapshot",
+                                              "release",
+                                              "export",
+                                              "import",
+                                              "promote",
+                                              "demote"
+                                            ]
+                                          }
+                                        },
+                                        "format": {
+                                          "type": "object",
+                                          "properties": {
+                                            "backend": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "engine": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "cache_format": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "cache_format_version": {
+                                              "type": "integer",
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            },
+                                            "kv_data_type": {
+                                              "type": "string",
+                                              "nullable": true,
+                                              "minLength": 1
+                                            },
+                                            "block_tokens": {
+                                              "type": "integer",
+                                              "nullable": true,
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            }
+                                          },
+                                          "required": [
+                                            "backend",
+                                            "engine",
+                                            "cache_format",
+                                            "cache_format_version",
+                                            "kv_data_type",
+                                            "block_tokens"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        "constraints": {
+                                          "type": "object",
+                                          "properties": {
+                                            "restore_granularity": {
+                                              "type": "string",
+                                              "enum": [
+                                                "whole_state",
+                                                "block"
+                                              ]
+                                            },
+                                            "fork_semantics": {
+                                              "type": "string",
+                                              "enum": [
+                                                "whole_state_copy",
+                                                "copy_on_write"
+                                              ]
+                                            },
+                                            "minimum_trim_tokens": {
+                                              "type": "integer",
+                                              "nullable": true,
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            },
+                                            "safe_busy_donor": {
+                                              "type": "boolean"
+                                            },
+                                            "prompt_boundary_snapshots": {
+                                              "type": "boolean"
+                                            },
+                                            "recurrent_or_hybrid": {
+                                              "type": "boolean"
+                                            },
+                                            "byte_accounting": {
+                                              "type": "string",
+                                              "enum": [
+                                                "unknown",
+                                                "estimated",
+                                                "exact"
+                                              ]
+                                            },
+                                            "tiers": {
+                                              "type": "array",
+                                              "items": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "device",
+                                                  "host",
+                                                  "local_storage",
+                                                  "remote"
+                                                ]
+                                              },
+                                              "minItems": 1
+                                            },
+                                            "transfer_format": {
+                                              "type": "object",
+                                              "nullable": true,
+                                              "properties": {
+                                                "identity": {
+                                                  "type": "string",
+                                                  "minLength": 1
+                                                },
+                                                "version": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "exclusiveMinimum": true
+                                                }
+                                              },
+                                              "required": [
+                                                "identity",
+                                                "version"
+                                              ],
+                                              "additionalProperties": false
+                                            }
+                                          },
+                                          "required": [
+                                            "restore_granularity",
+                                            "fork_semantics",
+                                            "minimum_trim_tokens",
+                                            "safe_busy_donor",
+                                            "prompt_boundary_snapshots",
+                                            "recurrent_or_hybrid",
+                                            "byte_accounting",
+                                            "tiers",
+                                            "transfer_format"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      },
+                                      "required": [
+                                        "contract_version",
+                                        "kind",
+                                        "operations",
+                                        "format",
+                                        "constraints"
+                                      ],
+                                      "additionalProperties": false
                                     }
                                   },
                                   "required": [
@@ -10738,6 +11613,181 @@
                                     },
                                     "quantizedKv": {
                                       "type": "boolean"
+                                    },
+                                    "adapter": {
+                                      "type": "object",
+                                      "properties": {
+                                        "contract_version": {
+                                          "type": "number",
+                                          "enum": [
+                                            1
+                                          ]
+                                        },
+                                        "kind": {
+                                          "type": "string",
+                                          "enum": [
+                                            "sequence",
+                                            "paged",
+                                            "paged_skeleton"
+                                          ]
+                                        },
+                                        "operations": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string",
+                                            "enum": [
+                                              "inspect",
+                                              "continue",
+                                              "restore",
+                                              "fork",
+                                              "trim",
+                                              "snapshot",
+                                              "release",
+                                              "export",
+                                              "import",
+                                              "promote",
+                                              "demote"
+                                            ]
+                                          }
+                                        },
+                                        "format": {
+                                          "type": "object",
+                                          "properties": {
+                                            "backend": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "engine": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "cache_format": {
+                                              "type": "string",
+                                              "minLength": 1
+                                            },
+                                            "cache_format_version": {
+                                              "type": "integer",
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            },
+                                            "kv_data_type": {
+                                              "type": "string",
+                                              "nullable": true,
+                                              "minLength": 1
+                                            },
+                                            "block_tokens": {
+                                              "type": "integer",
+                                              "nullable": true,
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            }
+                                          },
+                                          "required": [
+                                            "backend",
+                                            "engine",
+                                            "cache_format",
+                                            "cache_format_version",
+                                            "kv_data_type",
+                                            "block_tokens"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        "constraints": {
+                                          "type": "object",
+                                          "properties": {
+                                            "restore_granularity": {
+                                              "type": "string",
+                                              "enum": [
+                                                "whole_state",
+                                                "block"
+                                              ]
+                                            },
+                                            "fork_semantics": {
+                                              "type": "string",
+                                              "enum": [
+                                                "whole_state_copy",
+                                                "copy_on_write"
+                                              ]
+                                            },
+                                            "minimum_trim_tokens": {
+                                              "type": "integer",
+                                              "nullable": true,
+                                              "minimum": 0,
+                                              "exclusiveMinimum": true
+                                            },
+                                            "safe_busy_donor": {
+                                              "type": "boolean"
+                                            },
+                                            "prompt_boundary_snapshots": {
+                                              "type": "boolean"
+                                            },
+                                            "recurrent_or_hybrid": {
+                                              "type": "boolean"
+                                            },
+                                            "byte_accounting": {
+                                              "type": "string",
+                                              "enum": [
+                                                "unknown",
+                                                "estimated",
+                                                "exact"
+                                              ]
+                                            },
+                                            "tiers": {
+                                              "type": "array",
+                                              "items": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "device",
+                                                  "host",
+                                                  "local_storage",
+                                                  "remote"
+                                                ]
+                                              },
+                                              "minItems": 1
+                                            },
+                                            "transfer_format": {
+                                              "type": "object",
+                                              "nullable": true,
+                                              "properties": {
+                                                "identity": {
+                                                  "type": "string",
+                                                  "minLength": 1
+                                                },
+                                                "version": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "exclusiveMinimum": true
+                                                }
+                                              },
+                                              "required": [
+                                                "identity",
+                                                "version"
+                                              ],
+                                              "additionalProperties": false
+                                            }
+                                          },
+                                          "required": [
+                                            "restore_granularity",
+                                            "fork_semantics",
+                                            "minimum_trim_tokens",
+                                            "safe_busy_donor",
+                                            "prompt_boundary_snapshots",
+                                            "recurrent_or_hybrid",
+                                            "byte_accounting",
+                                            "tiers",
+                                            "transfer_format"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      },
+                                      "required": [
+                                        "contract_version",
+                                        "kind",
+                                        "operations",
+                                        "format",
+                                        "constraints"
+                                      ],
+                                      "additionalProperties": false
                                     }
                                   },
                                   "required": [

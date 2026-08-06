@@ -2,6 +2,7 @@
 //! Rust owns exact token metadata and reservations; native adapters own all
 //! physical cache objects and execute plans outside this crate.
 
+pub mod adapter;
 mod anchor;
 mod lifecycle;
 mod radix;

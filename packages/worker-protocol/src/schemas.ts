@@ -152,13 +152,84 @@ export const WorkerCapabilitiesSchema = z.object({
   }).strict(),
   accelerator: AcceleratorSchema.optional(),
 }).strict();
+export const PhysicalCacheTransferFormatSchema = z.object({
+  identity: z.string().min(1),
+  version: z.number().int().positive(),
+}).strict();
+export const PhysicalCacheAdapterSchema = z.object({
+  contract_version: z.literal(1),
+  kind: z.enum(["sequence", "paged", "paged_skeleton"]),
+  operations: z.array(z.enum([
+    "inspect", "continue", "restore", "fork", "trim", "snapshot", "release",
+    "export", "import", "promote", "demote",
+  ])),
+  format: z.object({
+    backend: z.string().min(1),
+    engine: z.string().min(1),
+    cache_format: z.string().min(1),
+    cache_format_version: z.number().int().positive(),
+    kv_data_type: z.string().min(1).nullable(),
+    block_tokens: z.number().int().positive().nullable(),
+  }).strict(),
+  constraints: z.object({
+    restore_granularity: z.enum(["whole_state", "block"]),
+    fork_semantics: z.enum(["whole_state_copy", "copy_on_write"]),
+    minimum_trim_tokens: z.number().int().positive().nullable(),
+    safe_busy_donor: z.boolean(),
+    prompt_boundary_snapshots: z.boolean(),
+    recurrent_or_hybrid: z.boolean(),
+    byte_accounting: z.enum(["unknown", "estimated", "exact"]),
+    tiers: z.array(z.enum(["device", "host", "local_storage", "remote"])).min(1),
+    transfer_format: PhysicalCacheTransferFormatSchema.nullable(),
+  }).strict(),
+}).strict().superRefine((adapter, ctx) => {
+  const operations = new Set(adapter.operations);
+  const tiers = new Set(adapter.constraints.tiers);
+  const invalid = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  if (operations.size !== adapter.operations.length) invalid("adapter operations must be unique");
+  if (!operations.has("inspect")) invalid("adapter must support inspect");
+  if (tiers.size !== adapter.constraints.tiers.length) invalid("adapter tiers must be unique");
+  if (operations.has("trim") !== (adapter.constraints.minimum_trim_tokens !== null)) {
+    invalid("trim capability requires minimum_trim_tokens and vice versa");
+  }
+  if (operations.has("snapshot") !== adapter.constraints.prompt_boundary_snapshots) {
+    invalid("snapshot operation and prompt_boundary_snapshots must agree");
+  }
+  if (operations.has("export") !== operations.has("import")) {
+    invalid("export and import must be advertised together");
+  }
+  if (operations.has("import") !== (adapter.constraints.transfer_format !== null)) {
+    invalid("import/export requires a transfer format and vice versa");
+  }
+  if (adapter.kind === "paged" && adapter.format.block_tokens === null) {
+    invalid("a live paged adapter must report block_tokens");
+  }
+  if (adapter.kind === "paged_skeleton"
+      && (adapter.operations.length !== 1 || adapter.operations[0] !== "inspect")) {
+    invalid("a paged skeleton must fail closed with inspect as its only operation");
+  }
+});
 export const CacheCapabilitiesSchema = z.object({
   partial_suffix_trim: z.boolean(),
   partial_prefix_branch: z.boolean(),
   whole_state_copy: z.boolean(),
   prompt_boundary_snapshots: z.boolean(),
   quantized_kv: z.boolean(),
-}).strict();
+  adapter: PhysicalCacheAdapterSchema.optional(),
+}).strict().superRefine((cache, ctx) => {
+  if (!cache.adapter) return;
+  const operations = new Set(cache.adapter.operations);
+  const invalid = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  if (cache.partial_suffix_trim !== operations.has("trim")) {
+    invalid("legacy trim capability must match the adapter descriptor");
+  }
+  if (cache.partial_prefix_branch !== (cache.adapter.constraints.fork_semantics === "copy_on_write")) {
+    invalid("legacy partial branch capability must match adapter fork semantics");
+  }
+  if (cache.prompt_boundary_snapshots !== cache.adapter.constraints.prompt_boundary_snapshots) {
+    invalid("legacy snapshot capability must match the adapter descriptor");
+  }
+});
 export const GenerationCapabilitiesSchema = z.object({
   structured_output: StructuredOutputCapabilitiesSchema,
   tool_templates: z.boolean(),

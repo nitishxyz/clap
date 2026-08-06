@@ -723,6 +723,55 @@ Gates:
 
 ### Phase 3 — Versioned physical-cache adapter contract
 
+Status: IMPLEMENTED LOCALLY; clean CUDA sequence-fallback validation pending.
+Rust now defines physical adapter contract v1 independently of coordinator
+policy. The checked adapter negotiates the exact contract version, validates
+operation support and request shape before physical mutation, requires exact
+format and transfer identity for import, rejects invalid outcomes, and
+invalidates uncertain targets after execution failure or abort. Physical bytes
+are represented as known or explicitly unknown with a reason; a backend that
+claims exact accounting cannot return unknown bytes, while the llama.cpp
+sequence path honestly advertises unknown accounting and MLX advertises
+estimated accounting.
+
+The contract operations are `inspect`, `continue`, `restore`, `fork`, `trim`,
+`snapshot`, `release`, `export`, `import`, `promote`, and `demote`. Descriptors
+also declare sequence/paged kind, physical format version, model compatibility
+domain, KV type, optional block granularity, restore granularity, whole-copy or
+copy-on-write fork semantics, trim granularity, busy-donor safety, cache tiers,
+and optional transfer format. Transfer remains disabled for current adapters.
+
+Current adapters:
+
+- llama.cpp: public sequence API, token trim and copy-on-write prefix fork for
+  non-hybrid caches, whole-state fork for hybrid/recurrent caches, optional
+  prompt-boundary snapshots, device tier, physical bytes unknown
+- MLX: cache-array sequence emulation, whole-state restore/fork and snapshots,
+  no trim, device tier, physical bytes estimated
+- paged engine skeleton: `inspect` only; all mutations fail closed until a real
+  engine integration supplies block granularity and conformance evidence
+
+The worker capability protocol and public loaded-model schema carry the same
+strict descriptor. Version 1 is the only accepted version; descriptors with
+duplicate operations/tiers, inconsistent trim/snapshot/transfer constraints,
+or a live paged kind without block size fail validation. The field remains
+optional so an older worker can still use the existing sequence fallback, but
+an advertised unknown version is rejected during model load.
+
+Local evidence (2026-08-06, ready-to-test commit pending):
+
+- 11 Rust adapter conformance tests cover unsupported and malformed operations
+  before mutation, crash and abort invalidation, invalid backend outcomes,
+  invalidation failure visibility, version skew, import compatibility, honest
+  unknown bytes, llama.cpp/MLX parity, and the fail-closed paged skeleton
+- all 568 TypeScript tests passed through the full hardening run
+- 26 native llama.cpp tests passed with descriptor parity assertions
+- 101 MLX tests passed, including two adapter descriptor tests (one unrelated
+  physical model probe remained intentionally skipped without a fixture)
+- Rust workspace tests, clippy with warnings denied, native production builds,
+  protocol checks, cache correctness gates, ownership/structure gates, bundle
+  checks, and OpenAPI/web generation passed
+
 Deliverables:
 
 - backend-neutral versioned adapter API
@@ -1179,10 +1228,10 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Begin Phase 3 by extracting the current Rust/runtime operations into a
-versioned physical-cache adapter contract with explicit capability constraints
-and fail-closed conformance tests. Keep the current sequence API as the
-llama.cpp baseline and MLX at feature parity. Do not begin remote KV transfer
-or a custom llama.cpp block extension until adapter-level byte, sharing, and
-restore measurements show that physical cache density is the next material
-bottleneck.
+Commit and push the Phase 3 checkpoint, then validate a clean A100 CUDA build
+and live llama.cpp generation while capturing the advertised adapter descriptor
+through the public loaded-model API. Confirm contract version 1, public
+sequence format, copy-on-write fork semantics, no transfer capability, and
+explicit unknown physical-byte accounting. Delete the pod after evidence is
+synchronized. Do not begin Phase 4, remote KV transfer, or a custom llama.cpp
+block extension until that fallback validation passes.

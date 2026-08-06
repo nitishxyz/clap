@@ -1,3 +1,4 @@
+import ClapCachePolicy
 import ClapMLXModel
 import ClapMLXWorkerCore
 import Foundation
@@ -138,10 +139,11 @@ final class WorkerApplication {
       }
       let capabilities = state.modelRuntime.tokenCapabilities.workerEvent(
         contextOverride: state.contextOverride)
+      let physicalAdapter = mlxPhysicalCacheAdapterDescriptor(kvBits: state.kvBits)
       let effectiveCapabilities: [String: Any] = [
         "cache": ["partial_suffix_trim": false, "partial_prefix_branch": false,
           "whole_state_copy": true, "prompt_boundary_snapshots": true,
-          "quantized_kv": state.kvBits != nil],
+          "quantized_kv": state.kvBits != nil, "adapter": physicalAdapter],
         "generation": ["structured_output": ["json_object": "post_validate",
           "json_schema": "post_validate", "post_validation": true,
           "max_schema_bytes": structuredOutputMaxSchemaBytes], "tool_templates": true],

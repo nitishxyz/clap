@@ -143,12 +143,39 @@ export type WorkerCapabilities = {
     priority_aware: boolean;
   };
 };
+export type PhysicalCacheOperation = "inspect" | "continue" | "restore" | "fork" | "trim"
+  | "snapshot" | "release" | "export" | "import" | "promote" | "demote";
+export type PhysicalCacheAdapter = {
+  contract_version: 1;
+  kind: "sequence" | "paged" | "paged_skeleton";
+  operations: PhysicalCacheOperation[];
+  format: {
+    backend: string;
+    engine: string;
+    cache_format: string;
+    cache_format_version: number;
+    kv_data_type: string | null;
+    block_tokens: number | null;
+  };
+  constraints: {
+    restore_granularity: "whole_state" | "block";
+    fork_semantics: "whole_state_copy" | "copy_on_write";
+    minimum_trim_tokens: number | null;
+    safe_busy_donor: boolean;
+    prompt_boundary_snapshots: boolean;
+    recurrent_or_hybrid: boolean;
+    byte_accounting: "unknown" | "estimated" | "exact";
+    tiers: ("device" | "host" | "local_storage" | "remote")[];
+    transfer_format: { identity: string; version: number } | null;
+  };
+};
 export type CacheCapabilities = {
   partial_suffix_trim: boolean;
   partial_prefix_branch: boolean;
   whole_state_copy: boolean;
   prompt_boundary_snapshots: boolean;
   quantized_kv: boolean;
+  adapter?: PhysicalCacheAdapter;
 };
 export type GenerationCapabilities = {
   structured_output: StructuredOutputCapabilities;

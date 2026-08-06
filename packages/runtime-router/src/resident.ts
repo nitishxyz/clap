@@ -1,7 +1,7 @@
 import type { ChatCompletionRequest, LoadedModel, ModelTokenCapabilities } from "@clap/api";
 import { WorkerRetentionTelemetrySchema, type CacheIdentity, type MemoryBasis, type MemorySource,
   type StructuredOutputCapabilities, type StructuredOutputContract,
-  type WorkerCapabilities } from "@clap/worker-protocol";
+  type PhysicalCacheAdapter, type WorkerCapabilities } from "@clap/worker-protocol";
 import { freemem, totalmem } from "node:os";
 import { classifyMemoryPressure, selectGlobalActiveLimits, shouldAdjustActiveLimit,
   type MemoryPressure } from "./concurrency";
@@ -25,6 +25,7 @@ export type EffectiveCapabilities = {
     wholeStateCopy: boolean;
     promptBoundarySnapshots: boolean;
     quantizedKv: boolean;
+    adapter?: PhysicalCacheAdapter;
   };
   generation: {
     structuredOutput: StructuredOutputCapabilities;

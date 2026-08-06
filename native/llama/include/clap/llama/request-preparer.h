@@ -32,6 +32,9 @@ RequestBudget validate_request_budget(int prompt_count, int context_size,
                                       int configured_max_output,
                                       int session_cap);
 uint64_t cache_capabilities(bool hybrid, bool prompt_boundary_snapshots);
+nlohmann::json physical_cache_adapter_descriptor(bool hybrid,
+                                                 bool prompt_boundary_snapshots,
+                                                 const std::string& kv_data_type);
 
 class RequestPreparer {
  public:

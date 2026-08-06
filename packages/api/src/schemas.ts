@@ -239,6 +239,36 @@ export const EffectiveCapabilitiesSchema = z.object({
     wholeStateCopy: z.boolean(),
     promptBoundarySnapshots: z.boolean(),
     quantizedKv: z.boolean(),
+    adapter: z.object({
+      contract_version: z.literal(1),
+      kind: z.enum(["sequence", "paged", "paged_skeleton"]),
+      operations: z.array(z.enum([
+        "inspect", "continue", "restore", "fork", "trim", "snapshot", "release",
+        "export", "import", "promote", "demote",
+      ])),
+      format: z.object({
+        backend: z.string().min(1),
+        engine: z.string().min(1),
+        cache_format: z.string().min(1),
+        cache_format_version: z.number().int().positive(),
+        kv_data_type: z.string().min(1).nullable(),
+        block_tokens: z.number().int().positive().nullable(),
+      }).strict(),
+      constraints: z.object({
+        restore_granularity: z.enum(["whole_state", "block"]),
+        fork_semantics: z.enum(["whole_state_copy", "copy_on_write"]),
+        minimum_trim_tokens: z.number().int().positive().nullable(),
+        safe_busy_donor: z.boolean(),
+        prompt_boundary_snapshots: z.boolean(),
+        recurrent_or_hybrid: z.boolean(),
+        byte_accounting: z.enum(["unknown", "estimated", "exact"]),
+        tiers: z.array(z.enum(["device", "host", "local_storage", "remote"])).min(1),
+        transfer_format: z.object({
+          identity: z.string().min(1),
+          version: z.number().int().positive(),
+        }).strict().nullable(),
+      }).strict(),
+    }).strict().optional(),
   }).strict(),
   generation: z.object({
     structuredOutput: StructuredOutputCapabilitiesSchema,

@@ -111,6 +111,28 @@ uint64_t cache_capabilities(bool hybrid, bool prompt_boundary_snapshots) {
   return value;
 }
 
+nlohmann::json physical_cache_adapter_descriptor(bool hybrid,
+                                                 bool prompt_boundary_snapshots,
+                                                 const std::string& kv_data_type) {
+  nlohmann::json operations = {"inspect", "continue", "restore", "fork", "release"};
+  if (!hybrid) operations.push_back("trim");
+  if (prompt_boundary_snapshots) operations.push_back("snapshot");
+  return {
+    {"contract_version", 1}, {"kind", "sequence"}, {"operations", operations},
+    {"format", {{"backend", "llama"}, {"engine", "llama.cpp"},
+      {"cache_format", "llama-sequence"}, {"cache_format_version", 1},
+      {"kv_data_type", kv_data_type.empty()
+          ? nlohmann::json(nullptr) : nlohmann::json(kv_data_type)},
+      {"block_tokens", nullptr}}},
+    {"constraints", {{"restore_granularity", "whole_state"},
+      {"fork_semantics", hybrid ? "whole_state_copy" : "copy_on_write"},
+      {"minimum_trim_tokens", hybrid ? nlohmann::json(nullptr) : nlohmann::json(1)},
+      {"safe_busy_donor", true}, {"prompt_boundary_snapshots", prompt_boundary_snapshots},
+      {"recurrent_or_hybrid", hybrid}, {"byte_accounting", "unknown"},
+      {"tiers", {"device"}}, {"transfer_format", nullptr}}}
+  };
+}
+
 uint64_t RequestPreparer::capabilities() const {
   return cache_capabilities(runtime_.hybrid(), runtime_.prompt_boundary_snapshots());
 }

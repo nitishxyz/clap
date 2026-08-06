@@ -56,6 +56,7 @@ export function mapEffectiveCapabilities(capabilities: EffectiveModelCapabilitie
       wholeStateCopy: capabilities.cache.whole_state_copy,
       promptBoundarySnapshots: capabilities.cache.prompt_boundary_snapshots,
       quantizedKv: capabilities.cache.quantized_kv,
+      adapter: capabilities.cache.adapter,
     },
     generation: {
       structuredOutput: capabilities.generation.structured_output,

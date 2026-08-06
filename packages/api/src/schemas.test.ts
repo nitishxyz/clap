@@ -111,14 +111,27 @@ describe("loaded model retention schema", () => {
 
   test("exposes strict effective capability groups on loaded workers", () => {
     const effectiveCapabilities = {
-      cache: { partialSuffixTrim: true, partialPrefixBranch: false, wholeStateCopy: true,
-        promptBoundarySnapshots: true, quantizedKv: false },
+      cache: { partialSuffixTrim: true, partialPrefixBranch: true, wholeStateCopy: true,
+        promptBoundarySnapshots: true, quantizedKv: false,
+        adapter: {
+          contract_version: 1 as const,
+          kind: "sequence" as const,
+          operations: ["inspect", "continue", "restore", "fork", "trim", "snapshot", "release"] as const,
+          format: { backend: "llama", engine: "llama.cpp", cache_format: "llama-sequence",
+            cache_format_version: 1, kv_data_type: "f16", block_tokens: null },
+          constraints: { restore_granularity: "whole_state" as const,
+            fork_semantics: "copy_on_write" as const, minimum_trim_tokens: 1,
+            safe_busy_donor: true, prompt_boundary_snapshots: true,
+            recurrent_or_hybrid: false, byte_accounting: "unknown" as const,
+            tiers: ["device"] as const, transfer_format: null },
+        } },
       generation: { structuredOutput: { json_object: "native" as const, json_schema: "post_validate" as const,
         post_validation: true, max_schema_bytes: 65_536 }, toolTemplateSupport: true },
       modalities: { input: ["text"] as ["text"], output: ["text"] as ["text"] },
     };
-    expect(LoadedModelSchema.parse({ ...model, worker: { ...model.worker, effectiveCapabilities } })
-      .worker.effectiveCapabilities).toEqual(effectiveCapabilities);
+    const parsed = LoadedModelSchema.parse({ ...model, worker: { ...model.worker, effectiveCapabilities } })
+      .worker.effectiveCapabilities;
+    expect(JSON.stringify(parsed)).toBe(JSON.stringify(effectiveCapabilities));
     expect(() => LoadedModelSchema.parse({ ...model, worker: { ...model.worker,
       effectiveCapabilities: { ...effectiveCapabilities, generation: { toolTemplateSupport: true } },
     } })).toThrow();

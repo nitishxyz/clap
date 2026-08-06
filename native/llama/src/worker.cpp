@@ -1,6 +1,7 @@
 #include "clap/llama/worker.h"
 
 #include "clap/llama/accelerator.h"
+#include "clap/llama/request-preparer.h"
 #include "clap/llama/request-state.h"
 
 #include <algorithm>
@@ -188,13 +189,16 @@ bool Worker::dispatch(const std::string& line) {
       }
       state_.load(model);
       const int32_t effective = state_.effective_context_window();
+      const nlohmann::json adapter = physical_cache_adapter_descriptor(
+          state_.hybrid(), state_.prompt_boundary_snapshots(), state_.kv_format());
       v1_->completed(request.request_id, {{"kind", "loaded"}, {"model", model},
         {"effective_model_capabilities", {
           {"cache", {{"partial_suffix_trim", !state_.hybrid()},
             {"partial_prefix_branch", !state_.hybrid()},
             {"whole_state_copy", true},
             {"prompt_boundary_snapshots", state_.prompt_boundary_snapshots()},
-            {"quantized_kv", state_.kv_format().find('q') != std::string::npos}}},
+            {"quantized_kv", state_.kv_format().find('q') != std::string::npos},
+            {"adapter", adapter}}},
           {"generation", {{"structured_output", {{"json_object", "native"},
             {"json_schema", "native"}, {"post_validation", true},
             {"max_schema_bytes", 64 * 1024}}}, {"tool_templates", false}}},

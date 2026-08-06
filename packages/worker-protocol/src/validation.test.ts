@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   COMPLETED_RESULT_KINDS,
+  EffectiveModelCapabilitiesSchema,
   ProtocolValidationError,
   WORKER_EVENT_TYPES,
   WORKER_PROTOCOL_VERSION,
@@ -182,6 +183,71 @@ function fixtureWorkerCapabilities() {
     expect(() => decodeWorkerRequest({ protocol: 2, type: "shutdown", request_id: "req" })).toThrow(ProtocolValidationError);
     expect(() => decodeWorkerRequest({ protocol: 1, type: "shutdown", request_id: "" })).toThrow(ProtocolValidationError);
     expect(() => decodeWorkerRequest({ protocol: 1, type: "shutdown" })).toThrow(ProtocolValidationError);
+  });
+
+  test("validates the versioned physical cache adapter descriptor", () => {
+    const adapter = {
+      contract_version: 1,
+      kind: "sequence",
+      operations: ["inspect", "continue", "restore", "fork", "snapshot", "release"],
+      format: {
+        backend: "mlx",
+        engine: "mlx-lm",
+        cache_format: "mlx-cache-array",
+        cache_format_version: 1,
+        kv_data_type: "f16",
+        block_tokens: null,
+      },
+      constraints: {
+        restore_granularity: "whole_state",
+        fork_semantics: "whole_state_copy",
+        minimum_trim_tokens: null,
+        safe_busy_donor: false,
+        prompt_boundary_snapshots: true,
+        recurrent_or_hybrid: false,
+        byte_accounting: "estimated",
+        tiers: ["device"],
+        transfer_format: null,
+      },
+    } as const;
+    const capabilities = {
+      cache: {
+        partial_suffix_trim: false,
+        partial_prefix_branch: false,
+        whole_state_copy: true,
+        prompt_boundary_snapshots: true,
+        quantized_kv: false,
+        adapter,
+      },
+      generation: {
+        structured_output: {
+          json_object: "post_validate",
+          json_schema: "post_validate",
+          post_validation: true,
+          max_schema_bytes: 65_536,
+        },
+        tool_templates: true,
+      },
+      modalities: { input: ["text"], output: ["text"] },
+    } as const;
+    const parsed = EffectiveModelCapabilitiesSchema.parse(capabilities).cache.adapter;
+    expect(parsed).toMatchObject({ contract_version: 1, kind: "sequence" });
+    expect(parsed?.operations).toContain("continue");
+    expect(() => EffectiveModelCapabilitiesSchema.parse({
+      ...capabilities,
+      cache: { ...capabilities.cache, adapter: { ...adapter, contract_version: 2 } },
+    })).toThrow();
+    expect(() => EffectiveModelCapabilitiesSchema.parse({
+      ...capabilities,
+      cache: { ...capabilities.cache, adapter: { ...adapter, operations: ["mutate_anything"] } },
+    })).toThrow();
+    expect(() => EffectiveModelCapabilitiesSchema.parse({
+      ...capabilities,
+      cache: { ...capabilities.cache, adapter: {
+        ...adapter,
+        operations: [...adapter.operations, "trim"],
+      } },
+    })).toThrow();
   });
 
   test("requires nonnegative integer sequences on every scoped event", () => {
