@@ -19,9 +19,17 @@ int main() {
   assert((clap::llama::cache_capabilities(false, true) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) != 0);
   const auto sequence_adapter = clap::llama::physical_cache_adapter_descriptor(false, true, "f16");
   assert(sequence_adapter["contract_version"] == 1);
+#ifdef LLAMA_MEMORY_KV_CACHE_VIEW_API
+  assert(sequence_adapter["kind"] == "paged");
+  assert(sequence_adapter["format"]["cache_format"] == "llama-kv-cell");
+  assert(sequence_adapter["format"]["block_tokens"] == 1);
+  assert(sequence_adapter["constraints"]["byte_accounting"] == "exact");
+#else
   assert(sequence_adapter["kind"] == "sequence");
   assert(sequence_adapter["format"]["cache_format"] == "llama-sequence");
+  assert(sequence_adapter["format"]["block_tokens"].is_null());
   assert(sequence_adapter["constraints"]["byte_accounting"] == "unknown");
+#endif
   assert(sequence_adapter["constraints"]["fork_semantics"] == "copy_on_write");
   assert(sequence_adapter["constraints"]["minimum_trim_tokens"] == 1);
   assert(sequence_adapter["operations"] == nlohmann::json({

@@ -34,6 +34,7 @@ final class WorkerState {
   var pressureState: String?
   var activePolicyModelBytes: UInt64?
   var allocatorNeedsIdleClear = false
+  var sharedPhysicalCache = false
 
   init(configuration: WorkerConfiguration = .current()) {
     self.configuration = configuration
@@ -87,7 +88,8 @@ final class WorkerState {
       globalResidentMemoryBytes: globalResidentMemoryBytes, pressureState: pressureState,
       modelActiveBytes: activePolicyModelBytes,
       hybridOrRecurrent: modelRuntime.tokenCapabilities.hybridOrRecurrent,
-      activeCount: retainedRegistry.activeCount, lastEvictionReason: lastEvictionReason))
+      activeCount: retainedRegistry.activeCount, lastEvictionReason: lastEvictionReason,
+      physicalUsage: mlxPhysicalCacheUsage(kvSlots)))
   }
 
   func loadModel(_ model: String, directory: URL) async throws {
@@ -96,6 +98,10 @@ final class WorkerState {
       contextOverride: contextOverride, sessionCap: sessionCap,
       outputOverride: configuration.outputOverride)
     let metadata = modelRuntime.metadata!
+    let cacheProbe = modelRuntime.languageModel?.newCache(parameters: nil) ?? []
+    sharedPhysicalCache = kvBits == nil &&
+      !modelRuntime.tokenCapabilities.hybridOrRecurrent &&
+      mlxCachesSupportPhysicalSharing(cacheProbe)
     Memory.clearCache()
     let memory = memorySnapshot()
     activePolicyModelBytes = memory.active_bytes.value
@@ -122,6 +128,7 @@ final class WorkerState {
       debugLog("cache coordinator unavailable; cache admission fails closed: \(error)")
     }
     if kvBits != nil { debugLog("kv cache quantization enabled: \(kvBits!)-bit") }
+    debugLog("physical cache sharing: \(sharedPhysicalCache ? "copy_on_write" : "whole_state_copy")")
     debugLog("declared metadata: architecture=\(metadata.architecture ?? "unknown") model_type=\(metadata.modelType ?? "unknown") context_source=\(modelRuntime.tokenCapabilities.contextLengthSource ?? "unknown") sliding_window=\(metadata.slidingWindow?.value.description ?? "unknown") output_source=\(modelRuntime.tokenCapabilities.maxOutputTokensSource ?? "unknown")")
     debugLog("context length: \(modelRuntime.tokenCapabilities.effectiveContextLength > 0 ? String(modelRuntime.tokenCapabilities.effectiveContextLength) : "unknown")\(sessionCap > 0 ? ", session cap \(sessionCap)" : "")")
     debugLog("model loaded; eos token ids: \(modelRuntime.eosTokenIds.sorted())")

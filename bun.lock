@@ -84,6 +84,13 @@
         "@clap/worker-protocol": "workspace:*",
       },
     },
+    "packages/runtime-vllm": {
+      "name": "@clap/runtime-vllm",
+      "version": "0.2.2",
+      "dependencies": {
+        "@clap/worker-protocol": "workspace:*",
+      },
+    },
     "packages/server": {
       "name": "@clap/server",
       "version": "0.2.0",
@@ -158,6 +165,8 @@
     "@clap/runtime-mlx": ["@clap/runtime-mlx@workspace:packages/runtime-mlx"],
 
     "@clap/runtime-router": ["@clap/runtime-router@workspace:packages/runtime-router"],
+
+    "@clap/runtime-vllm": ["@clap/runtime-vllm@workspace:packages/runtime-vllm"],
 
     "@clap/server": ["@clap/server@workspace:packages/server"],
 

@@ -28,12 +28,14 @@ public struct CacheOperations<Cache> {
   public let sequenceLength: ([Cache], Int) -> Int
   public let create: () throws -> [Cache]
   public let physicalBytes: ([Cache]) -> UInt64
+  public let prepareForRetention: ([Cache]) -> [Cache]
   public let log: (String) -> Void
 
   public init(isTrimmable: @escaping (Cache) -> Bool, copy: @escaping (Cache) throws -> Cache,
               trim: @escaping (Cache, Int) throws -> Void,
               sequenceLength: @escaping ([Cache], Int) -> Int,
               create: @escaping () throws -> [Cache], physicalBytes: @escaping ([Cache]) -> UInt64,
+              prepareForRetention: @escaping ([Cache]) -> [Cache] = { $0 },
               log: @escaping (String) -> Void = { _ in }) {
     self.isTrimmable = isTrimmable
     self.copy = copy
@@ -41,6 +43,7 @@ public struct CacheOperations<Cache> {
     self.sequenceLength = sequenceLength
     self.create = create
     self.physicalBytes = physicalBytes
+    self.prepareForRetention = prepareForRetention
     self.log = log
   }
 }
@@ -312,6 +315,9 @@ public enum CacheExecutor {
       slot.isPromptBoundary = false
       slot.anchorScope = nil
     }
+    let retainedCaches = operations.prepareForRetention(slot.caches)
+    slot.caches = retainedCaches
+    caches = retainedCaches
     guard let coordinator, slot.coordinatorGeneration != 0 else { return }
     do {
       slot.coordinatorGeneration = try coordinator.confirm(slot: slotIndex,

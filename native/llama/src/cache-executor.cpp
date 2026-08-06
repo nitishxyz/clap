@@ -22,6 +22,27 @@ void LlamaPhysicalCacheBackend::clear(bool data) {
   llama_memory_clear(llama_get_memory(context_), data);
 }
 
+std::optional<PhysicalCacheStats> LlamaPhysicalCacheBackend::inspect(int32_t sequence) const {
+#ifdef LLAMA_MEMORY_KV_CACHE_VIEW_API
+  if (!context_) return std::nullopt;
+  llama_memory_kv_cache_stats stats{};
+  stats.struct_size = sizeof(stats);
+  std::size_t cell_count = 0;
+  if (!llama_memory_kv_cache_view(llama_get_memory(context_), sequence, nullptr, 0,
+                                  &cell_count, &stats)) {
+    return std::nullopt;
+  }
+  return PhysicalCacheStats{
+      stats.allocated_bytes, stats.payload_bytes, stats.resident_bytes,
+      stats.shared_bytes, stats.sequence_bytes, stats.capacity_cells,
+      stats.used_cells, stats.shared_cells, stats.sequence_cells,
+      stats.stream_count};
+#else
+  (void) sequence;
+  return std::nullopt;
+#endif
+}
+
 CacheLease::CacheLease(CacheLease&& other) noexcept
     : owner_(other.owner_), slot_(other.slot_), generation_(other.generation_) {
   other.owner_ = nullptr;
@@ -386,6 +407,27 @@ uint64_t CacheExecutor::reset_for_retry(uint32_t active_slot) {
 clap_cache_telemetry_t CacheExecutor::telemetry() const { return coordinator_->telemetry(); }
 clap_cache_retention_telemetry_t CacheExecutor::retention_telemetry() const {
   return coordinator_->retention_telemetry();
+}
+
+PhysicalCacheTelemetry CacheExecutor::physical_cache_telemetry() const {
+  const auto global = backend_->inspect();
+  if (!global) return {};
+  PhysicalCacheTelemetry result{
+      true, global->allocated_bytes, global->payload_bytes, global->resident_bytes,
+      global->shared_bytes, 0, 0, 0, global->capacity_cells,
+      global->used_cells, global->shared_cells, global->stream_count};
+  for (std::size_t sequence = 0; sequence < slots_.size(); ++sequence) {
+    if (slots_[sequence].tokens.empty()) continue;
+    const auto stats = backend_->inspect(static_cast<int32_t>(sequence));
+    if (!stats) return {};
+    result.referenced_bytes += stats->sequence_bytes;
+    if (slots_[sequence].is_anchor) {
+      result.anchor_referenced_bytes += stats->sequence_bytes;
+    } else {
+      result.session_referenced_bytes += stats->sequence_bytes;
+    }
+  }
+  return result;
 }
 
 uint64_t CacheExecutor::reset() {

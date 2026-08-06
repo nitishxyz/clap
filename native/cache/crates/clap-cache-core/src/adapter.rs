@@ -7,7 +7,8 @@ use std::fmt;
 mod descriptors;
 
 pub use descriptors::{
-    llama_sequence_descriptor, mlx_sequence_descriptor, paged_engine_skeleton_descriptor,
+    llama_paged_descriptor, llama_sequence_descriptor, mlx_cow_descriptor,
+    mlx_sequence_descriptor, paged_engine_skeleton_descriptor, vllm_paged_descriptor,
 };
 
 pub const PHYSICAL_CACHE_ADAPTER_CONTRACT_VERSION: u16 = 1;

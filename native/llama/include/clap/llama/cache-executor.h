@@ -7,9 +7,38 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace clap::llama {
+
+struct PhysicalCacheStats {
+  uint64_t allocated_bytes = 0;
+  uint64_t payload_bytes = 0;
+  uint64_t resident_bytes = 0;
+  uint64_t shared_bytes = 0;
+  uint64_t sequence_bytes = 0;
+  uint32_t capacity_cells = 0;
+  uint32_t used_cells = 0;
+  uint32_t shared_cells = 0;
+  uint32_t sequence_cells = 0;
+  uint32_t stream_count = 0;
+};
+
+struct PhysicalCacheTelemetry {
+  bool available = false;
+  uint64_t allocated_bytes = 0;
+  uint64_t payload_bytes = 0;
+  uint64_t unique_resident_bytes = 0;
+  uint64_t shared_resident_bytes = 0;
+  uint64_t referenced_bytes = 0;
+  uint64_t session_referenced_bytes = 0;
+  uint64_t anchor_referenced_bytes = 0;
+  uint32_t capacity_cells = 0;
+  uint32_t used_cells = 0;
+  uint32_t shared_cells = 0;
+  uint32_t stream_count = 0;
+};
 
 class PhysicalCacheBackend {
  public:
@@ -17,6 +46,10 @@ class PhysicalCacheBackend {
   virtual bool remove(int32_t sequence, int32_t begin, int32_t end) = 0;
   virtual void copy(int32_t source, int32_t target, int32_t begin, int32_t end) = 0;
   virtual void clear(bool data) = 0;
+  virtual std::optional<PhysicalCacheStats> inspect(int32_t sequence = -1) const {
+    (void) sequence;
+    return std::nullopt;
+  }
 };
 
 class LlamaPhysicalCacheBackend final : public PhysicalCacheBackend {
@@ -26,6 +59,7 @@ class LlamaPhysicalCacheBackend final : public PhysicalCacheBackend {
   bool remove(int32_t sequence, int32_t begin, int32_t end) override;
   void copy(int32_t source, int32_t target, int32_t begin, int32_t end) override;
   void clear(bool data) override;
+  std::optional<PhysicalCacheStats> inspect(int32_t sequence = -1) const override;
 
  private:
   llama_context* context_;
@@ -158,6 +192,7 @@ class CacheExecutor {
   uint32_t release_session(const clap::llama_cache::Identity& identity);
   clap_cache_telemetry_t telemetry() const;
   clap_cache_retention_telemetry_t retention_telemetry() const;
+  PhysicalCacheTelemetry physical_cache_telemetry() const;
   clap::llama_cache::Coordinator& coordinator() { return *coordinator_; }
   const clap::llama_cache::Coordinator& coordinator() const { return *coordinator_; }
   std::vector<Slot>& slots() noexcept { return slots_; }

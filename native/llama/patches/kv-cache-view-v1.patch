@@ -1,0 +1,173 @@
+diff --git a/include/llama.h b/include/llama.h
+index f723c9f..73ff5bd 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -774,6 +774,41 @@ extern "C" {
+     // Check if the memory supports shifting
+     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
+ 
++#define LLAMA_MEMORY_KV_CACHE_VIEW_API 1
++
++    // Exact read-only accounting for the ordinary attention KV cache. Returns
++    // false for recurrent, hybrid, or other memory implementations.
++    struct llama_memory_kv_cache_stats {
++        size_t   struct_size;
++        uint64_t allocated_bytes;
++        uint64_t payload_bytes;
++        uint64_t resident_bytes;
++        uint64_t shared_bytes;
++        uint64_t sequence_bytes;
++        uint32_t capacity_cells;
++        uint32_t used_cells;
++        uint32_t shared_cells;
++        uint32_t sequence_cells;
++        uint32_t stream_count;
++    };
++
++    struct llama_memory_kv_cache_cell {
++        uint32_t  stream;
++        uint32_t  cell;
++        llama_pos position;
++        uint32_t  sequence_count;
++    };
++
++    // Inspect cells belonging to seq_id, or all used cells when seq_id is -1.
++    // Pass cells == NULL and cells_capacity == 0 to query cells_count first.
++    LLAMA_API bool llama_memory_kv_cache_view(
++                          llama_memory_t   mem,
++                            llama_seq_id   seq_id,
++          struct llama_memory_kv_cache_cell * cells,
++                                   size_t   cells_capacity,
++                                   size_t * cells_count,
++          struct llama_memory_kv_cache_stats * stats);
++
+     //
+     // State / sessions
+     //
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 220240e..809d397 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -6,6 +6,7 @@
+ #include "llama-impl.h"
+ #include "llama-batch.h"
+ #include "llama-io.h"
++#include "llama-kv-cache.h"
+ #include "llama-memory.h"
+ #include "llama-mmap.h"
+ #include "llama-model.h"
+@@ -3921,6 +3922,17 @@ bool llama_memory_can_shift(llama_memory_t mem) {
+     return mem->get_can_shift();
+ }
+ 
++bool llama_memory_kv_cache_view(
++        llama_memory_t mem,
++        llama_seq_id seq_id,
++        llama_memory_kv_cache_cell * cells,
++        size_t cells_capacity,
++        size_t * cells_count,
++        llama_memory_kv_cache_stats * stats) {
++    const auto * kv = dynamic_cast<const llama_kv_cache *>(mem);
++    return kv && kv->view(seq_id, cells, cells_capacity, cells_count, stats);
++}
++
+ // llama state API
+ 
+ // deprecated
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 2802103..7abd46c 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -1823,6 +1823,74 @@ size_t llama_kv_cache::size_v_bytes() const {
+     return size_v_bytes;
+ }
+ 
++bool llama_kv_cache::view(
++        llama_seq_id seq_id,
++        llama_memory_kv_cache_cell * cells,
++        size_t cells_capacity,
++        size_t * cells_count,
++        llama_memory_kv_cache_stats * stats) const {
++    if (!cells_count || !stats || stats->struct_size != sizeof(*stats) ||
++        seq_id < -1 || (seq_id >= 0 && (size_t) seq_id >= seq_to_stream.size()) ||
++        (!cells && cells_capacity != 0)) {
++        return false;
++    }
++
++    uint32_t capacity = 0;
++    uint32_t used = 0;
++    uint32_t shared = 0;
++    uint32_t sequence = 0;
++    size_t matches = 0;
++    for (uint32_t stream = 0; stream < v_cells.size(); ++stream) {
++        const auto & stream_cells = v_cells[stream];
++        capacity += stream_cells.size();
++        for (uint32_t cell = 0; cell < stream_cells.size(); ++cell) {
++            if (stream_cells.is_empty(cell)) {
++                continue;
++            }
++            ++used;
++            const uint32_t sequence_count = stream_cells.seq_count(cell);
++            if (sequence_count > 1) {
++                ++shared;
++            }
++            const bool selected = seq_id < 0 || stream_cells.seq_has(cell, seq_id);
++            if (!selected) {
++                continue;
++            }
++            ++sequence;
++            if (cells && matches < cells_capacity) {
++                cells[matches] = {
++                    stream,
++                    cell,
++                    stream_cells.pos_get(cell),
++                    sequence_count,
++                };
++            }
++            ++matches;
++        }
++    }
++
++    const uint64_t payload = size_k_bytes() + size_v_bytes();
++    if (capacity == 0 || payload % capacity != 0) {
++        return false;
++    }
++    const uint64_t bytes_per_cell = payload / capacity;
++    *stats = {
++        sizeof(*stats),
++        total_size(),
++        payload,
++        bytes_per_cell * used,
++        bytes_per_cell * shared,
++        bytes_per_cell * sequence,
++        capacity,
++        used,
++        shared,
++        sequence,
++        (uint32_t) v_cells.size(),
++    };
++    *cells_count = matches;
++    return !cells || cells_capacity >= matches;
++}
++
+ ggml_tensor * llama_kv_cache::build_rope_shift(
+         const llama_cparams & cparams,
+                ggml_context * ctx,
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 3d68f98..86bc767 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -161,6 +161,13 @@ public:
+     ggml_type type_k() const;
+     ggml_type type_v() const;
+ 
++    bool view(
++            llama_seq_id seq_id,
++            llama_memory_kv_cache_cell * cells,
++            size_t cells_capacity,
++            size_t * cells_count,
++            llama_memory_kv_cache_stats * stats) const;
++
+     //
+     // graph_build API
+     //

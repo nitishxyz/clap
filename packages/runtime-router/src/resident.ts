@@ -112,6 +112,10 @@ export type ResidentMlxRetention = {
   estimatedRetainedBytes?: number | null;
   estimatedRetainedBytesSource?: MemorySource;
   estimatedRetainedBytesBasis?: MemoryBasis;
+  logicalReferencedBytes?: number;
+  sharedPhysicalBytes?: number;
+  physicalStorageObjects?: number;
+  sharedStorageObjects?: number;
   automaticCheckpointCount?: number;
   automaticCheckpointBytes?: number;
   automaticCheckpointBudgetBytes?: number;
@@ -351,6 +355,10 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
   const anchorBytes = nullableInteger("anchor_bytes");
   const evictedBytes = nullableInteger("evicted_bytes");
   const estimatedRetainedBytes = nullableInteger("estimated_retained_bytes");
+  const logicalReferencedBytes = integer("logical_referenced_bytes");
+  const sharedPhysicalBytes = integer("shared_physical_bytes");
+  const physicalStorageObjects = integer("physical_storage_objects");
+  const sharedStorageObjects = integer("shared_storage_objects");
   const automaticCheckpointCount = integer("automatic_checkpoint_count");
   const automaticCheckpointBytes = integer("automatic_checkpoint_bytes");
   const automaticCheckpointBudgetBytes = integer("automatic_checkpoint_budget_bytes");
@@ -406,6 +414,10 @@ export function parseWorkerRetention(value: unknown): ResidentMlxRetention | und
     ...(evictedBytes !== undefined ? { evictedBytes, ...memoryCompanions(raw, "evicted_bytes", "evictedBytes") } : {}),
     ...(estimatedRetainedBytes !== undefined ? { estimatedRetainedBytes,
       ...memoryCompanions(raw, "estimated_retained_bytes", "estimatedRetainedBytes") } : {}),
+    ...(logicalReferencedBytes !== undefined ? { logicalReferencedBytes } : {}),
+    ...(sharedPhysicalBytes !== undefined ? { sharedPhysicalBytes } : {}),
+    ...(physicalStorageObjects !== undefined ? { physicalStorageObjects } : {}),
+    ...(sharedStorageObjects !== undefined ? { sharedStorageObjects } : {}),
     budgetBytes: budgetBytes!, highWatermarkBytes: highWatermarkBytes!,
     ...(automaticCheckpointCount !== undefined ? { automaticCheckpointCount } : {}),
     ...(automaticCheckpointBytes !== undefined ? { automaticCheckpointBytes } : {}),

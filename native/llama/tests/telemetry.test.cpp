@@ -32,6 +32,8 @@ clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable) {
     3,
     32768,
     4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    !nullable, 268435456, 251658240, 100663296, 33554432,
+    150994944, 100663296, 50331648, 12288, 4096, 1,
   };
 }
 
@@ -67,13 +69,13 @@ int main() {
   assert(normal["active_policy"]["inputs"]["model_file_bytes"] == 4294967296);
   assert(normal["active_policy"]["inputs"]["hybrid_or_recurrent"] == false);
   assert(normal["retained_total"] == 2);
-  assert(normal["retained_bytes"].is_null());
-  assert(normal["retained_bytes_source"] == "unavailable");
-  assert(normal["retained_bytes_basis"] == "not_observed");
-  assert(normal["session_bytes"].is_null());
-  assert(normal["session_bytes_source"] == "unavailable");
-  assert(normal["anchor_bytes"].is_null());
-  assert(normal["anchor_bytes_source"] == "unavailable");
+  assert(normal["retained_bytes"] == 100663296);
+  assert(normal["retained_bytes_source"] == "measured");
+  assert(normal["retained_bytes_basis"] == "runtime_allocator");
+  assert(normal["session_bytes"] == 100663296);
+  assert(normal["session_bytes_source"] == "measured");
+  assert(normal["anchor_bytes"] == 50331648);
+  assert(normal["anchor_bytes_source"] == "measured");
   assert(normal["evicted_bytes"].is_null());
   assert(normal["evicted_bytes_source"] == "unavailable");
   assert(normal["evicted_bytes_basis"] == "not_observed");
@@ -85,8 +87,11 @@ int main() {
   assert(normal["low_watermark_bytes"] == 0);
   assert(normal["under_pressure"] == false);
   assert(normal["eviction_reason"] == "high_watermark");
-  assert(normal["physical_cells_used"].is_null());
-  assert(normal["physical_cells_free"].is_null());
+  assert(normal["physical_cells_used"] == 12288);
+  assert(normal["physical_cells_free"] == 20480);
+  assert(normal["physical_cells_shared"] == 4096);
+  assert(normal["physical_shared_bytes"] == 33554432);
+  assert(normal["physical_referenced_bytes"] == 150994944);
   assert(normal["session_policy_evictions"] == 4);
   assert(normal["session_budget_rejections"] == 5);
   assert(normal["anchor_publications"] == 6);

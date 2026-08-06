@@ -1,5 +1,6 @@
 import ClapCacheBridge
 import ClapCachePolicy
+import ClapMLXCache
 
 struct RetentionTelemetryFacts {
   let telemetry: cc_retention_telemetry_t
@@ -18,12 +19,13 @@ struct RetentionTelemetryFacts {
   let hybridOrRecurrent: Bool
   let activeCount: Int
   let lastEvictionReason: String?
+  let physicalUsage: MLXPhysicalCacheUsage
 }
 
 func workerRetention(_ facts: RetentionTelemetryFacts) -> WorkerRetention {
   let telemetry = facts.telemetry
   let retention = facts.configuration.retention
-  let retainedBytes = min(telemetry.total_bytes, retention.physicalByteBudget)
+  let retainedBytes = min(facts.physicalUsage.uniqueBytes, retention.physicalByteBudget)
   let remainingBudget = retention.physicalByteBudget - retainedBytes
   let growthReserve = min(remainingBudget, max(facts.configuration.retainedGrowthMinimumBytes,
     remainingBudget / 100 * min(100, facts.configuration.retainedGrowthReservePercent)))
@@ -55,17 +57,21 @@ func workerRetention(_ facts: RetentionTelemetryFacts) -> WorkerRetention {
     active: facts.activeCount,
     retained_total: Int(telemetry.total_slots), retained_sessions: Int(telemetry.session_slots),
     retained_anchors: Int(telemetry.anchor_slots),
-    retained_bytes: WorkerMemoryBytes(value: telemetry.total_bytes),
+    retained_bytes: WorkerMemoryBytes(value: facts.physicalUsage.uniqueBytes),
     retained_bytes_source: "estimated", retained_bytes_basis: "cache_components",
-    session_bytes: WorkerMemoryBytes(value: telemetry.session_bytes),
+    session_bytes: WorkerMemoryBytes(value: facts.physicalUsage.sessionBytes),
     session_bytes_source: "estimated", session_bytes_basis: "cache_components",
-    anchor_bytes: WorkerMemoryBytes(value: telemetry.anchor_bytes),
+    anchor_bytes: WorkerMemoryBytes(value: facts.physicalUsage.anchorBytes),
     anchor_bytes_source: "estimated", anchor_bytes_basis: "cache_components",
     evicted_bytes: WorkerMemoryBytes(value: nil),
     evicted_bytes_source: "unavailable", evicted_bytes_basis: "not_observed",
     estimated_retained_bytes: WorkerMemoryBytes(value: telemetry.total_bytes),
     estimated_retained_bytes_source: "estimated",
     estimated_retained_bytes_basis: "cache_components",
+    logical_referenced_bytes: facts.physicalUsage.referencedBytes,
+    shared_physical_bytes: facts.physicalUsage.sharedBytes,
+    physical_storage_objects: facts.physicalUsage.storageObjects,
+    shared_storage_objects: facts.physicalUsage.sharedStorageObjects,
     automatic_checkpoint_count: Int(telemetry.automatic_checkpoint_slots),
     automatic_checkpoint_bytes: telemetry.automatic_checkpoint_bytes,
     automatic_checkpoint_budget_bytes: telemetry.automatic_checkpoint_byte_budget,

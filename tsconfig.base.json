@@ -16,6 +16,7 @@
       "@clap/runtime-router": ["packages/runtime-router/src/index.ts"],
       "@clap/runtime-llama": ["packages/runtime-llama/src/index.ts"],
       "@clap/runtime-mlx": ["packages/runtime-mlx/src/index.ts"],
+      "@clap/runtime-vllm": ["packages/runtime-vllm/src/index.ts"],
       "@clap/server": ["packages/server/src/index.ts"]
     }
   }

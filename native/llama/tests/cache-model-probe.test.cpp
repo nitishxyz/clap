@@ -90,6 +90,15 @@ CacheProbeObservation run_probe(const std::string& model_path) {
   const uint64_t generation = executor.advance(admission.target_slot,
       admission.target_generation, prompt.data(), prompt.size(),
       CLAP_CACHE_SLOT_SESSION, false);
+  const auto cache = executor.physical_cache_telemetry();
+#ifdef LLAMA_MEMORY_KV_CACHE_VIEW_API
+  assert(cache.available);
+  assert(cache.unique_resident_bytes > 0);
+  assert(cache.referenced_bytes == cache.unique_resident_bytes);
+  assert(cache.used_cells >= prompt.size());
+#else
+  assert(!cache.available);
+#endif
 
   std::vector<uint8_t> physical;
   std::string descriptor = runtime.cache_domain();
@@ -99,7 +108,8 @@ CacheProbeObservation run_probe(const std::string& model_path) {
   for (llama_token token : prompt) clap::llama::test::append_i32(physical, token);
   return {admission.operation, admission.reuse_tokens, generation,
       token_fingerprint(prompt), Sha256::hex(physical), selected,
-      logit_fingerprint(top), top};
+      logit_fingerprint(top), top, cache.available, cache.unique_resident_bytes,
+      cache.referenced_bytes, cache.used_cells};
 }
 
 void print(const CacheProbeObservation& observation) {
@@ -116,7 +126,10 @@ void print(const CacheProbeObservation& observation) {
     const auto& value = observation.top16_quantized_logits[index];
     std::cout << value.token << ':' << value.value;
   }
-  std::cout << "]\n";
+  std::cout << "] physical_cache_observed=" << observation.physical_cache_observed
+            << " physical_unique_bytes=" << observation.physical_unique_bytes
+            << " physical_referenced_bytes=" << observation.physical_referenced_bytes
+            << " physical_cells_used=" << observation.physical_cells_used << '\n';
 }
 
 }  // namespace

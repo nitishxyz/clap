@@ -41,6 +41,11 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
       snapshot.active_policy.context_capacity > 0 &&
       snapshot.active_policy.per_active_reserve_cells > 0 &&
       snapshot.active_policy.per_active_reserve_bytes > 0;
+  const auto measured_or_null = [&](uint64_t bytes) {
+    return snapshot.physical_cache_observed ? json(bytes) : json(nullptr);
+  };
+  const char* physical_source = snapshot.physical_cache_observed ? "measured" : "unavailable";
+  const char* physical_basis = snapshot.physical_cache_observed ? "runtime_allocator" : "not_observed";
   return json{
     {"max_active", snapshot.max_active},
     {"queued", snapshot.queued},
@@ -80,18 +85,15 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
     {"retained_total", snapshot.retained_total},
     {"retained_sessions", snapshot.retained_sessions},
     {"retained_anchors", snapshot.retained_anchors},
-    // Byte pressure is intentionally disabled: pinned llama.cpp has no public
-    // authoritative KV byte or used/free-cell telemetry. Preserve the legacy
-    // fields, but represent unavailable observations honestly.
-    {"retained_bytes", nullptr},
-    {"retained_bytes_source", "unavailable"},
-    {"retained_bytes_basis", "not_observed"},
-    {"session_bytes", nullptr},
-    {"session_bytes_source", "unavailable"},
-    {"session_bytes_basis", "not_observed"},
-    {"anchor_bytes", nullptr},
-    {"anchor_bytes_source", "unavailable"},
-    {"anchor_bytes_basis", "not_observed"},
+    {"retained_bytes", measured_or_null(snapshot.physical_unique_resident_bytes)},
+    {"retained_bytes_source", physical_source},
+    {"retained_bytes_basis", physical_basis},
+    {"session_bytes", measured_or_null(snapshot.physical_session_referenced_bytes)},
+    {"session_bytes_source", physical_source},
+    {"session_bytes_basis", physical_basis},
+    {"anchor_bytes", measured_or_null(snapshot.physical_anchor_referenced_bytes)},
+    {"anchor_bytes_source", physical_source},
+    {"anchor_bytes_basis", physical_basis},
     {"evicted_bytes", nullptr},
     {"evicted_bytes_source", "unavailable"},
     {"evicted_bytes_basis", "not_observed"},
@@ -108,8 +110,20 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
         ? json(nullptr) : json(snapshot.eviction_reason)},
     {"eviction_count", snapshot.eviction_count},
     {"physical_cell_capacity", snapshot.physical_cell_capacity},
-    {"physical_cells_used", nullptr},
-    {"physical_cells_free", nullptr},
+    {"physical_cells_used", snapshot.physical_cache_observed
+        ? json(snapshot.physical_cells_used) : json(nullptr)},
+    {"physical_cells_free", snapshot.physical_cache_observed
+        ? json(snapshot.physical_cell_capacity >= static_cast<int>(snapshot.physical_cells_used)
+            ? snapshot.physical_cell_capacity - snapshot.physical_cells_used : 0)
+        : json(nullptr)},
+    {"physical_cells_shared", snapshot.physical_cache_observed
+        ? json(snapshot.physical_cells_shared) : json(nullptr)},
+    {"physical_stream_count", snapshot.physical_cache_observed
+        ? json(snapshot.physical_stream_count) : json(nullptr)},
+    {"physical_allocated_bytes", measured_or_null(snapshot.physical_allocated_bytes)},
+    {"physical_payload_bytes", measured_or_null(snapshot.physical_payload_bytes)},
+    {"physical_shared_bytes", measured_or_null(snapshot.physical_shared_resident_bytes)},
+    {"physical_referenced_bytes", measured_or_null(snapshot.physical_referenced_bytes)},
     {"session_policy_evictions", snapshot.session_policy_evictions},
     {"session_budget_rejections", snapshot.session_budget_rejections},
     {"anchor_publications", snapshot.anchor_publications},

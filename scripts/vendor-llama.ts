@@ -6,6 +6,7 @@ import { join } from "node:path";
 const root = new URL("..", import.meta.url).pathname;
 const vendor = join(root, "vendor");
 const dir = join(vendor, "llama.cpp");
+const kvViewPatch = join(root, "native", "llama", "patches", "kv-cache-view-v1.patch");
 const repo = process.env.CLAP_LLAMA_CPP_REPO ?? "https://github.com/ggerganov/llama.cpp.git";
 // Pinned so vendored sources (and cached build objects in CI) stay stable
 // across releases; bump deliberately and test.
@@ -29,10 +30,23 @@ if (!existsSync(dir)) {
 }
 await run(["git", "-C", dir, "submodule", "update", "--init", "--recursive", "--depth", "1"]);
 
-console.log(`llama.cpp vendored at ${dir}`);
+const patchEnabled = process.env.CLAP_LLAMA_KV_CACHE_VIEW === "1";
+const patchApplied = succeeds(["git", "-C", dir, "apply", "--reverse", "--check", kvViewPatch]);
+if (patchEnabled && !patchApplied) {
+  await run(["git", "-C", dir, "apply", "--check", kvViewPatch]);
+  await run(["git", "-C", dir, "apply", kvViewPatch]);
+} else if (!patchEnabled && patchApplied) {
+  await run(["git", "-C", dir, "apply", "--reverse", kvViewPatch]);
+}
+
+console.log(`llama.cpp vendored at ${dir} (KV cache view ${patchEnabled ? "enabled" : "disabled"})`);
 
 async function run(command: string[]) {
   const proc = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });
   const code = await proc.exited;
   if (code !== 0) throw new Error(`${command.join(" ")} exited ${code}`);
+}
+
+function succeeds(command: string[]): boolean {
+  return Bun.spawnSync(command, { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 }

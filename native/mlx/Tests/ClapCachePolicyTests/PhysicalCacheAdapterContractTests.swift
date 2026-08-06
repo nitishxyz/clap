@@ -33,4 +33,22 @@ struct PhysicalCacheAdapterContractTests {
     #expect(!operations.contains("export"))
     #expect(!operations.contains("import"))
   }
+
+  @Test("advertises copy-on-write only for proven ordinary attention caches")
+  func sharedDescriptor() throws {
+    let descriptor = mlxPhysicalCacheAdapterDescriptor(kvBits: nil,
+      sharedOrdinaryAttention: true)
+    let format = try #require(descriptor["format"] as? [String: Any])
+    let constraints = try #require(descriptor["constraints"] as? [String: Any])
+    #expect(format["cache_format"] as? String == "mlx-cow-array")
+    #expect(constraints["fork_semantics"] as? String == "copy_on_write")
+
+    let restricted = mlxPhysicalCacheAdapterDescriptor(kvBits: nil,
+      sharedOrdinaryAttention: true, recurrentOrHybrid: true)
+    let restrictedFormat = try #require(restricted["format"] as? [String: Any])
+    let restrictedConstraints = try #require(restricted["constraints"] as? [String: Any])
+    #expect(restrictedFormat["cache_format"] as? String == "mlx-cache-array")
+    #expect(restrictedConstraints["fork_semantics"] as? String == "whole_state_copy")
+    #expect(restrictedConstraints["recurrent_or_hybrid"] as? Bool == true)
+  }
 }

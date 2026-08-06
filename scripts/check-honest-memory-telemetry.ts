@@ -23,9 +23,11 @@ requireText("packages/worker-protocol/src/schemas.ts", "bytes: z.null(), source:
 requireText("packages/worker-protocol/src/schemas.ts", "memory bytes require source and basis", "mandatory memory provenance");
 requireText("packages/api/src/schemas.ts", "retainedBytes: z.number().int().nonnegative().nullable()", "nullable public retained bytes");
 requireText("packages/api/src/schemas.ts", "estimatedRetainedBytes", "separate public estimate");
-requireText("native/llama/src/telemetry.cpp", "{\"retained_bytes\", nullptr}", "GGUF unavailable retained bytes");
+requireText("native/llama/src/telemetry.cpp", "measured_or_null(snapshot.physical_unique_resident_bytes)", "GGUF conditional measured retained bytes");
+requireText("native/llama/src/telemetry.cpp", "snapshot.physical_cache_observed ? \"measured\" : \"unavailable\"", "GGUF measured/unavailable provenance");
 requireText("native/llama/src/telemetry.cpp", "{\"estimated_retained_bytes\"", "GGUF separate estimate");
-requireText("native/llama/tests/telemetry.test.cpp", "normal[\"retained_bytes\"].is_null()", "GGUF unavailable regression test");
+requireText("native/llama/tests/telemetry.test.cpp", "normal[\"retained_bytes_source\"] == \"measured\"", "GGUF measured regression test");
+requireText("native/llama/tests/telemetry.test.cpp", "nullable[\"retained_bytes\"].is_null()", "GGUF fallback unavailable regression test");
 requireText("native/mlx/Sources/clap-mlx/Telemetry/MemoryTelemetry.swift", "\"worker_allocator\"", "MLX allocator basis");
 requireText("native/mlx/Sources/clap-mlx/Telemetry/MemoryTelemetry.swift", "active == nil ? \"unavailable\"", "MLX missing allocator observation handling");
 requireText("native/mlx/Sources/clap-mlx/Telemetry/RetentionTelemetry.swift", "retained_bytes_source: \"estimated\"", "MLX cache estimates");

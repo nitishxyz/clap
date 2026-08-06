@@ -1,7 +1,10 @@
 # Provider-Scale KV Cache Plan
 
-Status: Phases 1 through 3 implemented and validated on clean A100 pods on
-2026-08-06.
+Status: Phases 1 through 4 are implemented and validated on clean A100 pods.
+Phases 5 through 7 are implemented locally as of 2026-08-06; clean CUDA,
+Apple-Silicon MLX, and vLLM workload validation is pending. The optional
+llama.cpp KV-cell inspection extension remains disabled by default until its
+clean A/B run satisfies the Phase 5 go/no-go rule.
 This plan extends `docs/scale-plan.md` and
 `docs/rust-cache-coordinator-plan.md` from a strong single-host cache into a
 cache-aware inference fleet. It is intentionally phased so every checkpoint
@@ -864,6 +867,24 @@ Gates:
 
 ### Phase 5 — Provider-grade llama.cpp physical path
 
+Status: IMPLEMENTED LOCALLY; REMOTE A/B PENDING. The pinned llama.cpp now has
+an opt-in, read-only patch at
+`native/llama/patches/kv-cache-view-v1.patch`. It exposes ordinary-attention KV
+cell IDs, positions, sequence reference counts, allocated/payload bytes, exact
+unique resident bytes, shared bytes, and per-sequence referenced bytes. It
+returns unsupported for recurrent, hybrid, and non-KV memory implementations.
+Clap uses the view to publish a `paged` `llama-kv-cell` descriptor with
+one-token blocks and exact byte accounting, while copy-on-write fork and trim
+continue to use llama.cpp's public sequence operations.
+
+`scripts/vendor-llama.ts` applies the patch only when
+`CLAP_LLAMA_KV_CACHE_VIEW=1`. The default and
+`CLAP_LLAMA_KV_CACHE_VIEW=0` both build unmodified llama.cpp and advertise the
+existing `sequence` descriptor with unknown measured bytes. Focused builds and
+tests pass in both modes. The extension has no mutation, allocation,
+serialization, sampler, model-loading, or kernel code and introduces no
+export/import claim.
+
 Deliverables:
 
 - benchmark public llama.cpp APIs against required block operations
@@ -890,6 +911,43 @@ Gates:
 
 ### Phase 6 — MLX shared physical cache
 
+Status: IMPLEMENTED AND VALIDATED LOCALLY; EXTENDED SOAK PENDING. Ordinary exact
+`KVCacheSimple` instances are frozen at retention boundaries into
+`SharedKVCache`, which shares immutable MLX array storage across copies and
+detaches before the first write. Trims change only a branch's logical offset.
+Load-time probing advertises the `mlx-cow-array` format and copy-on-write fork
+semantics only when every model cache is an ordinary attention cache and KV
+quantization is disabled.
+
+Rotating, sliding/chunked, recurrent/Mamba, cache-list hybrids, custom cache
+classes, and quantized caches remain on their existing deep-copy path and
+never advertise copy-on-write. Unique, referenced, and shared storage bytes and
+object counts are deduplicated by the COW storage identity. The coordinator's
+per-slot byte budget remains deliberately conservative, while public retained
+bytes use the deduplicated estimate and preserve the original referenced-byte
+estimate separately.
+
+Apple-Silicon real-model validation on 2026-08-06 used the local
+`mlx-community/SmolLM-135M-Instruct-4bit` fixture with unquantized KV and a
+1,552-token shared prompt. Repeated prompts reduced residual prefill from 1,552
+tokens to one token; multi-turn and branch requests reused the prefix and
+completed successfully. At the final eight-entry retained ceiling, telemetry
+reported 301,109,760 unique bytes, 619,614,720 referenced bytes, 123,863,040
+shared bytes, 1,110 physical storage objects, and 450 shared objects. This live
+workload found and fixed two issues before the final pass: the legacy partial
+branch flag now matches the COW adapter descriptor, and immutable prefix
+segments remain shared after a branch appends to its private writable tail
+instead of copying the entire prefix.
+
+The local `fdtn-ai/antares-1b` Granite hybrid fixture also completed the real
+shared-prefix, return, and branch workload. It advertised `mlx-cache-array`,
+whole-state fork, `recurrent_or_hybrid=true`, and no partial-prefix branch,
+confirming fail-closed capability negotiation for non-rewindable cache classes.
+An initial four-entry pressure run exposed an existing backpressure protocol
+ordering fault and is not counted as a passing soak; the same correctness
+workload passed at the normal eight-entry retained ceiling. Pressure-specific
+protocol hardening remains separate from the physical-sharing result.
+
 Deliverables:
 
 - cache-class-specific immutable chunk representation
@@ -907,6 +965,23 @@ Gates:
 
 ### Phase 7 — Native paged-engine integrations
 
+Status: IMPLEMENTED LOCALLY FOR vLLM; REMOTE CUDA VALIDATION PENDING. The new
+`@clap/runtime-vllm` package is a non-allocating HTTP adapter for externally
+managed vLLM replicas. It probes each concrete replica's `/health`, `/version`,
+`/v1/models`, `/openapi.json`, and `/metrics`; rejects model mismatch and
+prefix caching without `cache_salt`; derives a 256-bit HMAC cache salt from the
+deployment/model/share identity; and overwrites caller-provided salts.
+
+The adapter ingests current and compatible legacy prefix-query/hit counters,
+external-prefix counters, KV usage, block size, token capacity, cache dtype,
+and effective prefix-cache configuration. Counter resets and physical-format
+changes reset delta/locality history and advance the adapter generation. The
+replica pool combines keyed rendezvous affinity with pressure and token-weighted
+native hit telemetry. When an external KV connector is observed, same-replica
+affinity is weakened rather than treated as authoritative. vLLM retains all
+block allocation, eviction, transfer, and connector ownership; no development,
+cache-reset, Python-internal, import, or export API is used.
+
 Deliverables:
 
 - production adapter for at least one of vLLM or SGLang
@@ -921,6 +996,77 @@ Gates:
 - routing improves token-weighted reuse versus round robin
 - backend upgrade/version mismatch degrades to fresh execution safely
 - native and Clap metrics reconcile within documented tolerances
+
+Local implementation checks (2026-08-06):
+
+- the llama.cpp extension and unmodified fallback both configure, compile, and
+  pass focused descriptor/cache-executor tests
+- the real-model probe asserts exact KV view availability when the extension is
+  compiled and explicit unavailability in fallback builds
+- MLX COW tests prove shared storage before mutation, branch isolation after
+  append, exact-class conversion, and fail-closed rotating/chunked/recurrent/
+  quantized behavior
+- the Rust contract suite validates live llama.cpp, MLX COW, and vLLM paged
+  descriptors while unsupported operations still fail before mutation
+- vLLM tests cover deterministic opaque salt derivation, Prometheus parsing,
+  capability discovery, model and isolation rejection, counter reset handling,
+  repeated-prefix routing, and caller-salt replacement
+
+Remote validation procedure:
+
+1. Expose the Clap HTTP port and verify public `/clap/v1/health` and dashboard
+   HTML before any model workload.
+2. Build and run the unmodified CUDA baseline, then execute:
+
+   ```sh
+   CLAP_LLAMA_KV_CACHE_VIEW=0 bun run runtime:llama:vendor
+   CLAP_CUDA_ARCHS=80 bun run runtime:llama:build
+   CLAP_BASE_URL=http://127.0.0.1:11435 \
+   CLAP_VALIDATION_MODEL=/path/to/model.gguf \
+   CLAP_EXPECT_ADAPTER_KIND=sequence \
+   CLAP_EXPECT_CACHE_FORMAT=llama-sequence \
+   CLAP_EXPECT_BYTE_ACCOUNTING=unknown \
+   bun run provider:physical:probe > phase5-baseline.json
+   ```
+
+3. Rebuild from a clean CMake directory with the opt-in patch and repeat the
+   exact model/config/workload:
+
+   ```sh
+   CLAP_LLAMA_KV_CACHE_VIEW=1 bun run runtime:llama:vendor
+   CLAP_CUDA_ARCHS=80 bun run runtime:llama:build
+   CLAP_BASE_URL=http://127.0.0.1:11435 \
+   CLAP_VALIDATION_MODEL=/path/to/model.gguf \
+   CLAP_EXPECT_ADAPTER_KIND=paged \
+   CLAP_EXPECT_CACHE_FORMAT=llama-kv-cell \
+   CLAP_EXPECT_BYTE_ACCOUNTING=exact \
+   bun run provider:physical:probe > phase5-extension.json
+   ```
+
+   Preserve the patch only if equal-memory correctness plus TTFT, throughput,
+   or retained-concurrency results satisfy the go/no-go rule. Otherwise keep
+   the default fallback and record a Phase 5 no-go.
+
+4. On Apple Silicon, build/load an ordinary-attention MLX model and run the
+   same physical probe with expected format `mlx-cow-array`, then repeat with
+   rotating/sliding, recurrent/hybrid, and quantized fixtures and require
+   `mlx-cache-array` whole-state fallback. Include rapid fork/return/release
+   churn and allocator snapshots.
+5. Start two pinned vLLM replicas with automatic prefix caching and
+   `sha256_cbor`, expose their HTTP ports only to the validation network, and
+   run:
+
+   ```sh
+   CLAP_VLLM_MODEL=model-id \
+   CLAP_VLLM_REPLICAS='r1=http://127.0.0.1:8001,r2=http://127.0.0.1:8002' \
+   CLAP_VLLM_CACHE_SALT_SECRET='replace-with-32-byte-validation-secret' \
+   bun run provider:vllm:probe > phase7-vllm.json
+   ```
+
+6. Compare all deterministic outputs with fresh prefill, collect GPU/unified
+   memory and cancellation/churn evidence, archive sanitized artifacts, push
+   the evidence checkpoint, verify the public dashboard again, and immediately
+   delete paid infrastructure.
 
 ### Phase 8 — Multi-tier offload and KV transfer
 
@@ -1431,7 +1577,9 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Scope Phase 5 as a measurement-first llama.cpp physical-path investigation.
-Benchmark public primitives and define the minimum exact block inspection and
-accounting gap before proposing any extension. Preserve the public sequence
-fallback and reject custom code without material clean A/B gains.
+Run the documented Phase 5-7 clean-hardware matrix. Compare the opt-in
+llama.cpp KV-cell view against the unmodified CUDA build at equal model,
+context, memory, and workload; run the MLX COW correctness/churn matrix on
+Apple Silicon; and run the vLLM native-prefix adapter against two pinned CUDA
+replicas. Record the Phase 5 go/no-go, synchronize evidence, verify the public
+dashboard, and delete paid infrastructure before beginning Phase 8.

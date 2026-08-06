@@ -139,6 +139,10 @@ struct CacheProbeObservation {
   int32_t selected_next_token = -1;
   std::string top16_quantized_logit_sha256;
   std::vector<QuantizedLogit> top16_quantized_logits;
+  bool physical_cache_observed = false;
+  uint64_t physical_unique_bytes = 0;
+  uint64_t physical_referenced_bytes = 0;
+  uint32_t physical_cells_used = 0;
 };
 
 }  // namespace clap::llama::test

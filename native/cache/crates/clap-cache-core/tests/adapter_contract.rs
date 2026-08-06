@@ -1,5 +1,6 @@
 use clap_cache_core::adapter::{
-    llama_sequence_descriptor, mlx_sequence_descriptor, paged_engine_skeleton_descriptor,
+    llama_paged_descriptor, llama_sequence_descriptor, mlx_cow_descriptor,
+    mlx_sequence_descriptor, paged_engine_skeleton_descriptor, vllm_paged_descriptor,
     AdapterDescriptor, AdapterError, AdapterKind, AdapterOperation, AdapterOperations,
     AdapterOutcome, AdapterRequest, ByteAccounting, CacheTier, CheckedPhysicalCacheAdapter,
     ObservedBytes, PhysicalCacheBackend, PhysicalFormatIdentity, PhysicalObjectRef,
@@ -139,6 +140,33 @@ fn paged_engine_skeleton_fails_closed_until_an_engine_adapter_exists() {
     let backend = adapter.into_inner();
     assert_eq!(backend.execute_calls, 0);
     assert!(backend.invalidated.is_empty());
+}
+
+#[test]
+fn live_native_descriptors_preserve_their_narrow_physical_boundaries() {
+    let llama = llama_paged_descriptor(MODEL_DOMAIN, Some("f16"));
+    llama.validate().unwrap();
+    assert_eq!(llama.kind, AdapterKind::Paged);
+    assert_eq!(llama.format.block_tokens, Some(1));
+    assert_eq!(llama.constraints.byte_accounting, ByteAccounting::Exact);
+    assert!(llama.operations.contains(AdapterOperation::Fork));
+
+    let mlx = mlx_cow_descriptor(MODEL_DOMAIN, Some("f16"));
+    mlx.validate().unwrap();
+    assert_eq!(mlx.kind, AdapterKind::Sequence);
+    assert_eq!(mlx.format.cache_format, "mlx-cow-array");
+    assert_eq!(
+        mlx.constraints.fork_semantics,
+        clap_cache_core::adapter::ForkSemantics::CopyOnWrite
+    );
+
+    let vllm = vllm_paged_descriptor(MODEL_DOMAIN, "vllm-0.26.0", 16, None);
+    vllm.validate().unwrap();
+    assert_eq!(vllm.kind, AdapterKind::Paged);
+    assert_eq!(vllm.format.block_tokens, Some(16));
+    assert!(vllm.operations.contains(AdapterOperation::Inspect));
+    assert!(!vllm.operations.contains(AdapterOperation::Release));
+    assert_eq!(vllm.constraints.byte_accounting, ByteAccounting::Unknown);
 }
 
 #[test]

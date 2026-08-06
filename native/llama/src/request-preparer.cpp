@@ -117,18 +117,25 @@ nlohmann::json physical_cache_adapter_descriptor(bool hybrid,
   nlohmann::json operations = {"inspect", "continue", "restore", "fork", "release"};
   if (!hybrid) operations.push_back("trim");
   if (prompt_boundary_snapshots) operations.push_back("snapshot");
+#ifdef LLAMA_MEMORY_KV_CACHE_VIEW_API
+  const bool paged = !hybrid;
+#else
+  const bool paged = false;
+#endif
   return {
-    {"contract_version", 1}, {"kind", "sequence"}, {"operations", operations},
+    {"contract_version", 1}, {"kind", paged ? "paged" : "sequence"}, {"operations", operations},
     {"format", {{"backend", "llama"}, {"engine", "llama.cpp"},
-      {"cache_format", "llama-sequence"}, {"cache_format_version", 1},
+      {"cache_format", paged ? "llama-kv-cell" : "llama-sequence"},
+      {"cache_format_version", 1},
       {"kv_data_type", kv_data_type.empty()
           ? nlohmann::json(nullptr) : nlohmann::json(kv_data_type)},
-      {"block_tokens", nullptr}}},
-    {"constraints", {{"restore_granularity", "whole_state"},
+      {"block_tokens", paged ? nlohmann::json(1) : nlohmann::json(nullptr)}}},
+    {"constraints", {{"restore_granularity", paged ? "block" : "whole_state"},
       {"fork_semantics", hybrid ? "whole_state_copy" : "copy_on_write"},
       {"minimum_trim_tokens", hybrid ? nlohmann::json(nullptr) : nlohmann::json(1)},
       {"safe_busy_donor", true}, {"prompt_boundary_snapshots", prompt_boundary_snapshots},
-      {"recurrent_or_hybrid", hybrid}, {"byte_accounting", "unknown"},
+      {"recurrent_or_hybrid", hybrid},
+      {"byte_accounting", paged ? "exact" : "unknown"},
       {"tiers", {"device"}}, {"transfer_format", nullptr}}}
   };
 }

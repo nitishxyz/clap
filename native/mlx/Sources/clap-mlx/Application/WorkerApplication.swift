@@ -139,9 +139,12 @@ final class WorkerApplication {
       }
       let capabilities = state.modelRuntime.tokenCapabilities.workerEvent(
         contextOverride: state.contextOverride)
-      let physicalAdapter = mlxPhysicalCacheAdapterDescriptor(kvBits: state.kvBits)
+      let physicalAdapter = mlxPhysicalCacheAdapterDescriptor(kvBits: state.kvBits,
+        sharedOrdinaryAttention: state.sharedPhysicalCache,
+        recurrentOrHybrid: state.modelRuntime.tokenCapabilities.hybridOrRecurrent)
       let effectiveCapabilities: [String: Any] = [
-        "cache": ["partial_suffix_trim": false, "partial_prefix_branch": false,
+        "cache": ["partial_suffix_trim": false,
+          "partial_prefix_branch": state.sharedPhysicalCache,
           "whole_state_copy": true, "prompt_boundary_snapshots": true,
           "quantized_kv": state.kvBits != nil, "adapter": physicalAdapter],
         "generation": ["structured_output": ["json_object": "post_validate",

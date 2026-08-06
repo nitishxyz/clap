@@ -34,10 +34,18 @@ class RecordingBackend final : public clap::llama::PhysicalCacheBackend {
     operations.push_back({"clear", {data ? 1 : 0}});
   }
 
+  std::optional<clap::llama::PhysicalCacheStats> inspect(int32_t sequence = -1) const override {
+    if (sequence < 0) return global_stats;
+    const auto index = static_cast<std::size_t>(sequence);
+    return index < sequence_stats.size() ? sequence_stats[index] : std::nullopt;
+  }
+
   std::vector<Operation> operations;
   bool remove_result = true;
   bool fail_remove = false;
   bool fail_copy = false;
+  std::optional<clap::llama::PhysicalCacheStats> global_stats;
+  std::vector<std::optional<clap::llama::PhysicalCacheStats>> sequence_stats;
 };
 
 clap::llama::CacheExecutorConfig config() {
@@ -267,4 +275,26 @@ int main() {
   }
   anchor_recording->fail_copy = false;
   assert(anchor_recording->operations.back().name == "remove");
+
+  auto observed_backend = std::make_unique<RecordingBackend>();
+  RecordingBackend* observed_recording = observed_backend.get();
+  observed_recording->global_stats = clap::llama::PhysicalCacheStats{
+      200, 160, 100, 40, 0, 10, 5, 2, 0, 1};
+  observed_recording->sequence_stats = {
+      clap::llama::PhysicalCacheStats{200, 160, 100, 40, 60, 10, 5, 2, 3, 1},
+      clap::llama::PhysicalCacheStats{200, 160, 100, 40, 60, 10, 5, 2, 3, 1},
+  };
+  clap::llama::CacheExecutor observed(config(), std::move(observed_backend));
+  observed.slots()[0].tokens = {1, 2, 3};
+  observed.slots()[1].tokens = {1, 2, 3};
+  observed.slots()[1].is_anchor = true;
+  const auto physical = observed.physical_cache_telemetry();
+  assert(physical.available);
+  assert(physical.unique_resident_bytes == 100);
+  assert(physical.shared_resident_bytes == 40);
+  assert(physical.referenced_bytes == 120);
+  assert(physical.session_referenced_bytes == 60);
+  assert(physical.anchor_referenced_bytes == 60);
+  assert(physical.used_cells == 5);
+  assert(physical.shared_cells == 2);
 }

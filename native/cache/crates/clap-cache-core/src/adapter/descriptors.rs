@@ -22,6 +22,45 @@ fn local_format(
     }
 }
 
+pub fn llama_paged_descriptor(
+    model_domain: [u8; 32],
+    kv_data_type: Option<&str>,
+) -> AdapterDescriptor {
+    let mut format = local_format(
+        "llama",
+        "llama.cpp",
+        "llama-kv-cell",
+        model_domain,
+        kv_data_type,
+    );
+    format.block_tokens = Some(1);
+    AdapterDescriptor {
+        contract_version: PHYSICAL_CACHE_ADAPTER_CONTRACT_VERSION,
+        kind: AdapterKind::Paged,
+        operations: AdapterOperations::of(&[
+            AdapterOperation::Inspect,
+            AdapterOperation::Continue,
+            AdapterOperation::Restore,
+            AdapterOperation::Fork,
+            AdapterOperation::Trim,
+            AdapterOperation::Snapshot,
+            AdapterOperation::Release,
+        ]),
+        format,
+        constraints: AdapterConstraints {
+            restore_granularity: RestoreGranularity::Block,
+            fork_semantics: ForkSemantics::CopyOnWrite,
+            minimum_trim_tokens: Some(1),
+            safe_busy_donor: true,
+            prompt_boundary_snapshots: true,
+            recurrent_or_hybrid: false,
+            byte_accounting: ByteAccounting::Exact,
+            tiers: vec![CacheTier::Device],
+            transfer_format: None,
+        },
+    }
+}
+
 pub fn llama_sequence_descriptor(
     model_domain: [u8; 32],
     hybrid: bool,
@@ -100,6 +139,49 @@ pub fn mlx_sequence_descriptor(
             prompt_boundary_snapshots: true,
             recurrent_or_hybrid: false,
             byte_accounting: ByteAccounting::Estimated,
+            tiers: vec![CacheTier::Device],
+            transfer_format: None,
+        },
+    }
+}
+
+pub fn mlx_cow_descriptor(
+    model_domain: [u8; 32],
+    kv_data_type: Option<&str>,
+) -> AdapterDescriptor {
+    let mut descriptor = mlx_sequence_descriptor(model_domain, kv_data_type);
+    descriptor.format.cache_format = "mlx-cow-array".to_owned();
+    descriptor.constraints.fork_semantics = ForkSemantics::CopyOnWrite;
+    descriptor
+}
+
+pub fn vllm_paged_descriptor(
+    model_domain: [u8; 32],
+    engine_version: &str,
+    block_tokens: u32,
+    kv_data_type: Option<&str>,
+) -> AdapterDescriptor {
+    let mut format = local_format(
+        "vllm",
+        engine_version,
+        "vllm-native-prefix-block",
+        model_domain,
+        kv_data_type,
+    );
+    format.block_tokens = Some(block_tokens);
+    AdapterDescriptor {
+        contract_version: PHYSICAL_CACHE_ADAPTER_CONTRACT_VERSION,
+        kind: AdapterKind::Paged,
+        operations: AdapterOperations::of(&[AdapterOperation::Inspect]),
+        format,
+        constraints: AdapterConstraints {
+            restore_granularity: RestoreGranularity::Block,
+            fork_semantics: ForkSemantics::CopyOnWrite,
+            minimum_trim_tokens: None,
+            safe_busy_donor: false,
+            prompt_boundary_snapshots: false,
+            recurrent_or_hybrid: false,
+            byte_accounting: ByteAccounting::Unknown,
             tiers: vec![CacheTier::Device],
             transfer_format: None,
         },

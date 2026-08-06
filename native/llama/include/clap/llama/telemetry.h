@@ -55,6 +55,17 @@ struct RetentionTelemetrySnapshot {
   const uint64_t anchor_accounted_bytes;
   const uint64_t max_anchor_bytes_per_session;
   const uint64_t session_idle_ttl_ms;
+  const bool physical_cache_observed;
+  const uint64_t physical_allocated_bytes;
+  const uint64_t physical_payload_bytes;
+  const uint64_t physical_unique_resident_bytes;
+  const uint64_t physical_shared_resident_bytes;
+  const uint64_t physical_referenced_bytes;
+  const uint64_t physical_session_referenced_bytes;
+  const uint64_t physical_anchor_referenced_bytes;
+  const uint32_t physical_cells_used;
+  const uint32_t physical_cells_shared;
+  const uint32_t physical_stream_count;
 };
 
 nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& snapshot);

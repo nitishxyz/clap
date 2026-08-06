@@ -170,6 +170,10 @@ struct WorkerRetention: Encodable {
   let estimated_retained_bytes: WorkerMemoryBytes
   let estimated_retained_bytes_source: String
   let estimated_retained_bytes_basis: String
+  let logical_referenced_bytes: UInt64
+  let shared_physical_bytes: UInt64
+  let physical_storage_objects: Int
+  let shared_storage_objects: Int
   let automatic_checkpoint_count: Int
   let automatic_checkpoint_bytes: UInt64
   let automatic_checkpoint_budget_bytes: UInt64

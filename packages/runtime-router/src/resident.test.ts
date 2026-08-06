@@ -132,7 +132,9 @@ describe("worker retention telemetry", () => {
       expired_slots: 12, expired_accounted_bytes: 13,
       released_session_slots: 14, released_session_accounted_bytes: 15,
       anchor_accounted_bytes: 16, max_anchor_bytes_per_session: 17,
-      session_idle_ttl_ms: 18,
+      session_idle_ttl_ms: 18, logical_referenced_bytes: 19,
+      shared_physical_bytes: 20, physical_storage_objects: 21,
+      shared_storage_objects: 22,
     })).toEqual({
       maxActive: 4, queued: 3, previousMaxActive: 2,
       lastAdjustmentReason: "global_headroom_available", lastAdjustmentAt: "2026-07-20T11:29:00.000Z",
@@ -152,6 +154,8 @@ describe("worker retention telemetry", () => {
       expiredSlots: 12, expiredAccountedBytes: 13,
       releasedSessionSlots: 14, releasedSessionAccountedBytes: 15,
       anchorAccountedBytes: 16, maxAnchorBytesPerSession: 17, sessionIdleTtlMs: 18,
+      logicalReferencedBytes: 19, sharedPhysicalBytes: 20,
+      physicalStorageObjects: 21, sharedStorageObjects: 22,
     });
   });
 

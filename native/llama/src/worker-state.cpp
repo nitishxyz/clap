@@ -256,6 +256,7 @@ nlohmann::json WorkerState::retention(std::size_t active, std::size_t queued) co
   uint32_t retained_anchors = 0;
   uint64_t evictions = 0;
   clap_cache_telemetry_t cache_telemetry{};
+  PhysicalCacheTelemetry physical_cache{};
   if (cache_executor_) {
     const auto retention = cache_executor_->retention_telemetry();
     cache_telemetry = cache_executor_->telemetry();
@@ -263,6 +264,7 @@ nlohmann::json WorkerState::retention(std::size_t active, std::size_t queued) co
     retained_sessions = retention.session_slots;
     retained_anchors = retention.anchor_slots;
     evictions = cache_telemetry.evictions;
+    physical_cache = cache_executor_->physical_cache_telemetry();
   }
   return serialize_retention_telemetry({
     max_active_, queued, previous_max_active_, last_adjustment_reason_,
@@ -275,14 +277,20 @@ nlohmann::json WorkerState::retention(std::size_t active, std::size_t queued) co
       active_policy_.per_active_reserve_cells, active_policy_.per_active_reserve_bytes,
       std::max(1u, std::thread::hardware_concurrency()), runtime_.hybrid()},
     active, retained_total, retained_sessions, retained_anchors, runtime_.retained_max(),
-    last_eviction_reason_, evictions, runtime_.backend_allocation_cap(),
+    last_eviction_reason_, evictions, physical_cache.available
+      ? static_cast<int>(physical_cache.capacity_cells) : runtime_.backend_allocation_cap(),
     cache_telemetry.session_policy_evictions, cache_telemetry.session_budget_rejections,
     cache_telemetry.anchor_publications, cache_telemetry.anchor_publication_skips,
     cache_telemetry.expired_slots, cache_telemetry.expired_accounted_bytes,
     cache_telemetry.released_session_slots,
     cache_telemetry.released_session_accounted_bytes,
     cache_telemetry.anchor_accounted_bytes,
-    cache_telemetry.max_anchor_bytes_per_session, cache_telemetry.session_idle_ttl_ms});
+    cache_telemetry.max_anchor_bytes_per_session, cache_telemetry.session_idle_ttl_ms,
+    physical_cache.available, physical_cache.allocated_bytes, physical_cache.payload_bytes,
+    physical_cache.unique_resident_bytes, physical_cache.shared_resident_bytes,
+    physical_cache.referenced_bytes, physical_cache.session_referenced_bytes,
+    physical_cache.anchor_referenced_bytes, physical_cache.used_cells,
+    physical_cache.shared_cells, physical_cache.stream_count});
 }
 
 }  // namespace clap::llama
