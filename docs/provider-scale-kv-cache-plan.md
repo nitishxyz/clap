@@ -796,12 +796,13 @@ Gates:
 Status: COMPLETE. Local hardening and clean A100 CUDA sequence-fallback
 validation completed on 2026-08-06 at implementation SHA
 `bf937e3ab1bb6263419b90e82ad52129d63fa533`; the checked-in evidence commit is
-pending. The Rust core has immutable exact-token logical blocks, opaque
-monotonic block IDs, versioned prefix/session block tables, counted table
-references, exclusive write leases, shared read leases, and copy-on-write table
-forks. A logical block remains physically resident while any table reference or
-lease exists, and invariant validation reconciles every table reference, block
-index entry, physical object, lease, and byte counter.
+`e344b63c414c7ec3b382cb78be2e673c76db12a1`. The Rust core has immutable
+exact-token logical blocks, opaque monotonic block IDs, versioned prefix/session
+block tables, counted table references, exclusive write leases, shared read
+leases, and copy-on-write table forks. A logical block remains physically
+resident while any table reference or lease exists, and invariant validation
+reconciles every table reference, block index entry, physical object, lease, and
+byte counter.
 
 Publish, import, release, eviction, and last-lease reclamation use a narrow
 prepare/commit/abort physical-backend transaction. Logical state changes only
@@ -1340,7 +1341,7 @@ accelerator: CUDA, all 23 model layers and the 44 MiB KV buffer on CUDA0
 driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8; compute capability 8.0
 model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
 backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
-pod_deleted: pending evidence commit synchronization
+pod_deleted: yes, after evidence commit e344b63 was pushed and synchronized
 ```
 
 The clean pod cloned the public feature branch at the SHA above, installed Bun
@@ -1389,6 +1390,8 @@ generation responses, public health/dashboard responses, VRAM samples, model
 digest, and checksums. The frozen archive
 `/tmp/clap-phase4-evidence.tar.gz` has SHA-256
 `a86b2b9a85ac8c199df686905540c8d306620b49dc7236753a787786d8cb64f6`.
+After commit `e344b63` reached the public feature branch, RunPod confirmed pod
+`8h9duyqyn9epzz` deleted and a subsequent lookup returned `404 not_found`.
 
 Known limits are deliberate: the logical-block physical backend is in-memory
 and Rust-only, while the live worker remains the validated public sequence
@@ -1428,7 +1431,7 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Synchronize the Phase 4 evidence commit, delete validation pod `8h9duyqyn9epzz`,
-and record the final evidence SHA and teardown state. Then scope Phase 5 as a
-measurement-first llama.cpp physical-path investigation; preserve the public
-sequence fallback and do not add an extension without material clean A/B gains.
+Scope Phase 5 as a measurement-first llama.cpp physical-path investigation.
+Benchmark public primitives and define the minimum exact block inspection and
+accounting gap before proposing any extension. Preserve the public sequence
+fallback and reject custom code without material clean A/B gains.
