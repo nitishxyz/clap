@@ -1,7 +1,10 @@
 # Clap cache coordinator
 
 This workspace builds the backend-independent cache policy and its stable C ABI.
-It does not own or call backend KV-cache objects.
+The production sequence coordinator does not own or call backend KV-cache
+objects. The Rust-only logical-block module uses a narrow transactional backend
+trait and an in-memory fake to prove paged ownership invariants before native
+engine integration.
 
 ```sh
 cargo build --release -p clap-cache-ffi
@@ -22,6 +25,16 @@ read-leases its donor. Execute the returned operation without holding a Rust
 lock, then call exactly one of `clap_cache_commit` or `clap_cache_abort` before
 `clap_cache_plan_destroy`. Abort invalidates the target because physical state
 may be uncertain. Destroy all plans before destroying their manager.
+
+## Logical block ownership
+
+`clap-cache-core::logical_block` models immutable exact-token blocks, versioned
+prefix/session block tables, reference counts, read/write leases, copy-on-write
+forks, unique-byte eviction planning, and all-or-nothing publish/import/release.
+`InMemoryBlockBackend` stages physical creates and releases until commit and is
+only a Phase 4 conformance backend; it is not wired through the C ABI or used by
+llama.cpp or MLX. Sequence traces can be deterministically chunked into logical
+references while namespace and model-domain compatibility remain fail-closed.
 
 Every public input struct starts with `version` and `struct_size`. Initialize
 `version` to `CLAP_CACHE_ABI_VERSION`, zero reserved fields, and set

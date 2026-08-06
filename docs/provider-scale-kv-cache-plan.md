@@ -793,6 +793,51 @@ Gates:
 
 ### Phase 4 — Reference-counted logical blocks
 
+Status: IMPLEMENTED AND LOCALLY HARDENED; clean A100 sequence-fallback
+regression pending. The Rust core now has immutable exact-token logical blocks,
+opaque monotonic block IDs, versioned prefix/session block tables, counted table
+references, exclusive write leases, shared read leases, and copy-on-write table
+forks. A logical block remains physically resident while any table reference or
+lease exists, and invariant validation reconciles every table reference, block
+index entry, physical object, lease, and byte counter.
+
+Publish, import, release, eviction, and last-lease reclamation use a narrow
+prepare/commit/abort physical-backend transaction. Logical state changes only
+after a valid physical outcome commits; prepare failures, commit failures,
+invalid outcomes, and stale table/block generations leave references and tables
+unchanged. The in-memory fake backend stages exact creates/releases and supports
+deterministic failure injection. It is intentionally Rust-only and is not
+advertised by llama.cpp, MLX, the C ABI, or the public worker protocol.
+
+Exact-token identity is scoped by namespace and model compatibility domain.
+Overlapping tables share one physical block and unique-byte telemetry counts it
+once, while logical referenced bytes count every table occurrence. Eviction
+plans remove whole versioned tables in deterministic least-recently-used order
+and report bytes only when all references to an unleased block are selected.
+Sequence traces can be deterministically chunked and replayed into stable block
+references, providing the migration bridge without changing the validated
+sequence adapters.
+
+Local evidence (2026-08-06):
+
+- 10 focused logical-block tests pass, covering shared COW forks, append
+  isolation, exact reference counts, read/write lease exclusion, leased-orphan
+  reclamation, stale generations, physical-outcome validation, transactional
+  failure rollback, shared-byte eviction, trace replay, namespace/model
+  isolation, and conflicting byte metadata
+- a generated state-machine property test executes 8,000 deterministic
+  publish/append/replace/fork/release/lease/evict operations across 32 seeds and
+  reconciles logical and fake-physical invariants after every operation
+- all 92 Rust workspace tests pass and workspace clippy passes with warnings
+  denied
+- `bun run hardening:verify` passes end to end: all 568 TypeScript tests, 26
+  native llama.cpp tests, 135 MLX XCTest/Swift Testing cases (one physical model
+  probe skipped by design), native production builds, worker-protocol checks,
+  bundle and generated-artifact drift checks, ownership/structure/capability/
+  memory-honesty gates, and documentation checks are green
+- the public sequence adapter contract and all existing coordinator, retention,
+  provider-scale, FFI, and ABI tests remain unchanged and green
+
 Deliverables:
 
 - Rust logical block IDs and immutable block metadata
@@ -1312,7 +1357,8 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Scope Phase 4 around reference-counted logical blocks and prove ownership,
-lease, accounting, copy-on-write, and abort invariants against an in-memory fake
-physical backend. Preserve the validated sequence fallback, and do not begin
-remote KV transfer or a custom llama.cpp block extension in this phase.
+Commit and push the locally hardened Phase 4 logical-block checkpoint, then
+validate the focused Rust property/transaction suite and live CUDA sequence
+fallback from a clean A100 pod with the HTTP port exposed and the public
+dashboard verified first. Preserve the Phase 3 descriptor and do not advertise
+paged support, begin remote transfer, or add a custom llama.cpp block extension.

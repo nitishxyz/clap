@@ -5,6 +5,7 @@
 pub mod adapter;
 mod anchor;
 mod lifecycle;
+pub mod logical_block;
 mod radix;
 mod slot;
 
