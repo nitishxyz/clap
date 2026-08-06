@@ -725,7 +725,8 @@ Gates:
 
 Status: COMPLETE. Local verification and clean A100 CUDA sequence-fallback
 validation completed on 2026-08-06 at implementation SHA
-`9d1c2320d5b0a6b80d2095f267bc34b5698f0da9`. Rust defines physical adapter
+`9d1c2320d5b0a6b80d2095f267bc34b5698f0da9`; the checked-in evidence commit is
+`c20e765d1afd23cfc973aa0a4e7a369732fb4420`. Rust defines physical adapter
 contract v1 independently of coordinator policy. The checked adapter negotiates
 the exact contract version, validates operation support and request shape before
 physical mutation, requires exact format and transfer identity for import,
@@ -1210,7 +1211,7 @@ accelerator: CUDA, all 23 model layers and the 44 MiB KV buffer on CUDA0
 driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8; compute capability 8.0
 model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
 backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
-pod_deleted: pending evidence commit synchronization
+pod_deleted: yes, after evidence commit c20e765 was pushed and synchronized
 ```
 
 The clean pod cloned the public feature branch at the SHA above, installed
@@ -1269,6 +1270,8 @@ generation responses, dashboard/runtime summaries, public health/dashboard
 responses, VRAM samples, model digest, and per-file checksums. The frozen tar
 archive `/tmp/clap-phase3-evidence.tar.gz` has SHA-256
 `05621194cb3dad18e08c008c7de20b3ded24ef0b230572e6342ceafad60bb3dd`.
+After commit `c20e765` reached the public feature branch, RunPod confirmed pod
+`ao17x4nhl0z5bg` deleted and a subsequent lookup returned `404 not_found`.
 
 Known limits are the single-node, single-GPU, small-model fixture and public
 sequence-cache semantics. This validates contract negotiation, capability
@@ -1309,7 +1312,7 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Synchronize the Phase 3 evidence commit, delete the validation pod, and record
-the final evidence SHA and teardown state. Then scope Phase 4 around measured,
-authenticated, integrity-checked remote KV transfer without changing the
-validated sequence fallback or starting a custom llama.cpp block extension.
+Scope Phase 4 around reference-counted logical blocks and prove ownership,
+lease, accounting, copy-on-write, and abort invariants against an in-memory fake
+physical backend. Preserve the validated sequence fallback, and do not begin
+remote KV transfer or a custom llama.cpp block extension in this phase.
