@@ -19,7 +19,7 @@ const system = {
   content: `You are a prefix-cache validation model. Follow this synthetic harness and answer briefly.\n${harness}`,
 };
 const seed = [system, { role: "user", content: "Return marker ALPHA." }];
-const requests: Array<Record<string, unknown>> = [];
+const requests: Array<Awaited<ReturnType<typeof chat>>> = [];
 
 for (let index = 0; index < 3; index += 1) {
   requests.push(await chat(`repeat-${index}`, seed));
@@ -30,8 +30,12 @@ requests.push(await chat("branch-beta", [...history, { role: "user", content: "R
 requests.push(await chat("branch-gamma", [...history, { role: "user", content: "Return marker GAMMA." }]));
 
 const finalTelemetry = await pool.scrape();
-const queryDelta = sum(finalTelemetry.map((value) => value.prefixQueryDelta));
-const hitDelta = sum(finalTelemetry.map((value) => value.prefixHitDelta));
+const observedTelemetry = [
+  ...requests.flatMap((request) => request.telemetry),
+  ...finalTelemetry,
+];
+const queryDelta = sum(observedTelemetry.map((value) => value.prefixQueryDelta));
+const hitDelta = sum(observedTelemetry.map((value) => value.prefixHitDelta));
 if (queryDelta <= 0) throw new Error("vLLM did not report prefix-cache query tokens");
 if (hitDelta <= 0) throw new Error("vLLM did not report any native prefix-cache hit tokens");
 

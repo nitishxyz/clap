@@ -7,7 +7,7 @@
 
 namespace {
 
-clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable) {
+clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable, bool empty_physical = false) {
   return {
     2,
     1,
@@ -32,8 +32,11 @@ clap::llama::RetentionTelemetrySnapshot snapshot(bool nullable) {
     3,
     32768,
     4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-    !nullable, 268435456, 251658240, 100663296, 33554432,
-    150994944, 100663296, 50331648, 12288, 4096, 1,
+    !nullable, 268435456, 251658240,
+    empty_physical ? UINT64_C(0) : UINT64_C(100663296), 33554432,
+    150994944, empty_physical ? UINT64_C(0) : UINT64_C(100663296),
+    empty_physical ? UINT64_C(0) : UINT64_C(50331648),
+    12288, 4096, 1,
   };
 }
 
@@ -114,6 +117,13 @@ int main() {
   assert(nullable["estimated_retained_bytes"].is_null());
   assert(nullable["estimated_retained_bytes_source"] == "unavailable");
   assert(nullable["estimated_retained_bytes_basis"] == "not_observed");
+
+  const auto empty_physical = clap::llama::serialize_retention_telemetry(snapshot(false, true));
+  for (const auto* field : {"retained_bytes", "session_bytes", "anchor_bytes"}) {
+    assert(empty_physical[field].is_null());
+    assert(empty_physical[std::string(field) + "_source"] == "unavailable");
+    assert(empty_physical[std::string(field) + "_basis"] == "not_observed");
+  }
 
   const auto fixture_keys = keys(fixture_retention());
   const auto normal_keys = keys(normal);

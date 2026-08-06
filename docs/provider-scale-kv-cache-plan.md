@@ -1,10 +1,11 @@
 # Provider-Scale KV Cache Plan
 
-Status: Phases 1 through 4 are implemented and validated on clean A100 pods.
-Phases 5 through 7 are implemented locally as of 2026-08-06; clean CUDA,
-Apple-Silicon MLX, and vLLM workload validation is pending. The optional
-llama.cpp KV-cell inspection extension remains disabled by default until its
-clean A/B run satisfies the Phase 5 go/no-go rule.
+Status: Phases 1 through 7 are implemented and validated as of 2026-08-06.
+Phases 1 through 5 and 7 passed on a clean NVIDIA A100-SXM4-80GB pod; Phase 6
+passed its real-model ordinary-attention and hybrid-fallback matrix on Apple
+Silicon. The Phase 5 A/B result is a no-go for default enablement, so the
+optional llama.cpp KV-cell inspection extension remains opt-in and the public
+sequence adapter remains the default.
 This plan extends `docs/scale-plan.md` and
 `docs/rust-cache-coordinator-plan.md` from a strong single-host cache into a
 cache-aware inference fleet. It is intentionally phased so every checkpoint
@@ -867,8 +868,8 @@ Gates:
 
 ### Phase 5 — Provider-grade llama.cpp physical path
 
-Status: IMPLEMENTED LOCALLY; REMOTE A/B PENDING. The pinned llama.cpp now has
-an opt-in, read-only patch at
+Status: IMPLEMENTED AND VALIDATED; DEFAULT ENABLEMENT NO-GO. The pinned
+llama.cpp has an opt-in, read-only patch at
 `native/llama/patches/kv-cache-view-v1.patch`. It exposes ordinary-attention KV
 cell IDs, positions, sequence reference counts, allocated/payload bytes, exact
 unique resident bytes, shared bytes, and per-sequence referenced bytes. It
@@ -884,6 +885,22 @@ existing `sequence` descriptor with unknown measured bytes. Focused builds and
 tests pass in both modes. The extension has no mutation, allocation,
 serialization, sampler, model-loading, or kernel code and introduces no
 export/import claim.
+
+The clean A100 A/B used the same TinyLlama Q3_K_M model, 1,586-token synthetic
+prompt, seven-request repeat/continue/branch workload, CUDA architecture 80,
+and server settings in both builds. All seven completion hashes matched. The
+unmodified build advertised `sequence` / `llama-sequence` with unknown byte
+accounting; the extension advertised `paged` / `llama-kv-cell`, one-token
+blocks, and exact accounting. Warm median request time was 40.2399767190218 ms
+for the baseline and 38.3288748562336 ms for the extension, a 4.749% reduction.
+That single-run change is not a material provider-scale gain under the go/no-go
+rule, so `CLAP_LLAMA_KV_CACHE_VIEW` remains disabled by default.
+
+The first extension workload also caught an honesty defect: absent runtime
+physical-retention observations were serialized as measured zero. Zero-valued
+physical byte fields are now treated as unavailable until a positive allocator
+measurement exists, and an empty-observation regression fixture covers this
+case. The rebuilt extension then passed the exact paged-adapter workload.
 
 Deliverables:
 
@@ -965,7 +982,7 @@ Gates:
 
 ### Phase 7 — Native paged-engine integrations
 
-Status: IMPLEMENTED LOCALLY FOR vLLM; REMOTE CUDA VALIDATION PENDING. The new
+Status: IMPLEMENTED AND VALIDATED ON CUDA FOR vLLM. The new
 `@clap/runtime-vllm` package is a non-allocating HTTP adapter for externally
 managed vLLM replicas. It probes each concrete replica's `/health`, `/version`,
 `/v1/models`, `/openapi.json`, and `/metrics`; rejects model mismatch and
@@ -981,6 +998,21 @@ native hit telemetry. When an external KV connector is observed, same-replica
 affinity is weakened rather than treated as authoritative. vLLM retains all
 block allocation, eviction, transfer, and connector ownership; no development,
 cache-reset, Python-internal, import, or export API is used.
+
+Clean A100 validation used vLLM 0.26.0 and two independently managed
+`TinyLlama/TinyLlama-1.1B-Chat-v1.0` replicas on one GPU. Prefix caching was
+enabled with SHA-256 hashing, `cache_salt` was present in the live OpenAPI
+schema, and Clap discovered 16-token native blocks with capacities of 1,592,208
+and 1,403,344 tokens. A fresh share identity produced a cold first request,
+warm repeats, and traffic on both replicas. Across five requests the native
+counters reported 7,837 queried prefix tokens and 4,656 hit tokens, for a
+token-weighted hit ratio of 0.5941048870741356. External connector counters
+remained zero, as expected for two independent local allocators.
+
+The live run exposed a probe-only accounting bug: the script checked only the
+zero-delta scrape immediately after its final per-request scrape. It now sums
+all per-request telemetry deltas plus the final scrape, preserving the adapter's
+counter semantics without changing vLLM allocation or routing ownership.
 
 Deliverables:
 
@@ -1546,6 +1578,29 @@ paged engine, exact llama.cpp block bytes, multi-GPU movement, remote transfer,
 or comparative density/throughput. Those remain later phases and require their
 own measurements and fail-closed capability negotiation.
 
+### Phases 5-7 validation record (2026-08-06)
+
+```text
+validated_base_git_sha: 9d56a65
+branch: feat/provider-scale-kv-cache
+hardware: RunPod NVIDIA A100-SXM4-80GB, compute capability 8.0
+llama_model: tinyllama-Q3_K_M.gguf, sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
+llama_ab: 7/7 completion hashes matched; warm median 40.2399767190218 ms baseline, 38.3288748562336 ms extension
+phase5_decision: no-go for default enablement; opt-in extension and fallback retained
+mlx_models: mlx-community/SmolLM-135M-Instruct-4bit and fdtn-ai/antares-1b
+vllm: 0.26.0; two TinyLlama/TinyLlama-1.1B-Chat-v1.0 replicas; 16-token native blocks
+vllm_fresh_salt_result: 7,837 prefix-query tokens; 4,656 hit tokens; ratio 0.5941048870741356
+evidence: 46 files plus SHA256SUMS synchronized and verified locally before teardown
+pod_deletion: pending final pushed checkpoint
+```
+
+Before any model workload, both the public health endpoint and production
+dashboard HTML passed. The final evidence set includes the Phase 5 baseline and
+extension JSON, A/B comparison, fixed telemetry build logs, vLLM installation
+and replica logs, live prefix metrics, the fresh-salt Phase 7 JSON, hardware and
+model digests, and a checksum manifest. The ignored local preservation copy is
+under `.clap/evidence/provider-scale-kv-cache-2026-08-06/`.
+
 ## Success criteria
 
 Clap reaches provider-scale cache maturity when:
@@ -1577,9 +1632,6 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Run the documented Phase 5-7 clean-hardware matrix. Compare the opt-in
-llama.cpp KV-cell view against the unmodified CUDA build at equal model,
-context, memory, and workload; run the MLX COW correctness/churn matrix on
-Apple Silicon; and run the vLLM native-prefix adapter against two pinned CUDA
-replicas. Record the Phase 5 go/no-go, synchronize evidence, verify the public
-dashboard, and delete paid infrastructure before beginning Phase 8.
+Push the final Phase 5-7 checkpoint, delete and verify deletion of the paid A100
+pod, then begin Phase 8 only from the default-disabled llama.cpp extension and
+the validated backend-neutral adapter contracts.

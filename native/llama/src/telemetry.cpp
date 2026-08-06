@@ -41,11 +41,18 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
       snapshot.active_policy.context_capacity > 0 &&
       snapshot.active_policy.per_active_reserve_cells > 0 &&
       snapshot.active_policy.per_active_reserve_bytes > 0;
-  const auto measured_or_null = [&](uint64_t bytes) {
-    return snapshot.physical_cache_observed ? json(bytes) : json(nullptr);
+  const auto measured_available = [&](uint64_t bytes) {
+    return snapshot.physical_cache_observed && bytes > 0;
   };
-  const char* physical_source = snapshot.physical_cache_observed ? "measured" : "unavailable";
-  const char* physical_basis = snapshot.physical_cache_observed ? "runtime_allocator" : "not_observed";
+  const auto measured_or_null = [&](uint64_t bytes) {
+    return measured_available(bytes) ? json(bytes) : json(nullptr);
+  };
+  const auto measured_source = [&](uint64_t bytes) {
+    return measured_available(bytes) ? "measured" : "unavailable";
+  };
+  const auto measured_basis = [&](uint64_t bytes) {
+    return measured_available(bytes) ? "runtime_allocator" : "not_observed";
+  };
   return json{
     {"max_active", snapshot.max_active},
     {"queued", snapshot.queued},
@@ -86,14 +93,14 @@ nlohmann::json serialize_retention_telemetry(const RetentionTelemetrySnapshot& s
     {"retained_sessions", snapshot.retained_sessions},
     {"retained_anchors", snapshot.retained_anchors},
     {"retained_bytes", measured_or_null(snapshot.physical_unique_resident_bytes)},
-    {"retained_bytes_source", physical_source},
-    {"retained_bytes_basis", physical_basis},
+    {"retained_bytes_source", measured_source(snapshot.physical_unique_resident_bytes)},
+    {"retained_bytes_basis", measured_basis(snapshot.physical_unique_resident_bytes)},
     {"session_bytes", measured_or_null(snapshot.physical_session_referenced_bytes)},
-    {"session_bytes_source", physical_source},
-    {"session_bytes_basis", physical_basis},
+    {"session_bytes_source", measured_source(snapshot.physical_session_referenced_bytes)},
+    {"session_bytes_basis", measured_basis(snapshot.physical_session_referenced_bytes)},
     {"anchor_bytes", measured_or_null(snapshot.physical_anchor_referenced_bytes)},
-    {"anchor_bytes_source", physical_source},
-    {"anchor_bytes_basis", physical_basis},
+    {"anchor_bytes_source", measured_source(snapshot.physical_anchor_referenced_bytes)},
+    {"anchor_bytes_basis", measured_basis(snapshot.physical_anchor_referenced_bytes)},
     {"evicted_bytes", nullptr},
     {"evicted_bytes_source", "unavailable"},
     {"evicted_bytes_basis", "not_observed"},

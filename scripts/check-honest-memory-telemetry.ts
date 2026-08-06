@@ -24,7 +24,8 @@ requireText("packages/worker-protocol/src/schemas.ts", "memory bytes require sou
 requireText("packages/api/src/schemas.ts", "retainedBytes: z.number().int().nonnegative().nullable()", "nullable public retained bytes");
 requireText("packages/api/src/schemas.ts", "estimatedRetainedBytes", "separate public estimate");
 requireText("native/llama/src/telemetry.cpp", "measured_or_null(snapshot.physical_unique_resident_bytes)", "GGUF conditional measured retained bytes");
-requireText("native/llama/src/telemetry.cpp", "snapshot.physical_cache_observed ? \"measured\" : \"unavailable\"", "GGUF measured/unavailable provenance");
+requireText("native/llama/src/telemetry.cpp", "snapshot.physical_cache_observed && bytes > 0", "GGUF positive measured-byte requirement");
+requireText("native/llama/src/telemetry.cpp", "measured_available(bytes) ? \"measured\" : \"unavailable\"", "GGUF measured/unavailable provenance");
 requireText("native/llama/src/telemetry.cpp", "{\"estimated_retained_bytes\"", "GGUF separate estimate");
 requireText("native/llama/tests/telemetry.test.cpp", "normal[\"retained_bytes_source\"] == \"measured\"", "GGUF measured regression test");
 requireText("native/llama/tests/telemetry.test.cpp", "nullable[\"retained_bytes\"].is_null()", "GGUF fallback unavailable regression test");
