@@ -667,7 +667,8 @@ kernels.
 
 Status: COMPLETE. Local verification and clean A100 CUDA multi-replica
 validation completed on 2026-08-06 at implementation SHA
-`ea508176a8b4d403e811be1eb7d0c33897d4d507`. The initial deployment has opaque
+`ea508176a8b4d403e811be1eb7d0c33897d4d507`; the checked-in evidence commit is
+`f42a407ac48263b52d45a2d4e54778f380c2f609`. The initial deployment has opaque
 stable worker IDs, generation-aware heartbeats, a bounded in-memory
 session/prefix location directory, compatibility isolation by physical model
 and keyed namespace, deterministic sticky fallback, and a cost model combining
@@ -1054,7 +1055,7 @@ accelerator: CUDA, two local llama.cpp worker replicas loaded concurrently
 driver_runtime: NVIDIA driver 580.126.16; CUDA toolkit 12.8
 model_id_and_digest: tensorblock/tinyllama-GGUF tinyllama-Q3_K_M.gguf; sha256 d8025766484965a5499a760af3df0ea8999ab6e247dac21e9e06fef6e85b489a
 backend_and_version: llama.cpp 0ed235ea2c17a19fc8238668653946721ed136fd; Clap worker protocol v1
-pod_deleted: pending evidence commit and final synchronization
+pod_deleted: yes, after evidence commit f42a407 was pushed and synchronized
 ```
 
 The clean pod cloned the public feature branch, installed dependencies with Bun
@@ -1178,10 +1179,10 @@ Clap reaches provider-scale cache maturity when:
 
 ## Immediate next action
 
-Publish the Phase 2 evidence, delete the validation pod, then begin Phase 3 by
-extracting the current Rust/runtime operations into a versioned physical-cache
-adapter contract with explicit capability constraints and fail-closed
-conformance tests. Keep the current sequence API as the llama.cpp baseline and
-MLX at feature parity. Do not begin remote KV transfer or a custom llama.cpp
-block extension until adapter-level byte, sharing, and restore measurements
-show that physical cache density is the next material bottleneck.
+Begin Phase 3 by extracting the current Rust/runtime operations into a
+versioned physical-cache adapter contract with explicit capability constraints
+and fail-closed conformance tests. Keep the current sequence API as the
+llama.cpp baseline and MLX at feature parity. Do not begin remote KV transfer
+or a custom llama.cpp block extension until adapter-level byte, sharing, and
+restore measurements show that physical cache density is the next material
+bottleneck.
