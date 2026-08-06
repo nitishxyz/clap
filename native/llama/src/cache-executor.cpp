@@ -218,6 +218,12 @@ CacheAdmissionResult CacheExecutor::admit(const CacheAdmissionRequest& request) 
     } else if (view.operation == CLAP_CACHE_OPERATION_RESTORE &&
                view.reuse_tokens < request.tokens.size()) {
       resident = static_cast<std::size_t>(view.reuse_tokens);
+      // Restore is a whole-state copy. A hybrid model cannot then trim the
+      // copied state down, so a partial restore would leave the sequence
+      // holding more tokens than `resident` claims. Fail closed instead.
+      if (request.hybrid && resident != slots_[donor].tokens.size()) {
+        throw std::runtime_error("coordinator-selected restore could not be materialized");
+      }
       backend_->copy(static_cast<int32_t>(donor), static_cast<int32_t>(target), -1, -1);
     }
     if (request.commit_hook) request.commit_hook();

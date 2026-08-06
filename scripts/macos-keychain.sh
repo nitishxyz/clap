@@ -25,6 +25,13 @@ case "$command" in
     security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
     security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+    # codesign resolves --keychain through the user search list, so a keychain
+    # that only exists on disk is invisible to it ("The specified item could
+    # not be found in the keychain") even when find-identity can read it by
+    # path. Prepend ours, keeping the runner's existing keychains.
+    existing=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+    # shellcheck disable=SC2086
+    security list-keychains -d user -s "$keychain" $existing
     security find-identity -v -p codesigning "$keychain" | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null || {
       echo "error: APPLE_SIGNING_IDENTITY was not found in the imported certificate" >&2
       exit 1
@@ -32,6 +39,11 @@ case "$command" in
     printf 'CLAP_KEYCHAIN_PATH=%s\n' "$keychain"
     ;;
   cleanup)
+    remaining=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//' | grep -vF "$keychain" || true)
+    if [[ -n $remaining ]]; then
+      # shellcheck disable=SC2086
+      security list-keychains -d user -s $remaining
+    fi
     security delete-keychain "$keychain" 2>/dev/null || true
     rm -f "$keychain"
     ;;

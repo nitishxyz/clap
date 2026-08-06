@@ -176,8 +176,14 @@ bool ModelRuntime::load(const std::string& model_path) {
   // sequence with llama_memory_seq_cp: the first suffix decode fails batch
   // initialization. Continue/branch remain valid, but anchor restore must be
   // rejected before planning until llama.cpp exposes copy-safe shared state.
-  prompt_boundary_snapshots_ = !hybrid_ &&
-      (!has_architecture || std::string(architecture) != "gemma4");
+  //
+  // Hybrid/recurrent models need boundary snapshots more than anyone: they
+  // cannot trim a suffix, so a session slot that has decoded even one token
+  // past the prompt can never be continued from again. Whole-state
+  // llama_memory_seq_cp is supported for them (the branch path already relies
+  // on it), and an anchor is only ever restored whole, so snapshots are the
+  // one reuse mechanism available to them.
+  prompt_boundary_snapshots_ = !has_architecture || std::string(architecture) != "gemma4";
   has_encoder_ = llama_model_has_encoder(model_);
   kv_format_ = kv_type_name;
   unified_kv_ = context_params.kv_unified;

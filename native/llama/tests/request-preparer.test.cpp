@@ -6,7 +6,15 @@
 #include <string>
 
 int main() {
-  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) == 0);
+  // Hybrid models cannot trim, so boundary snapshots are their only route to
+  // prompt reuse across turns; they must be advertised, and they must never
+  // come bundled with the trim/partial-branch capabilities.
+  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) != 0);
+  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_RECURRENT_OR_HYBRID) != 0);
+  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_WHOLE_STATE_COPY) != 0);
+  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_PARTIAL_SUFFIX_TRIM) == 0);
+  assert((clap::llama::cache_capabilities(true, true) & CLAP_CACHE_CAP_PARTIAL_PREFIX_BRANCH) == 0);
+  assert((clap::llama::cache_capabilities(true, false) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) == 0);
   assert((clap::llama::cache_capabilities(false, false) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) == 0);
   assert((clap::llama::cache_capabilities(false, true) & CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT) != 0);
   auto budget = clap::llama::validate_request_budget(10, 100, 0, 20, 0);

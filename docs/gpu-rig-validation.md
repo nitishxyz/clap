@@ -208,8 +208,21 @@ log — `ggml_cuda_init: found 1 CUDA devices` plus
 | Qwen3.6-27B-GGUF | 4 x 4 | 0.0% (0/16) | 0% |
 
 The gemma row is the expected shape: turn 1 is a cold miss, every later turn
-trims and continues. Qwen3.6 never reuses anything because it is hybrid; see
-the hybrid gap in `docs/scale-plan.md` T2.5 for the root cause.
+trims and continues. Qwen3.6 reused nothing because hybrid models were denied
+prompt-boundary anchors; fixed by advertising
+`CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT` for them. Re-measured on the same
+pod with the rebuilt worker:
+
+| Model | Sessions x turns | Hit rate | Per-turn reuse |
+| --- | --- | --- | --- |
+| Qwen3.6-27B-GGUF | 1 x 5 | 80.0% (4/5) | 99% (`kind=anchor`) |
+| Qwen3.6-27B-GGUF | 4 x 4 | 100.0% (16/16) | 99% (`kind=anchor`) |
+
+`scripts/otto-session-probe.py` replays an agent-shaped transcript (tool
+schemas in the system prompt, growing tool/assistant turns) rather than
+filler text, and reaches 80% (4/5) at 82-93% per turn on the same model — the
+lower per-turn figure is real, because each agent turn appends a larger
+share of new tokens than the probe's one-line question.
 
 **Container memory.** `totalmem()` reported the 2016 GiB host inside a pod
 limited to 234 GiB. Fixed by `packages/server/src/container-memory.ts`.

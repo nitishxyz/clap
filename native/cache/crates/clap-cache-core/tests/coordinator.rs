@@ -1520,6 +1520,107 @@ fn generic_recent_conversation_retention_uses_empty_space_then_evicts_low_value_
     assert_ne!(pressure.evictions[0].slot, primary.target.slot);
 }
 
+/// Capabilities the llama worker reports for a recurrent/hybrid model: it can
+/// copy a whole state but can never trim a suffix off one.
+const HYBRID: u64 = Capabilities::WHOLE_STATE_COPY
+    | Capabilities::SAFE_BUSY_DONOR
+    | Capabilities::RELIABLE_RESIDENT_LENGTH
+    | Capabilities::RETAIN_LAST_TOKEN_FOR_LOGITS
+    | Capabilities::RECURRENT_OR_HYBRID
+    | Capabilities::PROMPT_BOUNDARY_SNAPSHOT;
+
+/// A hybrid session slot always grows past its prompt as it decodes, so the
+/// next turn shares only a proper prefix of it and continuation is impossible
+/// without a suffix trim. A prompt-boundary anchor is the only thing that can
+/// carry the shared prefix forward, so planning one is mandatory, not
+/// opportunistic. Regression for Qwen3.6-27B measuring 0% reuse on CUDA.
+#[test]
+fn hybrid_turns_reuse_the_prompt_boundary_anchor() {
+    let mut cache = manager(8);
+
+    // Turn 1: a long shared prefix, then this turn's own question.
+    let shared: Vec<i32> = (0..64).collect();
+    let mut turn1 = shared.clone();
+    turn1.extend([900, 901]);
+    let mut first = request(&turn1, namespace(1), 7, HYBRID);
+    first.stable_boundaries = &[64];
+    let plan = cache.plan(first).unwrap();
+    assert_eq!(plan.operation, Operation::Fresh);
+    assert_eq!(
+        plan.anchor_boundaries,
+        vec![64],
+        "a hybrid prompt must snapshot its stable boundary"
+    );
+    let session_slot = plan.target.slot;
+
+    // The slot ends up holding the prompt plus what the model generated.
+    let mut turn1_resident = turn1.clone();
+    turn1_resident.extend([950, 951, 952]);
+    commit_idle(&mut cache, &plan, turn1.len(), SlotState::Session);
+    cache
+        .advance(
+            session_slot,
+            cache.slot(session_slot).unwrap().generation,
+            &turn1_resident[turn1.len()..],
+            SlotState::Session,
+            false,
+            48,
+        )
+        .unwrap();
+    let anchor_slot = materialize_anchor(&mut cache, &shared, namespace(1), Scope::Project);
+
+    // Turn 2 shares the whole prefix but only part of the session slot.
+    let mut turn2 = turn1_resident.clone();
+    turn2.truncate(turn1.len());
+    turn2.extend([902, 903]);
+    let plan = cache.plan(request(&turn2, namespace(1), 7, HYBRID)).unwrap();
+    assert_eq!(
+        plan.operation,
+        Operation::Restore,
+        "hybrid reuse must come from the anchor, not the grown session slot"
+    );
+    assert_eq!(plan.donor.as_ref().unwrap().slot, anchor_slot);
+    assert_eq!(plan.reuse_tokens, shared.len());
+    cache.abort(plan.id).unwrap();
+}
+
+/// Without the snapshot capability the same conversation has nothing to reuse:
+/// this is the behavior that shipped, kept as an explicit contrast.
+#[test]
+fn hybrid_without_snapshots_cannot_reuse_anything() {
+    let mut cache = manager(8);
+    let no_snapshots = HYBRID & !Capabilities::PROMPT_BOUNDARY_SNAPSHOT;
+
+    let shared: Vec<i32> = (0..64).collect();
+    let mut turn1 = shared.clone();
+    turn1.extend([900, 901]);
+    let mut first = request(&turn1, namespace(1), 7, no_snapshots);
+    first.stable_boundaries = &[64];
+    let plan = cache.plan(first).unwrap();
+    assert!(plan.anchor_boundaries.is_empty());
+    let session_slot = plan.target.slot;
+    commit_idle(&mut cache, &plan, turn1.len(), SlotState::Session);
+    cache
+        .advance(
+            session_slot,
+            cache.slot(session_slot).unwrap().generation,
+            &[950, 951, 952],
+            SlotState::Session,
+            false,
+            48,
+        )
+        .unwrap();
+
+    let mut turn2 = turn1.clone();
+    turn2.extend([902, 903]);
+    let plan = cache
+        .plan(request(&turn2, namespace(1), 7, no_snapshots))
+        .unwrap();
+    assert_eq!(plan.operation, Operation::Fresh);
+    assert_eq!(plan.reuse_tokens, 0);
+    cache.abort(plan.id).unwrap();
+}
+
 #[test]
 fn candidate_diagnostics_are_deterministically_truncated_at_sixteen() {
     let mut cache = manager(17);

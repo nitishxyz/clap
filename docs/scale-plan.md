@@ -152,17 +152,18 @@ empty slot and later sessions whole-copy it. Verified on pod: 6-session
 stress wall 80.4s → 61.7s, 40.5% reuse ratio, one first-turn request
 branched 2k tokens off another session's in-flight prefill).
 
-Hybrid gap (Qwen3.6/Gated DeltaNet class), measured on an A100-80GB CUDA pod
-with Qwen3.6-27B-Q4_K_M and a 6.1k-token shared prompt: reuse is 0%, not
-partial. 16 requests over 4 sessions x 4 turns and 5 requests in a single
-session both reported `hit=false`, `reuseKind=null`, `retainedAnchors=0`.
-Gemma-4-E4B on the same worker and the same probe reused 99% per turn, so
-this is a hybrid-path gap, not a CUDA or coordinator problem.
+Hybrid models (Qwen3.6/Gated DeltaNet class) reuse through anchors, not
+continuation. They used to reuse nothing at all: measured on an A100-80GB
+CUDA pod with Qwen3.6-27B-Q4_K_M and a 6.1k-token shared prompt, reuse was
+0%, not partial — 16 requests over 4 sessions x 4 turns and 5 requests in a
+single session all reported `hit=false`, `reuseKind=null`,
+`retainedAnchors=0`, while gemma-4-E4B on the same worker reused 99% per
+turn.
 
-Root cause is two interlocking rules:
+Two rules interlocked to produce that:
 
-- `model-runtime.cpp` sets `prompt_boundary_snapshots_ = !hybrid_ && ...`, so
-  hybrid models never take a prompt-boundary anchor.
+- `model-runtime.cpp` set `prompt_boundary_snapshots_ = !hybrid_ && ...`, so
+  hybrid models never took a prompt-boundary anchor.
 - Generated tokens are appended to the slot's token list
   (`generation-stepper.cpp` -> `CacheExecutor::advance`), so at turn N+1 the
   slot holds `prompt_N + generated_N` while the new prompt only shares
@@ -171,11 +172,24 @@ Root cause is two interlocking rules:
   because the slot is longer, and hybrid slots never advertise
   `PARTIAL_SUFFIX_TRIM` because recurrent state cannot be trimmed.
 
-The fix is to stop the *logical* token list from running past the prompt
-boundary for hybrid models: retain a checkpoint whose tokens end at the last
-message boundary so the next turn's prefix equals the whole retained state
-and the existing `whole_state` continuation path applies. Attention models
-have no such constraint.
+Anchors are exactly the mechanism that survives both constraints: they are
+whole-state `llama_memory_seq_cp` copies, and they are only ever restored
+whole, so nothing is ever trimmed. Advertising
+`CLAP_CACHE_CAP_PROMPT_BOUNDARY_SNAPSHOT` for hybrid models closes the gap;
+`CacheExecutor::admit` additionally fails a partial hybrid restore closed,
+since a hybrid target cannot trim a copied state down to `resident`.
+
+Re-measured on the same pod and probe after the fix:
+
+| Case | Before | After |
+| --- | --- | --- |
+| 1 session x 5 turns | 0% (0/5) | 80% (4/5), 99%/turn |
+| 4 sessions x 4 turns | 0% (0/16) | 100% (16/16), 99%/turn |
+| agent-shaped session (`otto-session-probe.py`) | — | 80% (4/5), 82-93%/turn |
+
+TTFT on a continuing turn drops from 5.4s to 0.0s. Attention models are
+unaffected: they keep using continuation/branch and never consult anchors
+for the same-session case.
 
 Org harnesses share one system prompt + tool schema (10-40k tokens) across
 all sessions of a project. Store that prefix KV once (radix/prefix tree over
